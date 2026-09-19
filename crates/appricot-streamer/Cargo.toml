@@ -1,0 +1,26 @@
+[package]
+name = "appricot-streamer"
+description = "APPricot's per-window capture and input server, run inside the app's container."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+appricot-core.workspace = true
+appricot-encode.workspace = true
+appricot-proto.workspace = true
+appricot-x11.workspace = true
+axum.workspace = true
+futures-util.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tokio-tungstenite.workspace = true
+
+[lints]
+workspace = true

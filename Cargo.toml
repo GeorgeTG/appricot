@@ -1,0 +1,140 @@
+# APPricot: a per-window application streamer. This workspace is layer L1 (the streamer).
+# L2 (node) and L3 (broker) are documented in docs/architecture.md and have no code yet.
+#
+# Everything here builds and runs inside the dev container. Never run cargo on the host:
+#   docker compose run --rm dev just check
+
+[workspace]
+resolver = "3"
+# Dependencies point one way: proto <- core <- x11, and the streamer may depend on all of them
+# (docs/architecture.md §2.1). Nothing points back: neither proto nor core knows a backend or an
+# encoder. At bootstrap the edges that exist are core -> proto, x11 -> core and streamer -> proto;
+# encode has no sibling dependency yet, and gets one when it has code to share.
+members = [
+    "crates/appricot-proto",
+    "crates/appricot-core",
+    "crates/appricot-x11",
+    "crates/appricot-encode",
+    "crates/appricot-streamer",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+# The declared MSRV floor. These crates are meant to build INSIDE a host application's own
+# workspace, so the floor is a promise to that host: adopting APPricot must not force anyone to
+# raise their compiler. An embeddable library is the easier half of that pair. Raising the floor
+# is therefore a deliberate act, taken when a language feature earns it, never a side effect of
+# an unrelated edit. `resolver = "3"` is MSRV-aware: it "will prefer packages with a Rust
+# version that is less than or equal to your own Rust version"
+# (https://doc.rust-lang.org/cargo/reference/resolver.html, checked 2026-09-19).
+# The pinned BUILD toolchain is rust-toolchain.toml (1.94.1); that is not the floor.
+rust-version = "1.91"
+# The licence, decided in docs/adr/0002-licence.md: the Rust ecosystem's dual convention, so a
+# recipient picks the half their own policy takes. LICENSE-MIT and LICENSE-APACHE are at the
+# repository root and every crate inherits both keys below.
+license = "MIT OR Apache-2.0"
+authors = ["George Gougoudis <george_gougoudis@hotmail.com>"]
+# Publishing to crates.io is a SEPARATE decision, and it has not been taken: the wire protocol is
+# v0 and these crate names are unclaimed. The licence above does not wait on it. When the
+# decision comes, flipping this one key is the whole of what it costs.
+publish = false
+
+# ---------------------------------------------------------------------------
+# Shared dependency pins. Member crates inherit with `dep.workspace = true`, so a version
+# moves in one place. Every external pin names the version checked on crates.io and when.
+# ---------------------------------------------------------------------------
+[workspace.dependencies]
+# --- internal crates ---
+appricot-core = { path = "crates/appricot-core" }
+appricot-encode = { path = "crates/appricot-encode" }
+appricot-proto = { path = "crates/appricot-proto" }
+appricot-x11 = { path = "crates/appricot-x11" }
+
+# --- external ---
+# x11rb 0.14.0, released 2026-07-16, "MIT OR Apache-2.0", rust-version 1.68
+# (https://crates.io/api/v1/crates/x11rb, checked 2026-09-19). The crate has no default
+# features, so each extension is named. Its default connection, RustConnection, is pure Rust:
+# no libxcb, and no unsafe code unless the `allow-unsafe-code` feature is on, which it is not
+# (read in the 0.14.0 source, https://static.crates.io/crates/x11rb/x11rb-0.14.0.crate).
+# `composite` and `damage` pull in `xfixes`; `xfixes` pulls in `render` and `shape`.
+# The S1 backend will also need `shm` (pixels fetched through shared memory rather than the
+# socket), `randr` (screen geometry) and `xkb` (the keymap); they are added when code uses them.
+x11rb = { version = "=0.14.0", features = ["composite", "damage", "xfixes", "xtest", "randr"] }
+
+# --- wire protocol (protobuf) and the streamer server ---------------------------------------
+# Versions below are resolved by `just lock` and gated by `just deny` (the permissive allow
+# list of ADR-0002 §2, and nothing else). The
+# licences were not individually re-checked at pin time (unverified); the deny gate is the
+# authority. prost and its ecosystem are MIT OR Apache-2.0 by convention
+# (https://github.com/tokio-rs/prost/blob/master/LICENSE_APACHE, checked 2026-09-20);
+# tokio, axum, tracing, futures and tungstenite likewise dual-license.
+# prost: protobuf codegen for appricot-proto (wire messages from proto/appricot/v0).
+prost = "0.14"
+# prost-build: compiles wire.proto at build time; needs protoc (the dev image ships it,
+# PROTOC=/usr/bin/protoc).
+prost-build = "0.14"
+# tokio: the streamer's async runtime. `time` is for the resume grace and retry backoff,
+# never for frame pacing (frames are ack-driven).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+# axum: the streamer's HTTP server: the readiness endpoint and the WebSocket upgrade, bound
+# to loopback or a unix socket.
+axum = { version = "0.8", features = ["ws"] }
+# futures-util: stream combinators for the WebSocket pump.
+futures-util = "0.3"
+# tracing / tracing-subscriber: the streamer's diagnostics.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# tokio-tungstenite: a WebSocket CLIENT for the streamer's integration tests.
+tokio-tungstenite = "0.27"
+
+# ---------------------------------------------------------------------------
+# Lints. `just clippy` runs `cargo clippy --workspace --all-targets -- -D warnings`, so every
+# lint enabled here must pass on test code too.
+# ---------------------------------------------------------------------------
+[workspace.lints.rust]
+# x11rb's RustConnection is safe Rust, so no crate here needs unsafe code. A crate that ever
+# does must say why in an `#[allow]` next to the block, never by relaxing this line.
+unsafe_code = "deny"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# Pedantic, minus the lints that argue with this codebase's style more than they find bugs:
+pedantic = { level = "warn", priority = -1 }
+# Prose here names products (APPricot, KasmVNC, Xvfb, XFixes) that are not code.
+doc_markdown = "allow"
+# Every `Result`-returning function says what fails in its first paragraph instead.
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+# Re-exports flatten the modules, so `surface::SurfaceId` is never written out.
+module_name_repetitions = "allow"
+# Restriction lints worth having:
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+
+# ---------------------------------------------------------------------------
+# Dev profile: debuginfo is the disk. An internal benchmark (September 2026, a Rust workspace of
+# comparable shape built on a Windows host) found full debuginfo dominating target/ by an order
+# of magnitude, split between .pdb files and the incremental/ tree; the two settings below cut it
+# to a small fraction of that. Those figures are that workspace's, not this one's, and they are
+# quoted here only for the ratio, which is what survives a change of workspace.
+#
+# `line-tables-only` keeps file:line in panics and backtraces, which is what a failing test or
+# a RUST_BACKTRACE=1 trace is read for. It drops the type and variable tables, which only a
+# debugger needs. Dependencies get no debuginfo at all. `[profile.dev.package."*"]` matches
+# non-workspace packages only, so our crates keep their line tables. `[profile.test]` inherits
+# `dev`; do not give it its own `debug`, or every dependency is built twice.
+#
+# Need a debugger for one session? `CARGO_PROFILE_DEV_DEBUG=2 cargo build` restores full tables
+# for that build without touching this file.
+# ---------------------------------------------------------------------------
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

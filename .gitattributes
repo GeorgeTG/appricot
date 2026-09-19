@@ -1,0 +1,10 @@
+# LF everywhere, in the repository and in every checkout. The dev host is Windows and every
+# tool runs in Linux containers, where CRLF breaks scripts, and rustfmt (newline_style = Unix)
+# and the protocol-version test expect LF.
+* text=auto eol=lf
+
+# Binaries
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff2 binary

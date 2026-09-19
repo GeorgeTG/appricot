@@ -1,0 +1,12 @@
+[package]
+name = "appricot-encode"
+description = "APPricot tile encoders: captured pixels in, draw payloads out. Lossless first; the codec is open."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

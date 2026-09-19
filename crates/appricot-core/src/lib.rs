@@ -1,0 +1,40 @@
+//! The backend-agnostic window model of APPricot, shaped after Wayland's xdg-shell.
+//!
+//! # Responsibility
+//!
+//! - Surfaces: an id, a role, a size, a scale, damage, and explicit configure and ack.
+//! - Roles: a toplevel, or a popup placed by a positioner relative to its parent.
+//! - Per-surface damage accumulation, bounded.
+//! - Frame pacing by client credits, never by a timer.
+//! - The traits a capture backend implements: [`CaptureBackend`] and [`InputSink`]. Their
+//!   signatures are the frozen interface of implementation wave 1.
+//!
+//! # Not its responsibility
+//!
+//! - No X11 types and no Wayland types. A backend maps its windows into this model:
+//!   `appricot-x11` turns an override-redirect window into a popup and follows
+//!   `WM_TRANSIENT_FOR` to a parent.
+//! - No I/O: no sockets, no threads, no async runtime, no clock.
+//! - No encoding and no wire format. Those are `appricot-encode` and `appricot-proto`.
+//!
+//! In this model the host plays the compositor (it decides size, position, stacking and
+//! focus) and the streamed app plays the Wayland client. `docs/architecture.md` §4 explains
+//! the model.
+
+mod capture;
+mod damage;
+mod frame;
+mod geometry;
+mod input;
+mod pixels;
+mod role;
+mod surface;
+
+pub use capture::{CaptureBackend, SurfaceEvent};
+pub use damage::{Damage, MAX_DAMAGE_RECTS};
+pub use frame::FrameCredits;
+pub use geometry::{Point, Rect, Size};
+pub use input::{InputSink, KeyCode, KeyEvent, Keysym, PointerButton, PressState};
+pub use pixels::{CursorImage, PixelBuffer, PixelFormat};
+pub use role::{Anchor, Positioner, Role};
+pub use surface::{AckError, ConfigureSerial, Scale, Surface, SurfaceId};

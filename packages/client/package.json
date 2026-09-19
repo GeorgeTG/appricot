@@ -1,0 +1,32 @@
+{
+  "name": "@appricot/client",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT OR Apache-2.0",
+  "author": "George Gougoudis <george_gougoudis@hotmail.com>",
+  "description": "APPricot's embeddable browser client: connection, codec mirror, window registry, tile decode and input. Framework-agnostic; draws into canvases the host provides.",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.build.json --noEmit",
+    "lint": "eslint . --max-warnings 0",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.4",
+    "eslint": "10.11.0",
+    "jsdom": "30.1.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

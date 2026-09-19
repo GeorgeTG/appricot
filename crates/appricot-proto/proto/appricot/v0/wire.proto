@@ -1,0 +1,442 @@
+// The APPricot wire protocol, version 0.
+//
+// NORMATIVE FOR WAVE 1. This file is the single source of truth of the message set. The Rust
+// codec (crates/appricot-proto) and the TypeScript codec (packages/client/src/protocol.ts) are
+// both generated from, or hand-mirrored against, this file, and are proven against each other
+// by shared test vectors (crates/appricot-proto/testdata/vectors.json). The human-readable spec
+// is docs/protocol/v0.md. Change this file only together with both codecs, the vectors and the
+// spec; a change that breaks a decoder needs a protocol version bump.
+//
+// ENCODING
+//   - Transport: one WebSocket binary message per `Envelope`. No text frames, ever.
+//   - Field order on the wire is the field-number order below; both encoders emit fields in
+//     number order so an encode(decode(x)) round trip is byte-identical (protobuf does not
+//     promise this in general; this protocol does, and the vectors test it).
+//   - Byte order inside fixed-width fields is little-endian (protobuf varints and zigzag
+//     are defined by protobuf itself).
+//   - An Envelope whose oneof names no known field is a protocol violation: the peer closes
+//     the connection without a reply. There is no skip-by-length in v0.
+//   - An unknown enum value inside a known message is kept, never fatal; handlers ignore
+//     what they do not understand.
+//
+// AUTHENTICATION (rule 8, docs/protocol/README.md)
+//   The first client message is `Hello` and it carries the stream token for this leg. Nothing
+//   else is accepted before it. A token never travels in a URL. Failure closes with
+//   Bye(BYE_AUTH_FAILED).
+//
+// FLOW CONTROL (rule 5)
+//   Frames carry a per-surface sequence. The client acks what it has DRAWN. The server holds
+//   at most MAX_FRAME_CREDITS frames in flight per surface and coalesces damage while it
+//   waits. Nothing is sent on a timer.
+//
+// REATTACH (rule 11)
+//   A dropped socket does not end the session. The server keeps the session for
+//   RESUME_GRACE_MS after the socket dies. The client reconnects and presents the
+//   `resume_serial` from its first HelloReply; the server answers `resumed = true` and
+//   re-sends the whole window set plus one full_redraw Frame per living surface.
+//
+// ------------------------------------------------------------------------------------------
+// THE LIMITS TABLE (rule 3). Both peers enforce every row BEFORE allocating or looping; a
+// violation closes the connection with Bye(BYE_LIMIT_VIOLATION). The table is mirrored in
+// crates/appricot-proto/src/limits.rs and docs/protocol/v0.md; the numbers below win.
+//
+//   MAX_MESSAGE_BYTES        16,777,216   one WebSocket binary message (both directions)
+//   MAX_FRAME_CREDITS              4      frames sent and not yet acked, per surface
+//   MAX_SURFACES                  64      living surfaces in one session
+//   MAX_POPUPS_PER_PARENT         16      living popups of one parent surface
+//   MAX_SURFACE_WIDTH           1920      pixels
+//   MAX_SURFACE_HEIGHT          1200      pixels
+//   MAX_TILE_WIDTH               256      pixels
+//   MAX_TILE_HEIGHT              256      pixels
+//   MAX_TILES_PER_FRAME           48      tiles in one Frame
+//   MAX_TILE_BYTES            262,144     bytes of one tile payload (256*256*4 raw)
+//   MAX_TITLE_BYTES               512     SurfaceNew/SurfaceMetadata title
+//   MAX_APP_ID_BYTES              256     SurfaceNew/SurfaceMetadata app id
+//   MAX_CLIENT_NAME_BYTES          64     Hello.client_name
+//   MAX_SESSION_ID_BYTES           64     HelloReply.session_id
+//   MAX_BYE_TEXT_BYTES            256     Bye.text
+//   MAX_ERROR_TEXT_BYTES         1024     ServerError.text
+//   MAX_TOKEN_BYTES               256     Hello.stream_token
+//   MAX_KEY_CODE_BYTES             16     Key.code (physical key name, e.g. "KeyA")
+//   MAX_CODECS_OFFERED              8     entries in Hello.codecs
+//   MAX_CLIPBOARD_BYTES         65536     ClipboardSet.text, in UTF-8 bytes
+//   MAX_CURSOR_WIDTH              128     pixels
+//   MAX_CURSOR_HEIGHT             128     pixels
+//   MAX_CURSOR_BYTES            65536     bytes of CursorImage.argb_premultiplied
+//   RESUME_GRACE_MS             10000     how long a session outlives its socket
+//
+// TILE CODECS (stable ids on the wire; 0 is never a codec):
+//   1  RAW  uncompressed pixels, row-major, top to bottom, 4 bytes per pixel in the order
+//           blue, green, red, unused (the X11 32-bit ZPixmap byte order), no stride padding:
+//           exactly width * 4 bytes per row.
+//   2  QOI  the QOI image format (https://qoiformat.org, BSD-3-Clause; implemented from the
+//           published spec, no third-party code). The QOI header names 3- or 4-channel data;
+//           a 3-channel tile decodes to opaque pixels.
+//
+// KEYBOARD (rule: keysym first, physical code alongside)
+//   Key.keysym is an X11 keysym number. Key.code is the browser's physical key name
+//   (KeyboardEvent.code, https://www.w3.org/TR/uievents-code), ASCII, non-empty.
+//   Key.modifiers is a bitmask: 1 shift, 2 lock (caps), 4 control, 8 alt, 16 meta, 32 altgr.
+//
+// POINTER
+//   PointerButton.button uses the X button numbers: 1 left, 2 middle, 3 right. PointerAxis
+//   carries DISCRETE wheel steps; v0 has no smooth scrolling. All pointer coordinates are
+//   surface-local (rule 7): never a global screen position.
+// ------------------------------------------------------------------------------------------
+
+syntax = "proto3";
+
+package appricot.v0;
+
+// ===========================================================================
+// Shared vocabulary
+// ===========================================================================
+
+/// A position in surface-local pixels. `x` grows right, `y` grows down.
+message Point {
+  sint32 x = 1;
+  sint32 y = 2;
+}
+
+/// A size in pixels.
+message Size {
+  uint32 width = 1;
+  uint32 height = 2;
+}
+
+/// A rectangle in surface-local pixels: top-left corner plus size.
+message Rect {
+  sint32 x = 1;
+  sint32 y = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+}
+
+/// What a surface is for. Set once at SurfaceNew, never changed.
+enum Role {
+  /// A window the host shows inside its own chrome.
+  ROLE_TOPLEVEL = 0;
+  /// A short-lived surface tied to a parent: a menu, a combo list, a tooltip. No chrome.
+  ROLE_POPUP = 1;
+}
+
+/// An edge or corner of a rectangle, named as xdg_positioner names them.
+enum Anchor {
+  ANCHOR_CENTER = 0;
+  ANCHOR_TOP = 1;
+  ANCHOR_BOTTOM = 2;
+  ANCHOR_LEFT = 3;
+  ANCHOR_RIGHT = 4;
+  ANCHOR_TOP_LEFT = 5;
+  ANCHOR_BOTTOM_LEFT = 6;
+  ANCHOR_TOP_RIGHT = 7;
+  ANCHOR_BOTTOM_RIGHT = 8;
+}
+
+/// Where a popup goes, relative to its parent: xdg_positioner in miniature. The client
+/// clamps the placed rectangle to its parent's box plus a fixed margin whatever this says
+/// (ADR-0003 §5).
+message Positioner {
+  /// The rectangle in the parent's coordinates the popup is placed against.
+  Rect anchor_rect = 1;
+  /// The point on anchor_rect the popup hangs from.
+  Anchor anchor = 2;
+  /// The direction the popup grows from the anchor point.
+  Anchor gravity = 3;
+  /// A last shift, applied after anchor and gravity.
+  Point offset = 4;
+  /// The popup's size.
+  Size size = 5;
+}
+
+// ===========================================================================
+// Handshake and session lifecycle
+// ===========================================================================
+
+/// C -> S, and it MUST be the first message after the WebSocket is open. Carries the
+/// credential for this leg and negotiates the version and the tile codecs.
+message Hello {
+  /// The protocol version the client wants. The server refuses a version it does not
+  /// support with Bye(BYE_PROTOCOL_VERSION); it never guesses.
+  uint32 protocol_version = 1;
+  /// What the client is, for logs. Informational, untrusted text.
+  string client_name = 2;
+  /// The per-session stream token. Mints and checks are outside this protocol; here it is
+  /// opaque bytes that must match, or the connection closes with Bye(BYE_AUTH_FAILED).
+  bytes stream_token = 3;
+  /// Tile codec ids (see the limits table above) the client can decode, best first.
+  /// Empty means: only codec 1 (RAW), which every peer must decode.
+  repeated uint32 codecs = 4;
+  /// Present to reattach to a session that lost its socket: the resume_serial of the
+  /// HelloReply being resumed.
+  optional uint32 resume_serial = 5;
+}
+
+/// S -> C, the answer to Hello. The session exists from here on.
+message HelloReply {
+  /// The version both will speak: the client's if supported, else the server's best within
+  /// the same major. The client closes on a version it did not ask for.
+  uint32 protocol_version = 1;
+  /// Identifies the session in logs and support. Untrusted text for display.
+  string session_id = 2;
+  /// The frame-credit limit the server will honour per surface (MAX_FRAME_CREDITS).
+  uint32 max_frame_credits = 3;
+  /// The codecs the server will actually send, a subset of the client's offer.
+  repeated uint32 codecs = 4;
+  /// True when this connection resumed the session named by Hello.resume_serial. False,
+  /// and the session state starts fresh, when there was nothing (left) to resume.
+  bool resumed = 5;
+  /// Present when resuming is possible later: the serial to present in a future
+  /// Hello.resume_serial, and how long the session survives a lost socket.
+  optional uint32 resume_serial = 6;
+  optional uint32 resume_grace_ms = 7;
+}
+
+/// Either side, before closing the socket. After a Bye the socket closes; nothing follows.
+message Bye {
+  ByeReason reason = 1;
+  /// Untrusted text for display, bounded by MAX_BYE_TEXT_BYTES.
+  string text = 2;
+}
+
+enum ByeReason {
+  /// The peer closed on its own initiative (user action, shutdown).
+  BYE_PEER_CLOSED = 0;
+  /// The offered protocol version is not supported.
+  BYE_PROTOCOL_VERSION = 0x100;
+  /// A length or count broke the limits table.
+  BYE_LIMIT_VIOLATION = 0x101;
+  /// The stream token did not match.
+  BYE_AUTH_FAILED = 0x102;
+  /// A message arrived that the peer could not decode, or in an order it forbids.
+  BYE_PROTOCOL_VIOLATION = 0x103;
+  /// The session the client tried to resume is gone.
+  BYE_SESSION_GONE = 0x104;
+  /// The server is shutting down.
+  BYE_SERVER_SHUTDOWN = 0x105;
+}
+
+/// S -> C, immediately before a close the client caused. Nothing follows it either.
+message ServerError {
+  /// A stable code number. v0 codes: 1 limit violation, 2 unknown message, 3 bad order,
+  /// 4 decode failure, 5 internal error.
+  uint32 code = 1;
+  /// Untrusted text for display, bounded by MAX_ERROR_TEXT_BYTES.
+  string text = 2;
+}
+
+// ===========================================================================
+// Surfaces
+// ===========================================================================
+
+/// S -> C. A window appeared and becomes a surface the host shows.
+message SurfaceNew {
+  /// Unique within the session, never reused.
+  uint32 surface_id = 1;
+  Role role = 2;
+  /// A dialog's toplevel parent, or a popup's parent surface. Absent for a plain toplevel.
+  optional uint32 parent_id = 3;
+  /// The size the surface starts with.
+  Size size = 4;
+  /// Untrusted text, bounded by MAX_TITLE_BYTES.
+  string title = 5;
+  /// Untrusted text, bounded by MAX_APP_ID_BYTES.
+  string app_id = 6;
+  /// Present for ROLE_POPUP: how the popup is placed inside its parent.
+  optional Positioner positioner = 7;
+  /// Device pixels per logical pixel in 120ths: 120 is 1x, 240 is 2x. Never zero.
+  uint32 scale_120ths = 8;
+}
+
+/// S -> C. The surface is gone; its id is never reused.
+message SurfaceGone {
+  uint32 surface_id = 1;
+  SurfaceGoneReason reason = 2;
+}
+
+enum SurfaceGoneReason {
+  /// The app closed the window itself.
+  GONE_APP_CLOSED = 0;
+  /// Its parent went first; popups do not outlive parents.
+  GONE_PARENT_GONE = 1;
+  /// The session is ending and everything goes with it.
+  GONE_SESSION_END = 2;
+}
+
+/// S -> C. Title, app id or scale changed. Absent fields are unchanged.
+message SurfaceMetadata {
+  uint32 surface_id = 1;
+  optional string title = 2;
+  optional string app_id = 3;
+  optional uint32 scale_120ths = 4;
+}
+
+/// S -> C. The app asked for the keyboard focus (X11 `_NET_ACTIVE_WINDOW`). The host
+/// decides; nothing moves unless the host answers with FocusNotify.
+message FocusAsk {
+  uint32 surface_id = 1;
+}
+
+/// S -> C. The app asked to resize itself (X11 ConfigureRequest on its own window). The
+/// host decides; it answers with Configure if it agrees.
+message ResizeAsk {
+  uint32 surface_id = 1;
+  Size size = 2;
+}
+
+/// C -> S. The host proposes a size. The serial names this proposal; the server answers
+/// once the app has taken a size, with ConfigureAck carrying the same serial.
+message Configure {
+  uint32 surface_id = 1;
+  uint32 serial = 2;
+  Size size = 3;
+}
+
+/// S -> C. The app applied the configure named by the serial — or clamped it to its own
+/// minimum. The size here is the size the app really took; the host sizes its chrome to it.
+message ConfigureAck {
+  uint32 surface_id = 1;
+  uint32 serial = 2;
+  Size size = 3;
+}
+
+// ===========================================================================
+// Frames: pixels to the host
+// ===========================================================================
+
+/// One encoded piece of one frame. rect is in surface coordinates, before scale; the
+/// decoder scales it to the host's device pixels.
+message Tile {
+  Rect rect = 1;
+  /// A codec id from the limits table above. 0 is a protocol violation.
+  uint32 codec = 2;
+  /// The encoded pixels, bounded by MAX_TILE_BYTES.
+  bytes data = 3;
+}
+
+/// S -> C. The changed pixels of one surface since the previous acknowledged frame.
+/// sequence is per-surface, starts at 1 and rises by one; the client acks what it has
+/// drawn, closing the credit the frame spent. With full_redraw set the client drops every
+/// tile it holds for the surface and this frame's tiles cover the whole surface.
+message Frame {
+  uint32 surface_id = 1;
+  uint32 sequence = 2;
+  bool full_redraw = 3;
+  repeated Tile tiles = 4;
+}
+
+/// C -> S. The client has drawn this frame; the server frees the credit. An ack for a
+/// sequence it does not hold is ignored, never fatal.
+message FrameAck {
+  uint32 surface_id = 1;
+  uint32 sequence = 2;
+}
+
+/// S -> C. The cursor image changed. argb_premultiplied is width*height*4 bytes, row-major
+/// from the top, each pixel ARGB with premultiplied alpha, 8 bits per channel. serial
+/// rises monotonically; the client drops a cursor image whose serial it has already drawn.
+message CursorImage {
+  uint32 serial = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  uint32 hotspot_x = 4;
+  uint32 hotspot_y = 5;
+  bytes argb_premultiplied = 6;
+}
+
+/// S -> C. The cursor left the visible set; draw the host's own cursor again.
+message CursorGone {}
+
+// ===========================================================================
+// Input: host to app. All coordinates are surface-local (rule 7).
+// ===========================================================================
+
+/// C -> S. The pointer moved to (x, y) inside the surface. Coordinates may sit just
+/// outside a popup's edge while a drag crosses it; the backend clamps.
+message PointerMove {
+  uint32 surface_id = 1;
+  sint32 x = 2;
+  sint32 y = 3;
+}
+
+/// C -> S. A button changed. button is the X button number: 1 left, 2 middle, 3 right.
+message PointerButton {
+  uint32 surface_id = 1;
+  uint32 button = 2;
+  bool pressed = 3;
+}
+
+/// C -> S. The wheel moved by whole steps. steps_y negative is up, positive is down;
+/// steps_x negative is left, positive is right.
+message PointerAxis {
+  uint32 surface_id = 1;
+  sint32 steps_x = 2;
+  sint32 steps_y = 3;
+}
+
+/// C -> S. A key changed. keysym is an X11 keysym; code is the physical key name from
+/// KeyboardEvent.code; modifiers is the client's modifier bitmask (see the table above).
+message Key {
+  uint32 keysym = 1;
+  string code = 2;
+  bool pressed = 3;
+  uint32 modifiers = 4;
+}
+
+/// C -> S. The host moved its focus to this surface. Only this message moves focus.
+message FocusNotify {
+  uint32 surface_id = 1;
+}
+
+/// C -> S. Focus left every APPricot surface. The server releases every key and button it
+/// holds for the session, so the app cannot keep a key stuck down.
+message BlurRelease {}
+
+/// C -> S. The host allows a paste: the streamer owns the CLIPBOARD selection and serves
+/// this text to the app as UTF8_STRING. Bounded by MAX_CLIPBOARD_BYTES.
+message ClipboardSet {
+  string text = 1;
+}
+
+/// S -> C. The app pasted and the streamer holds no clipboard text. The host decides
+/// whether to answer; the answer, if any, is a later ClipboardSet.
+message ClipboardAsk {}
+
+/// C -> S. The host user closed this window's chrome. It is a request: the streamer asks
+/// the app (WM_DELETE_WINDOW) and the app decides.
+message CloseRequest {
+  uint32 surface_id = 1;
+}
+
+// ===========================================================================
+// The envelope: one per WebSocket binary message.
+// ===========================================================================
+
+message Envelope {
+  oneof body {
+    Hello hello = 1;
+    HelloReply hello_reply = 2;
+    Bye bye = 3;
+    ServerError server_error = 4;
+    SurfaceNew surface_new = 5;
+    SurfaceGone surface_gone = 6;
+    SurfaceMetadata surface_metadata = 7;
+    FocusAsk focus_ask = 8;
+    ResizeAsk resize_ask = 9;
+    Configure configure = 10;
+    ConfigureAck configure_ack = 11;
+    Frame frame = 12;
+    FrameAck frame_ack = 13;
+    CursorImage cursor_image = 14;
+    CursorGone cursor_gone = 15;
+    PointerMove pointer_move = 16;
+    PointerButton pointer_button = 17;
+    PointerAxis pointer_axis = 18;
+    Key key = 19;
+    FocusNotify focus_notify = 20;
+    BlurRelease blur_release = 21;
+    ClipboardSet clipboard_set = 22;
+    ClipboardAsk clipboard_ask = 23;
+    CloseRequest close_request = 24;
+  }
+}

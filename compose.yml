@@ -1,0 +1,86 @@
+# APPricot dev runtime. Every build, lint and test runs in the `dev` service; nothing runs on
+# the host:
+#
+#   docker compose build dev
+#   docker compose run --rm dev just check
+#   scripts/dev.sh just test          (or scripts/dev.ps1 just test)
+#
+# Use the host `docker compose` CLI for this project, and only that. A second compose driver
+# against the same project name — an editor integration or an agent tool that runs
+# `docker compose` from inside a helper container of its own — fights the first over one
+# container, and the loser's error message never says so.
+#
+# ---------------------------------------------------------------------------------------------
+# PORT SCHEME: none published.
+# ---------------------------------------------------------------------------------------------
+# The streamer binds loopback or a unix socket inside its container, and the gates need no
+# port at all. The dev host runs many other stacks at once. So a future port is chosen only
+# after checking what is taken:
+#
+#   netstat -ano | findstr LISTENING        (Windows host; `ss -ltnp` on Linux)
+#   docker ps --format '{{.Names}}\t{{.Ports}}'   (every running container's published ports)
+#
+# and is published through a variable with a free high default, bound to loopback:
+#
+#   ports:
+#     - "127.0.0.1:${APPRICOT_<SERVICE>_HOST_PORT:-NNNN}:<container port>"
+#
+# The variable keeps a collision debuggable: it names the service, and one .env line moves it.
+# ---------------------------------------------------------------------------------------------
+
+name: appricot
+
+services:
+  dev:
+    build:
+      context: docker/dev
+      args:
+        # CI sets these to the runner's uid/gid so the checkout stays writable. Locally the
+        # default 1000 is right for Docker Desktop's bind mounts.
+        APPRICOT_UID: ${APPRICOT_UID:-1000}
+        APPRICOT_GID: ${APPRICOT_GID:-1000}
+        # Debian's CDN alias by default. Set APPRICOT_DEBIAN_MIRROR to one of its backends
+        # (for example cdn-aws.deb.debian.org) when the default is slow from here; apt still
+        # checks Debian's signatures, so a mirror cannot forge a package.
+        DEBIAN_MIRROR: ${APPRICOT_DEBIAN_MIRROR:-deb.debian.org}
+    image: appricot-dev:local
+    # tini as PID 1: it forwards Ctrl-C to the command and reaps Xvfb and test children.
+    init: true
+    working_dir: /work
+    environment:
+      # Chosen by the image (docker/dev/Dockerfile); repeated so `docker compose config`
+      # shows where each cache lives.
+      CARGO_HOME: /cargo
+      CARGO_TARGET_DIR: /target
+      npm_config_store_dir: /pnpm-store
+    volumes:
+      # The repo. Source only: every generated tree below is a named volume on top of it.
+      - ./:/work
+      # Cargo's registry and git caches. CARGO_HOME is /cargo, not the image's
+      # /usr/local/cargo, so this volume never shadows the rustup proxies in /usr/local/cargo/bin.
+      - cargo_home:/cargo
+      # Build output. A target/ on the Windows bind mount is slow, and debuginfo makes it large
+      # enough to matter (Cargo.toml, the comment above [profile.dev]); a named volume keeps it
+      # inside the Docker Desktop VM, where the filesystem is native.
+      - target:/target
+      # pnpm's content-addressed store, shared by every run.
+      - pnpm_store:/pnpm-store
+      # One node_modules volume per workspace package, plus the root. They MUST cover the
+      # bind mount: pnpm's node_modules is a symlink farm, and symlinks created through a
+      # Windows bind mount are slow and unreliable. The package volumes hold relative links
+      # into the root volume's node_modules/.pnpm; both sides live in the container, so the
+      # links resolve. Measured working with pnpm's default isolated linker, so no
+      # node-linker=hoisted is needed. A new package under packages/ needs its own line here
+      # and its own directory in the Dockerfile.
+      - node_modules_root:/work/node_modules
+      - node_modules_client:/work/packages/client/node_modules
+      - node_modules_react:/work/packages/react/node_modules
+    # No ports. See the port scheme above.
+
+volumes:
+  cargo_home:
+  target:
+  pnpm_store:
+  node_modules_root:
+  node_modules_client:
+  node_modules_react:

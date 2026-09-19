@@ -1,0 +1,15 @@
+# rustfmt configuration for the APPricot workspace.
+#
+# STABLE OPTIONS ONLY. Nightly-only keys (`imports_granularity`, `group_imports`,
+# `wrap_comments`, ...) make `cargo fmt --all -- --check` fail on the stable toolchain that
+# `just fmt-check` runs. A formatting key that only a nightly compiler honours is not a style
+# choice, it is a broken gate.
+
+edition = "2024"
+style_edition = "2024"
+
+# rustfmt's own default is also 100; pinned so the value is a reviewable decision.
+max_width = 100
+
+# The repo is LF-only (.gitattributes); the dev host is Windows, the containers are Linux.
+newline_style = "Unix"

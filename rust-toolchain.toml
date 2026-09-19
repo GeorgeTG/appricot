@@ -1,0 +1,12 @@
+# The exact BUILD toolchain, so the dev container, CI and any other host build identically.
+# An exact version, not a channel: a toolchain that moves on its own turns an unrelated edit
+# into a red gate, and the day it happens is never the day you have to spare.
+#
+# This is not the MSRV. `rust-version = "1.91"` in Cargo.toml is the declared floor, the promise
+# to a host application that builds these crates in its own workspace. A future MSRV check runs
+# `rustup run 1.91.0 cargo check --workspace --locked`; `rustup run` bypasses this file on
+# purpose. Raising the floor moves Cargo.toml, this comment and that check together.
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

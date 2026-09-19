@@ -1,0 +1,129 @@
+# cargo-deny configuration: the mechanical gate for the Rust graph of
+# docs/adr/0002-licence.md, plus the supply-chain controls that go with it. Run inside the dev
+# container:
+#
+#   docker compose run --rm dev just deny
+#
+# which runs `cargo deny check advisories bans licenses sources`.
+#
+# A licence policy that lives only in prose is a policy nobody enforces; this file is the half a
+# machine can check. Written against cargo-deny 0.20.2, the newest release on crates.io
+# (https://crates.io/api/v1/crates/cargo-deny, checked 2026-09-19).
+# Schema reference: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+#
+# The npm graph needs its own licence gate (ADR-0002 §2: "Both graphs are gated"). This file
+# does not cover it.
+#
+# Add a dated line here each time the check is run against a changed graph. Do not quote an
+# old line as evidence for a graph it predates.
+#
+#   2026-09-20: advisories ok, bans ok, licenses ok, sources ok. First run after the five
+#   workspace crates began declaring `license = "MIT OR Apache-2.0"`; `cargo deny list` shows
+#   all five under both halves, so [licenses.private] no longer has to look away.
+
+[graph]
+# Deliberately EMPTY: every target triple is considered, so a copyleft crate cannot hide
+# behind a target-specific dependency. The dev host is Windows and the containers are
+# linux/amd64; x11rb pulls different crates on each.
+targets = []
+all-features = true
+
+# ---------------------------------------------------------------------------
+# advisories: the RUSTSEC tripwire
+# ---------------------------------------------------------------------------
+# Vulnerability advisories always fail; cargo-deny does not make them configurable.
+[advisories]
+# Cargo.lock is committed and the gates build `--locked`, so a yanked pin must break the
+# build, not warn.
+yanked = "deny"
+# A crate WE chose as a direct dependency must be maintained. Deep transitive ones are
+# reported but do not block a merge we cannot fix.
+unmaintained = "workspace"
+# Soundness holes are real advisories wherever they are.
+unsound = "all"
+# Escape hatch. Every entry MUST carry a reason; never add a bare id.
+#   { id = "RUSTSEC-0000-0000", reason = "why this cannot reach us" }
+ignore = []
+
+# ---------------------------------------------------------------------------
+# licenses: the permissive set of ADR-0002 §2, and nothing else
+# ---------------------------------------------------------------------------
+# There is no `deny` list: ANYTHING not in `allow` is denied, including unknown or
+# unparseable licences. Dual-licensed crates pass when one of their options is on the list.
+# Deliberately absent: GPL-*, LGPL-*, AGPL-* (copyleft), MPL-2.0, EPL-2.0, CDDL-* (file-level
+# copyleft), and source-available licences. The streamer ships inside other people's containers
+# and the client ships inside other people's pages, so every obligation in this graph becomes
+# theirs; a permissive-only graph is what keeps that obligation to a notice. ADR-0002 allows NO
+# exception at bootstrap; adding one needs an amendment to that ADR first.
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    # A distinct SPDX identifier from bare Apache-2.0: an extra permission, never a
+    # restriction. rustix 1.1.5 and linux-raw-sys 0.12.1, under x11rb, offer it among their
+    # options (https://crates.io/api/v1/crates/rustix, checked 2026-09-19).
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    # Reached through unicode-ident, which any proc-macro user pulls in: it declares
+    # "(MIT OR Apache-2.0) AND Unicode-3.0", and the AND makes Unicode-3.0 mandatory, not a
+    # choice. This graph does not reach it yet; it stays because ADR-0002 lists it. Verified
+    # 2026-09-20: cargo-deny 0.20.2 answers a listed licence no crate uses with
+    # `warning[license-not-encountered]`, not an error, so an entry kept ahead of need is free.
+    "Unicode-3.0",
+    "Zlib",
+    "0BSD",
+]
+# For crates that ship a licence FILE instead of an SPDX expression: the text must match the
+# canonical licence this closely. A near miss is reviewed, not guessed at.
+confidence-threshold = 0.93
+# Per-crate exceptions. Empty, and ADR-0002 keeps it empty until amended.
+# A `licenses.exceptions` entry takes only `crate`/`name`/`version` and `allow`; cargo-deny
+# 0.20.2's schema has no `reason` key there and rejects one, so reasons go in comments.
+exceptions = []
+# Deliberate, not the default: dev-dependencies are code we run in CI, so they are in scope.
+include-dev = true
+# Build scripts influence the artifact, so build-dependencies are in scope too.
+include-build = true
+
+[licenses.private]
+# Deliberately FALSE. Our own crates are `publish = false`, and cargo-deny would happily skip
+# them; but they now declare `license = "MIT OR Apache-2.0"` (Cargo.toml's [workspace.package]),
+# and that declaration is worth checking too. With `ignore = true` a crate that lost its licence
+# key, or grew a wrong one, would pass this gate in silence. False makes our own manifests part
+# of what the gate reads.
+ignore = false
+
+# ---------------------------------------------------------------------------
+# bans
+# ---------------------------------------------------------------------------
+[bans]
+# Duplicate versions are surfaced so the bloat stays visible, but they do not block a merge.
+multiple-versions = "warn"
+wildcards = "warn"
+# Our path dependencies carry no version. Every crate here is private (`publish = false`), so
+# they are not wildcards in any sense that matters.
+allow-wildcard-paths = true
+allow = []
+# Nothing banned by name yet. A ban is how "never, in any version" becomes real when the
+# licence gate alone would let an older, permissive release through.
+deny = []
+skip = []
+skip-tree = []
+
+# ---------------------------------------------------------------------------
+# sources: crates.io only
+# ---------------------------------------------------------------------------
+# A git dependency is unreviewed, unversioned code. Allowing one must be a conscious edit to
+# this file, not a drive-by Cargo.toml change.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[sources.allow-org]
+github = []
+gitlab = []
+bitbucket = []

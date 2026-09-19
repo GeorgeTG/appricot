@@ -1,0 +1,11 @@
+# Rust build output
+target/
+
+# npm
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Local secrets and overrides. Never commit them.
+.env

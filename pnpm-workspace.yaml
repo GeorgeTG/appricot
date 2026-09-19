@@ -1,0 +1,7 @@
+# The npm workspace: @appricot/client and @appricot/react.
+# Versions are pinned exactly in each package.json, checked on registry.npmjs.org on
+# 2026-09-19. Since pnpm 10.0.0, "Lifecycle scripts of dependencies are not executed during
+# installation by default" (https://github.com/pnpm/pnpm/releases/tag/v10.0.0, checked
+# 2026-09-19). None are allowed here; allowing one is a reviewed edit.
+packages:
+  - packages/*

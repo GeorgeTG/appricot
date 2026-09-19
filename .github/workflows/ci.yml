@@ -1,0 +1,90 @@
+# CI runs exactly what a developer runs: the same dev image, the same `just` recipes.
+# Nothing is installed on the runner except Docker, which GitHub's ubuntu images already have.
+#
+# LOCAL ONLY at bootstrap: this repository has no remote, so nothing here has ever run. It is
+# committed so the gates are written down in one place, and so the first push is green.
+#
+# The runner's checkout is owned by the runner's own uid, not 1000, and the container writes
+# into the bind mount, so each job builds the image for the uid it is running as. The uid is
+# read with `id -u` rather than hard-coded: a hosted runner, a self-hosted one and a container
+# job do not agree on it.
+#
+# actions/checkout v7.0.1 is the newest release
+# (https://github.com/actions/checkout/releases/tag/v7.0.1, 2026-07-20, checked 2026-09-19).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Advisories change without the code changing. A daily run catches a new RUSTSEC entry
+  # against a lockfile that is already merged.
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+# A second push to the same branch cancels the first: the older answer is about older code.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: just check
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Match the container uid to the checkout owner
+        run: |
+          set -euo pipefail
+          {
+            echo "APPRICOT_UID=$(id -u)"
+            echo "APPRICOT_GID=$(id -g)"
+          } >> "$GITHUB_ENV"
+
+      - name: Build the dev image
+        run: docker compose build dev
+
+      - name: Prove the uid matches the checkout
+        # If these disagree, every later step fails on a permission error that says nothing
+        # about its cause. Fail here instead, with both numbers printed.
+        run: |
+          set -euo pipefail
+          container_uid="$(docker compose run --rm dev id -u | tr -d '\r')"
+          echo "host uid $(id -u), container uid ${container_uid}"
+          test "$(id -u)" = "${container_uid}"
+
+      - name: just check
+        # fmt-check, clippy, test (the X11 integration test included, on the image's Xvfb),
+        # doc, deny, then the TypeScript gates.
+        run: docker compose run --rm dev just check
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Match the container uid to the checkout owner
+        run: |
+          set -euo pipefail
+          {
+            echo "APPRICOT_UID=$(id -u)"
+            echo "APPRICOT_GID=$(id -g)"
+          } >> "$GITHUB_ENV"
+
+      - name: Build the dev image
+        run: docker compose build dev
+
+      - name: cargo deny check
+        # A job of its own, although `just check` also runs it: this one is what the nightly
+        # schedule is for, and a licence or advisory failure is then a red job whose name says
+        # which gate broke.
+        run: docker compose run --rm dev just deny

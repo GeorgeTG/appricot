@@ -1,0 +1,90 @@
+# Glossary
+
+Words this project uses, in the sense it uses them. Where a word comes from Wayland or X11, the
+entry says so. The window-model words follow Wayland's xdg-shell
+([wayland.app/protocols/xdg-shell](https://wayland.app/protocols/xdg-shell)) whatever the backend
+is, as proposed in [ADR-0004](adr/0004-layers-window-model-and-first-backend.md).
+
+**App profile.** The preconfigured recipe for one application: container image, launch command,
+environment, mounts, resource caps, egress policy, clipboard policy and scale policy. A session
+is always started from a profile. The pilot application is the first profile. Node capacity is
+planned per profile, not per session slot, because the application dominates the cost of a
+session ([architecture.md §6](architecture.md#6-backend-matrix)). (L2.)
+
+**Backend.** The part of the streamer that talks to one kind of display server. It implements the
+`CaptureBackend` and `InputSink` traits of `appricot-core`. `appricot-x11` is the first. A
+Wayland backend may come later.
+
+**Broker.** The L3 service that places new sessions on nodes and issues tickets that name the
+owning node. It does not carry frames; an edge router does, by reading the ticket.
+
+**Configure / ack.** The two-step size and state handshake. The host proposes a configure with a
+serial; the streamer applies it to the app and sends an ack with the same serial and the size the
+app really took. It follows xdg-shell's `configure` / `ack_configure`. Here the host plays the
+compositor, so configure travels from the client library to the streamer.
+
+**Damage.** The rectangles of a surface that changed since the last frame. Only damaged areas are
+encoded and sent. With no damage, nothing is sent. From Wayland's `wl_surface.damage_buffer`; in
+X11 it comes from the DAMAGE extension.
+
+**First host application, pilot host application.** The web product that embeds APPricot's client
+first. It is private and lives in its own repository, and it is not named in this repository. Used
+as a stand-in for "the first real consumer" when a document needs one.
+
+**Host, host app.** The web product that embeds APPricot's client. It owns the page, the window
+chrome (title bars, frames, taskbar), focus, stacking and the user's identity.
+
+**Internal benchmark.** The measurement run this project's numbers come from, September 2026: a
+Qt6/xcb X11 application on Debian 12 under Docker, no GPU, compared across several display and
+transport paths. Every number quoted in these documents says it comes from there, with the method
+in a clause. A number with no such attribution and no checked URL is marked **(unverified)**.
+
+**Node.** One machine running the L2 session manager: app profiles, a container per session, a
+warm pool, a readiness gate, a reaper, egress scoping, audit, and the node proxy. A session lives
+on exactly one node for its whole life.
+
+**Pilot application.** The application APPricot streams first: a legacy X11 administration tool
+built on Qt6/xcb, with no web version. It opens several toplevel windows at once, which is why
+per-window streaming is the product. It supplies the first app profile and the subject of the
+internal benchmark. It is not named in this repository, and no design decision may depend on
+anything specific to it.
+
+**Popup.** A short-lived surface tied to a parent surface: a menu, a combo-box list, a tooltip. It
+has no host chrome and is placed by a positioner. In X11, an override-redirect window becomes a
+popup. The client keeps a popup inside its parent's box plus a small margin (proposed in
+[ADR-0003](adr/0003-untrusted-server-client.md)).
+
+**Positioner.** The rule that places a popup relative to its parent: an anchor rectangle inside the
+parent, a size, anchor and gravity, and what to do when the popup would not fit. From xdg-shell's
+`xdg_positioner`. For X11 the streamer derives it from root coordinates.
+
+**Seat.** Not used here. Some systems call a per-user application container a "seat"; this project
+says **session**. Wayland also has a `wl_seat`, a group of input devices belonging to one user;
+that sense is not used either. Outside this entry, the word standing for a session anywhere in
+this repository is a mistake.
+
+**Session.** One running instance of an app profile for one user: one container with its own
+network namespace, one display server, one streamer, one or more app processes, and the windows
+they map. It ends when the app's last process exits, when the reaper ends it, or when the host
+ends it. A session outlives the browser that opened it: a client may disconnect and reconnect.
+
+**Stream token.** The per-session secret the node (or, before L2, the host backend) hands to the
+streamer and presents on the loopback leg. It never reaches the browser.
+
+**Surface.** A rectangle of pixels with its own id, size, scale and damage. Every streamed window
+is a surface. A surface has exactly one role, set once: toplevel or popup. From Wayland's
+`wl_surface`.
+
+**Ticket.** A short-lived credential that lets one browser attach to one session. The host app's
+backend gets it from the session-ticket API and gives it to its page. It names the tenant, the
+user, the session and the node that owns the session, so an edge can route it and another node
+refuses it. The browser presents it in the first WebSocket message, not in the URL.
+
+**Toplevel.** A surface the host shows as a window with its own chrome. It may have a parent
+toplevel, as a dialog does. From xdg-shell's `xdg_toplevel`. In X11, a window the app maps through
+the window manager becomes a toplevel; `WM_TRANSIENT_FOR` gives its parent.
+
+**Warm pool.** Containers started ahead of time for a profile, idle and ready, so that a user's
+request only activates one. The first host application already runs one for its streamed-app
+sessions, and that design is re-implemented here rather than linked
+([architecture.md](architecture.md) §7).

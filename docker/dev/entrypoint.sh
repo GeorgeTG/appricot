@@ -10,6 +10,13 @@
 # -nolisten tcp: the server is reachable only through its unix socket in /tmp/.X11-unix, inside
 # this container. No -auth file: the only clients are this container's own processes.
 #
+# -noreset: Xvfb resets its state when its LAST client disconnects (the man page's RESET section).
+# `cargo test --workspace` runs several test binaries back to back in this one container, each an
+# X client; between two binaries there is a moment with no client at all, and a reset there wipes
+# the window manager's state out from under the next binary's tests (measured by the wave-1 X11
+# backend work, 2026-09-20). -noreset keeps the server - and the backend's ownership of the root
+# - alive across that gap.
+#
 # Two levers, and both are honoured rather than silently overridden:
 #
 #   -e APPRICOT_XVFB=0    no X server at all. DISPLAY is left exactly as it arrived, which
@@ -34,7 +41,7 @@ else
     screen="${APPRICOT_XVFB_SCREEN:-1400x900x24}"
     log="/tmp/xvfb${display#:}.log"
 
-    Xvfb "${display}" -screen 0 "${screen}" -nolisten tcp >"${log}" 2>&1 &
+    Xvfb "${display}" -screen 0 "${screen}" -nolisten tcp -noreset >"${log}" 2>&1 &
     xvfb_pid=$!
 
     # Poll for readiness: xdpyinfo exits 0 only once the server accepts a connection.

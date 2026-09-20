@@ -1,0 +1,67 @@
+/**
+ * The single seam between these React bindings and @appricot/client.
+ *
+ * No other file in this package imports '@appricot/client'; when the client SDK's shapes
+ * move, this file is the only place to adapt. What crosses the seam:
+ *
+ *   connectAppricot(url, { token: Uint8Array, reconnect? }) -> AppricotConnection
+ *   AppricotConnection: get status(), connect(), send(Envelope) (dropped while not open),
+ *                       close(), events (an Emitter: 'message', 'close', 'status', 'resumed')
+ *   new SurfaceRegistry(): get(id), list(), apply(Envelope),
+ *                          events (window-added/removed, metadata, cursor-changed,
+ *                          focus-ask, resize-ask, configure-acked, clipboard-ask)
+ *   SurfaceRenderer.attach(canvas, surfaceId, { registry, conn }) -> { detach() }
+ *   attachInput(element, surfaceId, { conn, isFocused() }) -> detach()
+ *
+ * Everything below is a re-export of those pins plus the two outbound messages these
+ * bindings construct themselves.
+ */
+import {
+  attachInput,
+  connectAppricot,
+  setTextOnly,
+  SurfaceRegistry,
+  SurfaceRenderer,
+} from '@appricot/client';
+import type { AppricotConnection, SurfaceRecord } from '@appricot/client';
+
+export { attachInput, connectAppricot, setTextOnly, SurfaceRegistry, SurfaceRenderer };
+export { MAX_SURFACE_HEIGHT, MAX_SURFACE_WIDTH } from '@appricot/client';
+export type {
+  AppricotConnection,
+  ConnectionStatus,
+  Envelope,
+  RegistryEvents,
+  SurfaceRecord,
+} from '@appricot/client';
+
+/** ROLE_TOPLEVEL of the wire Role enum (wire.proto); popups are ROLE_POPUP, 1. */
+export const ROLE_TOPLEVEL: SurfaceRecord['role'] = 0;
+
+/**
+ * Focus notification (wire.proto FocusNotify). Only this message moves focus.
+ *
+ * When focus LEAVES a surface these bindings send nothing: blur-release is session-wide (it
+ * releases every held key and button for the whole session), and only the host knows whether
+ * focus moved to another APPricot surface or left APPricot entirely. A host that wants to
+ * release sends the SDK's blur-release envelope itself through `send`. (attachInput also
+ * releases on its own when the whole window loses focus.)
+ */
+export function sendFocusNotify(conn: AppricotConnection, surfaceId: number): void {
+  conn.send({ kind: 'focusNotify', focusNotify: { surfaceId } });
+}
+
+/**
+ * Size proposal (wire.proto Configure). `serial` is this component's own counter, starting
+ * at 1 and rising by one; the wire allows any u32 serial from the client, and the server
+ * answers once with ConfigureAck carrying the same serial and the size the app really took.
+ */
+export function sendConfigure(
+  conn: AppricotConnection,
+  surfaceId: number,
+  serial: number,
+  width: number,
+  height: number,
+): void {
+  conn.send({ kind: 'configure', configure: { surfaceId, serial, size: { width, height } } });
+}

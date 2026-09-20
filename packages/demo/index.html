@@ -1,0 +1,57 @@
+<!doctype html>
+<!--
+  The APPricot demo host page.
+
+  Runs under a strict CSP with no 'unsafe-inline' and no 'unsafe-eval' in script-src
+  (ADR-0003 §3), so: no inline styles, no inline scripts, no inline event handlers — the
+  stylesheet is external, the one script is external, and all wiring happens through
+  addEventListener in src/main.ts. The <script type="importmap"> block below is data, not
+  code: the browser parses it as a resolution table and never executes it, so it is not a
+  CSP concern.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>APPricot demo</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "@appricot/client": "/client/index.js"
+        }
+      }
+    </script>
+    <script type="module" src="/dist/main.js"></script>
+  </head>
+  <body>
+    <!-- The toolbar: everything here is host chrome. The token INPUT field is the only
+         source of the stream token — it is never read from the URL or the query string. -->
+    <header id="toolbar">
+      <span class="brand">APPricot</span>
+      <span class="url" id="session-url">ws://…/session</span>
+      <label class="field">
+        Token
+        <input id="token" type="password" autocomplete="off" spellcheck="false" />
+      </label>
+      <button id="connect" type="button">Connect</button>
+      <button id="close" type="button" disabled>Close</button>
+      <label class="field toggle">
+        <input id="reconnect" type="checkbox" />
+        Reconnect
+      </label>
+      <!-- Minimized windows: one restore button per hidden window, its label the window's
+           own title — untrusted server text, written by src/main.ts through setTextOnly
+           (ADR-0003 §1), never markup. Empty (nothing minimized) it renders nothing. -->
+      <span id="minimized" class="minimized-strip"></span>
+      <span class="status">
+        <span id="status">idle</span>
+        <span id="session-id"></span>
+        <span id="windows-count"></span>
+      </span>
+    </header>
+
+    <!-- One floating window per streamed toplevel is appended here by src/main.ts. -->
+    <main id="windows"></main>
+  </body>
+</html>

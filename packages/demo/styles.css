@@ -1,0 +1,330 @@
+/*
+ * The demo host page's stylesheet. External by necessity: the page's CSP has style-src 'self'
+ * and no 'unsafe-inline' (ADR-0003 §3), so every style lives here.
+ *
+ * Palette from assets/branding (SVG masters): apricot #ffc776 / #f79b2e, ink #f2f6f8,
+ * slate #a9bac3, on a dark work surface.
+ */
+
+:root {
+  --apricot: #ffc776;
+  --apricot-deep: #f79b2e;
+  --ink: #f2f6f8;
+  --slate: #a9bac3;
+  --surface: #1d242c;
+  --surface-raised: #26303a;
+  --surface-sunken: #161c22;
+  --edge: #3a4754;
+  --focus-ring: var(--apricot);
+  --titlebar-h: 28px;
+  --popup-margin: 32px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: system-ui, sans-serif;
+  font-size: 14px;
+  color: var(--ink);
+  background:
+    radial-gradient(1200px 600px at 80% -10%, rgba(255, 199, 118, 0.08), transparent),
+    var(--surface-sunken);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* --- toolbar --------------------------------------------------------------------------- */
+
+#toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--edge);
+  flex: none;
+}
+
+#toolbar .brand {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--apricot);
+}
+
+#toolbar .url {
+  color: var(--slate);
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+
+#toolbar .field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--slate);
+}
+
+#toolbar input[type='password'] {
+  width: 220px;
+  padding: 4px 8px;
+  border: 1px solid var(--edge);
+  border-radius: 4px;
+  background: var(--surface-sunken);
+  color: var(--ink);
+  font-family: ui-monospace, monospace;
+}
+
+#toolbar button {
+  padding: 4px 14px;
+  border: 1px solid var(--edge);
+  border-radius: 4px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+#toolbar button:hover:not(:disabled) {
+  border-color: var(--apricot-deep);
+}
+
+#toolbar button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+#toolbar .toggle {
+  gap: 4px;
+}
+
+/* Minimized windows: one restore button each, labelled with the window's title (setTextOnly
+   in main.ts, ADR-0003 §1). Empty, the strip collapses out of the layout entirely. */
+#toolbar .minimized-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  flex: 0 1 auto;
+}
+
+#toolbar .minimized-strip:empty {
+  display: none;
+}
+
+#toolbar .minimized-strip .restore {
+  max-width: 160px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+#toolbar .status {
+  margin-left: auto;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--slate);
+}
+
+#toolbar .status #status.open {
+  color: var(--apricot);
+}
+
+#toolbar .status #status.error {
+  color: #ff8f6b;
+}
+
+/* --- the windows layer ------------------------------------------------------------------ */
+
+#windows {
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* --- one floating window ---------------------------------------------------------------- */
+
+.window {
+  position: absolute;
+  min-width: 120px;
+  min-height: 80px;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+
+.window.focused {
+  border-color: var(--focus-ring);
+  box-shadow:
+    0 0 0 1px var(--focus-ring),
+    0 14px 34px rgba(0, 0, 0, 0.55);
+}
+
+/* A minimized window is hidden, nothing more: the element (and with it the canvas the
+   renderer draws into, and the popup layer) stays in the DOM, so restoring is one class
+   away and the session never notices. display: none (not removal) is the whole mechanism. */
+.window.minimized {
+  display: none;
+}
+
+.window .titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--titlebar-h);
+  padding: 0 6px 0 10px;
+  background: var(--surface-raised);
+  border-bottom: 1px solid var(--edge);
+  border-radius: 6px 6px 0 0;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.window .titlebar .host-mark {
+  color: var(--apricot);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  flex: none;
+}
+
+/* The title and app id are untrusted server strings; main.ts sets them with setTextOnly, so
+   they are plain text nodes whatever the server sends (ADR-0003 §1). */
+.window .titlebar .title,
+.window .titlebar .app {
+  color: var(--ink);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.window .titlebar .app {
+  color: var(--slate);
+}
+
+.window .titlebar .app::after {
+  content: '·';
+  margin-left: 8px;
+  color: var(--slate);
+}
+
+.window .titlebar .grow {
+  flex: 1;
+}
+
+/* The title-bar buttons (minimize, close): small square controls, not drag handles. */
+.window .titlebar .winctl {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  line-height: 1;
+  border: 1px solid var(--edge);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--slate);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.window .titlebar .minimize:hover {
+  border-color: var(--apricot-deep);
+  color: var(--apricot);
+}
+
+.window .titlebar .close:hover {
+  border-color: #ff8f6b;
+  color: #ff8f6b;
+}
+
+/* The streamed content: one canvas per toplevel, sized by the host at one CSS pixel per
+   logical pixel; the SDK's renderer owns the backing store. */
+.window .content {
+  position: relative;
+  overflow: hidden;
+  border-radius: 0 0 6px 6px;
+  background: #0d1117;
+  touch-action: none;
+}
+
+.window .content > canvas.surface {
+  display: block;
+}
+
+.window.focused .content canvas.surface {
+  cursor: none; /* the streamed cursor is drawn instead */
+}
+
+.window:not(.focused) .content {
+  filter: saturate(0.85) brightness(0.9);
+}
+
+/* The cursor overlay: one small canvas the host positions at the pointer of the focused
+   window; hidden whenever no cursor image arrived. */
+.window .cursor-overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  display: none;
+}
+
+.window.focused.has-cursor .cursor-overlay {
+  display: block;
+}
+
+/* Popups: a layer that extends exactly --popup-margin past the parent's content box on every
+   side and clips at its own edges, so a popup can never show outside the parent-plus-margin
+   neighbourhood the SDK's clampPopup allowed (ADR-0003 §5). */
+.window .popup-layer {
+  position: absolute;
+  left: calc(-1 * var(--popup-margin));
+  top: calc(-1 * var(--popup-margin));
+  right: calc(-1 * var(--popup-margin));
+  bottom: calc(-1 * var(--popup-margin));
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.window .popup-layer .popup {
+  position: absolute;
+  pointer-events: auto;
+}
+
+.window .popup-layer .popup > canvas {
+  display: block;
+}
+
+/* The resize grip: host chrome, bottom-right corner. */
+.window .resize-grip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  touch-action: none;
+  background: linear-gradient(135deg, transparent 50%, var(--edge) 50%);
+  border-bottom-right-radius: 6px;
+}
+
+.window.focused .resize-grip {
+  background: linear-gradient(135deg, transparent 50%, var(--apricot-deep) 50%);
+}

@@ -139,6 +139,7 @@ RUN { getent group "${APPRICOT_GID}" >/dev/null || groupadd --gid "${APPRICOT_GI
       /work /work/node_modules /work/packages \
       /work/packages/client /work/packages/client/node_modules \
       /work/packages/react /work/packages/react/node_modules \
+      /work/packages/demo /work/packages/demo/node_modules \
       /cargo /target /pnpm-store /opt/corepack \
  && install -d -m 1777 /tmp/.X11-unix
 

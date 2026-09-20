@@ -79,5 +79,23 @@ web-test:
 web-build:
     pnpm build
 
-# Every TypeScript gate.
-web-check: web-install web-typecheck web-lint web-test
+# Every TypeScript gate. web-build comes first: packages/react resolves @appricot/client
+# through its exports map, which points at dist/, so the client must be built before any
+# other package can typecheck or test against it.
+web-check: web-install web-build web-typecheck web-lint web-test
+
+# --- the demo host page (manual) -------------------------------------------------------------
+# One container, ONE published loopback port. The demo's static server proxies the WebSocket
+# to the streamer's loopback bind inside the container, so the streamer never listens on a
+# non-loopback address. From the host:
+#
+#   docker compose run --rm -p "127.0.0.1:${APPRICOT_DEMO_HOST_PORT:-8390}:8390" dev just demo
+#
+# then open http://127.0.0.1:8390 and paste the token (printed below, or set
+# APPRICOT_DEMO_TOKEN). Ctrl-C stops both.
+demo:
+    @echo "demo token: ${APPRICOT_DEMO_TOKEN:-demo-token}"
+    pnpm build
+    APPRICOT_BIND=loopback:8391 APPRICOT_STREAM_TOKEN="${APPRICOT_DEMO_TOKEN:-demo-token}" \
+        cargo run --locked -p appricot-streamer -- serve &
+    node packages/demo/server.mjs

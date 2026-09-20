@@ -62,6 +62,11 @@ impl Default for Scale {
 pub struct ConfigureSerial(u32);
 
 impl ConfigureSerial {
+    /// Wraps a raw serial, as a session's shared counter produced it.
+    pub const fn new(raw: u32) -> Self {
+        Self(raw)
+    }
+
     /// The raw serial, as the wire carries it.
     pub const fn get(self) -> u32 {
         self.0
@@ -195,6 +200,11 @@ impl Surface {
         self.damage.take()
     }
 
+    /// Damages the whole surface, so the next frame planned for it is complete.
+    pub fn invalidate(&mut self) {
+        self.damage_all();
+    }
+
     /// Proposes a new size, and returns the serial the ack must name.
     ///
     /// A newer configure replaces one that is still waiting.
@@ -205,7 +215,19 @@ impl Surface {
         serial
     }
 
-    /// Records that the app applied the configure named by `acked`, and returns the new size.
+    /// Proposes a new size under a serial the caller allocated.
+    ///
+    /// A session that shares one serial counter across its surfaces hands the serial in; a
+    /// lone surface uses [`Surface::configure`], which allocates its own. The caller keeps
+    /// serials rising. Like [`Surface::configure`], a newer proposal replaces one that is
+    /// still waiting.
+    pub fn configure_with_serial(&mut self, serial: ConfigureSerial, size: Size) {
+        self.last_serial = serial.get();
+        self.pending = Some((serial, size));
+    }
+
+    /// Records that the app applied the configure named by `acked`, and returns the new
+    /// size.
     ///
     /// The surface takes the proposed size and its whole area is damaged. Fails with
     /// [`AckError::NothingPending`] when no configure waits, and with
@@ -223,6 +245,21 @@ impl Surface {
         Ok(size)
     }
 
+    /// Records that the app took `size`, and returns the serial that was pending, if any.
+    ///
+    /// `size` is what the app really did: the proposal, or the app's own clamp of it, which a
+    /// backend reports with [`SurfaceEvent::Resized`](crate::SurfaceEvent::Resized). The
+    /// surface takes `size` and its whole area is damaged, like
+    /// [`Surface::ack_configure`], whether a configure was waiting or the app resized itself.
+    /// Unlike an ack, a report of what happened cannot name a wrong serial, so nothing is
+    /// refused.
+    pub fn resolve_pending(&mut self, size: Size) -> Option<ConfigureSerial> {
+        let serial = self.pending.take().map(|(pending, _)| pending);
+        self.size = size;
+        self.damage_all();
+        serial
+    }
+
     fn bounds(&self) -> Rect {
         Rect::new(0, 0, self.size.width, self.size.height)
     }
@@ -236,7 +273,9 @@ impl Surface {
 
 #[cfg(test)]
 mod tests {
-    use crate::{AckError, Point, Positioner, Rect, Role, Scale, Size, Surface, SurfaceId};
+    use crate::{
+        AckError, ConfigureSerial, Point, Positioner, Rect, Role, Scale, Size, Surface, SurfaceId,
+    };
 
     fn toplevel(id: u32) -> Surface {
         let size = Size::new(400, 300);
@@ -284,6 +323,24 @@ mod tests {
         let serial = s.configure(Size::new(800, 600));
         s.ack_configure(serial).expect("first ack");
         assert_eq!(s.ack_configure(serial), Err(AckError::NothingPending));
+    }
+
+    #[test]
+    fn resolve_pending_takes_the_size_the_app_really_took() {
+        let mut s = toplevel(1);
+        s.configure_with_serial(ConfigureSerial::new(41), Size::new(800, 600));
+        // The app clamped the proposal to its own minimum.
+        assert_eq!(
+            s.resolve_pending(Size::new(800, 500)),
+            Some(ConfigureSerial::new(41))
+        );
+        assert_eq!(s.size(), Size::new(800, 500));
+        assert_eq!(s.take_damage(), vec![Rect::new(0, 0, 800, 500)]);
+        // No configure was waiting this time — the app resized itself — but the report is
+        // still the truth: the size was taken and the whole surface is damaged again.
+        assert_eq!(s.resolve_pending(Size::new(640, 480)), None);
+        assert_eq!(s.size(), Size::new(640, 480));
+        assert_eq!(s.take_damage(), vec![Rect::new(0, 0, 640, 480)]);
     }
 
     #[test]

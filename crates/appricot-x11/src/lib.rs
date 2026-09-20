@@ -13,6 +13,10 @@
 //! - Map X windows into the `appricot-core` model. An override-redirect window becomes a
 //!   popup, and `WM_TRANSIENT_FOR` names a parent (see [`classify`]).
 //!
+//! The backend itself is [`X11Backend::connect`]; the layout decision that shapes its
+//! window management — toplevels kept apart in a large root — is documented in the `wm`
+//! module.
+//!
 //! # Not its responsibility
 //!
 //! - The wire protocol, encoding, networking and window chrome.
@@ -34,6 +38,19 @@ use x11rb::protocol::damage::ConnectionExt as _;
 use x11rb::protocol::xfixes::ConnectionExt as _;
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::protocol::{composite, damage, xfixes, xtest};
+
+mod atoms;
+mod backend;
+mod capture;
+mod clipboard;
+mod cursor;
+mod error;
+mod input;
+mod keymap;
+mod wm;
+
+pub use backend::X11Backend;
+pub use error::BackendError;
 
 /// The lowest Composite version the backend accepts: 0.4.
 ///

@@ -8,8 +8,8 @@
 resolver = "3"
 # Dependencies point one way: proto <- core <- x11, and the streamer may depend on all of them
 # (docs/architecture.md §2.1). Nothing points back: neither proto nor core knows a backend or an
-# encoder. At bootstrap the edges that exist are core -> proto, x11 -> core and streamer -> proto;
-# encode has no sibling dependency yet, and gets one when it has code to share.
+# encoder. The edges that exist today: core -> proto, x11 -> core, encode -> core and
+# streamer -> proto/core/x11/encode.
 members = [
     "crates/appricot-proto",
     "crates/appricot-core",

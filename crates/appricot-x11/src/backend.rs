@@ -1,0 +1,1563 @@
+//! [`X11Backend`]: the `CaptureBackend` and `InputSink` implementation on X11.
+
+use std::collections::HashSet;
+
+use appricot_core::{
+    CaptureBackend, InputSink, KeyEvent, PixelBuffer, PixelFormat, Point, PointerButton,
+    PressState, Rect, Role, Size, SurfaceEvent, SurfaceId,
+};
+use x11rb::connection::Connection as _;
+use x11rb::cookie::VoidCookie;
+use x11rb::protocol::composite;
+use x11rb::protocol::composite::ConnectionExt as _;
+use x11rb::protocol::damage;
+use x11rb::protocol::damage::ConnectionExt as _;
+use x11rb::protocol::xfixes;
+use x11rb::protocol::xfixes::ConnectionExt as _;
+use x11rb::protocol::xproto as x;
+use x11rb::protocol::xproto::ConnectionExt as _;
+use x11rb::protocol::xtest::ConnectionExt as _;
+use x11rb::protocol::{ErrorKind, Event};
+use x11rb::rust_connection::RustConnection;
+use x11rb::{COPY_DEPTH_FROM_PARENT, COPY_FROM_PARENT, CURRENT_TIME, NONE};
+
+use crate::atoms::Atoms;
+use crate::capture::convert_zpixmap;
+use crate::clipboard::{Clipboard, latin1_decode, latin1_encode};
+use crate::cursor::cursor_image;
+use crate::error::BackendError;
+use crate::input::{HeldInput, VecPresses};
+use crate::keymap::{Keymap, XK_SHIFT_L, resolve_pressable};
+use crate::wm::{Layout, SizeHints, TrackedWindow, WindowKind, WindowTable};
+use crate::{MappedWindow, ParentCandidate, classify};
+
+// Predefined atoms named by value (the X protocol fixes them): `AnyPropertyType`, `ATOM`,
+// `WINDOW`, and the `PointerRoot` window. Everything else is interned through [`Atoms`].
+const XA_ANY: u32 = 0;
+const XA_ATOM: u32 = 4;
+const XA_WINDOW: u32 = 33;
+const POINTER_ROOT_WINDOW: u32 = 1;
+
+// XTEST speaks raw event codes.
+const X_KEY_PRESS: u8 = 2;
+const X_KEY_RELEASE: u8 = 3;
+const X_BUTTON_PRESS: u8 = 4;
+const X_BUTTON_RELEASE: u8 = 5;
+const X_MOTION_NOTIFY: u8 = 6;
+
+// X pointer buttons 1-3 are the logical buttons; 4-7 are the wheel steps.
+const BUTTON_LEFT: u8 = 1;
+const BUTTON_MIDDLE: u8 = 2;
+const BUTTON_RIGHT: u8 = 3;
+const WHEEL_UP: u8 = 4;
+const WHEEL_DOWN: u8 = 5;
+const WHEEL_LEFT: u8 = 6;
+const WHEEL_RIGHT: u8 = 7;
+
+/// The ICCCM `WM_STATE` value of a normal (not iconified) window.
+const WM_STATE_NORMAL: u32 = 1;
+
+/// The byte cap a title is cut to, mirroring `appricot-proto`'s `MAX_TITLE_BYTES` (512,
+/// provisional until the wire spec task fixes it).
+const TITLE_CAP: usize = 512;
+
+/// The byte cap an app id is cut to, mirroring `appricot-proto`'s `MAX_APP_ID_BYTES`
+/// (256, likewise provisional).
+const APP_ID_CAP: usize = 256;
+
+/// Everything the backend reads about a window before managing it.
+#[derive(Debug, Clone, Default)]
+struct WindowState {
+    has_delete: bool,
+    take_focus: bool,
+    title_net: Option<String>,
+    title_name: Option<String>,
+    app_id: String,
+    hints: SizeHints,
+    /// The raw window `WM_TRANSIENT_FOR` names, when the property is a real `WINDOW`; the
+    /// caller resolves it against the table, because only the table knows what is a toplevel.
+    transient_for: Option<x::Window>,
+}
+
+/// The S1 backend: window manager, capture and input on one X connection.
+///
+/// Build it with [`X11Backend::connect`] and drive it through the `CaptureBackend` and
+/// `InputSink` traits. No call blocks: the streamer drains events when the connection is
+/// readable, and spends input and frame credits when it has them.
+///
+/// The backend is the only window manager on the display — it takes `SubstructureRedirect`
+/// on the root at connect and fails when anyone else holds it. Its layout keeps toplevels
+/// apart inside the root; the wm module (private) documents that decision.
+#[derive(Debug)]
+pub struct X11Backend {
+    conn: RustConnection,
+    root: x::Window,
+    atoms: Atoms,
+    /// The invisible window that owns the CLIPBOARD selection for the backend.
+    owner_window: x::Window,
+    table: WindowTable,
+    layout: Layout,
+    clipboard: Clipboard,
+    held: HeldInput,
+    keymap: Keymap,
+    /// The toplevel the host last focused, if any.
+    focused: Option<SurfaceId>,
+    /// The surface pointer input was last aimed at, so raise-and-focus runs once per
+    /// target change rather than once per motion.
+    ensured: Option<SurfaceId>,
+    root_size: Size,
+    /// The bytes per pixel the server stores a pixmap of each depth at, from its
+    /// pixmap-format table: depth 24 is 32bpp on most servers, Xvfb included.
+    pixel_bpp: Vec<(u8, usize)>,
+    /// Override-redirect windows seen at creation, waiting to map.
+    or_pending: HashSet<x::Window>,
+    /// Override-redirect windows that mapped with no parentable ancestor and are not shown.
+    orphaned: HashSet<x::Window>,
+    /// Events produced at connect (adoption), drained before live ones.
+    pending: Vec<SurfaceEvent>,
+}
+
+impl X11Backend {
+    /// Connects to the X server and takes over the display.
+    ///
+    /// `display` names the display; `None` reads `$DISPLAY`. Beyond opening the connection
+    /// this:
+    ///
+    /// - proves the extensions are present ([`crate::probe_extensions`]),
+    /// - takes `SubstructureRedirect` on the root, failing with
+    ///   [`BackendError::NotWindowManager`] when another window manager is already there,
+    /// - starts the Composite `Manual` redirect of the root's subwindows and holds it for
+    ///   the connection's life — a redirect taken after the app maps reads stale pixels
+    ///   (docs/architecture.md §3.1),
+    /// - owns the `CLIPBOARD` selection through a window of its own, so every paste the
+    ///   app makes arrives here,
+    /// - selects XFixes cursor and selection notifications,
+    /// - reads the keyboard mapping, and
+    /// - adopts every window that is already mapped (a streamer reconnecting to a live
+    ///   session), reporting it on the first `drain_events`.
+    pub fn connect(display: Option<&str>) -> Result<Self, BackendError> {
+        let (conn, screen_num) = x11rb::connect(display)?;
+        let root = conn.setup().roots[screen_num].root;
+
+        crate::probe_extensions(&conn)?;
+        take_root(&conn, root)?;
+
+        conn.composite_redirect_subwindows(root, composite::Redirect::MANUAL)?
+            .check()?;
+
+        let atoms = Atoms::intern(&conn)?;
+        let owner_window = create_selection_owner(&conn, root, atoms.clipboard)?;
+        select_xfixes(&conn, root, atoms.clipboard)?;
+        announce_ewmh(&conn, root, owner_window, &atoms)?;
+
+        let keymap = fetch_keymap(&conn)?;
+        let root_geometry = conn.get_geometry(root)?.reply()?;
+        let root_size = Size::new(
+            u32::from(root_geometry.width),
+            u32::from(root_geometry.height),
+        );
+
+        let pixel_bpp: Vec<(u8, usize)> = conn
+            .setup()
+            .pixmap_formats
+            .iter()
+            .map(|format| (format.depth, usize::from(format.bits_per_pixel) / 8))
+            .collect();
+        let mut backend = Self {
+            conn,
+            root,
+            atoms,
+            owner_window,
+            table: WindowTable::new(),
+            layout: Layout::new(),
+            clipboard: Clipboard::default(),
+            held: HeldInput::new(),
+            keymap,
+            focused: None,
+            ensured: None,
+            root_size,
+            pixel_bpp,
+            or_pending: HashSet::new(),
+            orphaned: HashSet::new(),
+            pending: Vec::new(),
+        };
+        backend.adopt_existing()?;
+        Ok(backend)
+    }
+
+    /// Adopts every mapped toplevel that predates the connection.
+    fn adopt_existing(&mut self) -> Result<(), BackendError> {
+        let children = self.conn.query_tree(self.root)?.reply()?.children;
+        let mut adopted = Vec::new();
+        for window in children {
+            // A gone window answers with an error; there is nothing to adopt.
+            let Ok(attrs) = self.conn.get_window_attributes(window)?.reply() else {
+                continue;
+            };
+            if attrs.map_state == x::MapState::VIEWABLE && !attrs.override_redirect {
+                self.manage_window(window, false, &mut adopted)?;
+            }
+        }
+        self.pending.append(&mut adopted);
+        Ok(())
+    }
+
+    // --- reading the server ----------------------------------------------------------------
+
+    /// The window's geometry in root coordinates, or `None` when it is already gone.
+    fn window_geometry(&self, window: x::Window) -> Result<Option<Rect>, BackendError> {
+        match self.conn.get_geometry(window)?.reply() {
+            Ok(geo) => Ok(Some(Rect::new(
+                i32::from(geo.x),
+                i32::from(geo.y),
+                u32::from(geo.width),
+                u32::from(geo.height),
+            ))),
+            // Only a gone window answers a geometry query with an error.
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Reads a property as raw bytes; a gone window or a failed read is simply no data.
+    fn read_property(
+        &self,
+        window: x::Window,
+        property: u32,
+        long_len: u32,
+    ) -> Result<Option<x::GetPropertyReply>, BackendError> {
+        Ok(self
+            .conn
+            .get_property(false, window, property, XA_ANY, 0, long_len)?
+            .reply()
+            .ok())
+    }
+
+    /// Everything read about a window before managing it. The requests are written
+    /// together and read together, so this costs one round trip.
+    fn read_window_state(&self, window: x::Window) -> Result<WindowState, BackendError> {
+        let atoms = &self.atoms;
+        let c_protocols =
+            self.conn
+                .get_property(false, window, atoms.wm_protocols, XA_ANY, 0, 16)?;
+        let c_net_name = self.conn.get_property(
+            false,
+            window,
+            atoms.net_wm_name,
+            XA_ANY,
+            0,
+            u32::try_from(TITLE_CAP / 4 + 1).unwrap_or(u32::MAX),
+        )?;
+        let c_name = self.conn.get_property(
+            false,
+            window,
+            atoms.wm_name,
+            XA_ANY,
+            0,
+            u32::try_from(TITLE_CAP / 4 + 1).unwrap_or(u32::MAX),
+        )?;
+        let c_class = self.conn.get_property(
+            false,
+            window,
+            atoms.wm_class,
+            XA_ANY,
+            0,
+            u32::try_from(APP_ID_CAP / 4 + 1).unwrap_or(u32::MAX),
+        )?;
+        let c_hints =
+            self.conn
+                .get_property(false, window, atoms.wm_normal_hints, XA_ANY, 0, 18)?;
+        // Asking for type WINDOW makes a wrongly-typed property read as absent, which is
+        // the whole validation a map-time transient deserves.
+        let c_transient =
+            self.conn
+                .get_property(false, window, atoms.wm_transient_for, XA_WINDOW, 0, 1)?;
+
+        let protocols = c_protocols
+            .reply()
+            .ok()
+            .map(|r| r.value)
+            .unwrap_or_default();
+        let has_protocol = |atom: u32| {
+            protocols
+                .chunks_exact(4)
+                .any(|w| u32::from_ne_bytes([w[0], w[1], w[2], w[3]]) == atom)
+        };
+        let title_net = c_net_name
+            .reply()
+            .ok()
+            .filter(|r| r.type_ == atoms.utf8_string)
+            .and_then(|r| String::from_utf8(r.value).ok());
+        let title_name = c_name.reply().ok().map(|r| {
+            if r.type_ == atoms.utf8_string {
+                String::from_utf8(r.value).ok().unwrap_or_default()
+            } else {
+                latin1_decode(&r.value)
+            }
+        });
+        let app_id = c_class
+            .reply()
+            .ok()
+            .map(|r| wm_class_res_class(&r.value))
+            .unwrap_or_default();
+        let hints = c_hints
+            .reply()
+            .ok()
+            .map(|r| SizeHints::parse(&r.value))
+            .unwrap_or_default();
+        let transient_for = c_transient
+            .reply()
+            .ok()
+            .filter(|r| r.type_ == XA_WINDOW)
+            .and_then(|r| {
+                r.value
+                    .chunks_exact(4)
+                    .next()
+                    .map(|w| u32::from_ne_bytes([w[0], w[1], w[2], w[3]]))
+                    .filter(|owner| *owner != 0)
+            });
+
+        Ok(WindowState {
+            has_delete: has_protocol(atoms.wm_delete_window),
+            take_focus: has_protocol(atoms.wm_take_focus),
+            title_net,
+            title_name,
+            app_id,
+            hints,
+            transient_for,
+        })
+    }
+
+    /// The tracked toplevel `WM_TRANSIENT_FOR` names, as a classify parent candidate.
+    fn read_transient_candidate(
+        &self,
+        window: x::Window,
+    ) -> Result<Option<ParentCandidate>, BackendError> {
+        let Some(reply) = self.read_property(window, self.atoms.wm_transient_for, 1)? else {
+            return Ok(None);
+        };
+        let owner = reply
+            .value
+            .chunks_exact(4)
+            .next()
+            .map(|w| u32::from_ne_bytes([w[0], w[1], w[2], w[3]]))
+            .filter(|id| *id != 0);
+        Ok(owner
+            .and_then(|owner| self.table.get(owner))
+            .filter(|t| t.kind == WindowKind::Managed)
+            .map(|t| ParentCandidate {
+                id: t.id,
+                origin: t.geometry.origin,
+            }))
+    }
+
+    /// The focused toplevel as a classify parent candidate.
+    fn focused_candidate(&self) -> Option<ParentCandidate> {
+        let id = self.focused?;
+        let tracked = self.table.by_surface(id)?;
+        (tracked.kind == WindowKind::Managed).then_some(ParentCandidate {
+            id,
+            origin: tracked.geometry.origin,
+        })
+    }
+
+    // --- window management -----------------------------------------------------------------
+
+    /// Manages a toplevel: places it inside the root, configures it, watches its
+    /// properties and damage, maps it when `map`, and reports `Created` — with the
+    /// toplevel parent `WM_TRANSIENT_FOR` names, when it names one this backend manages.
+    ///
+    /// A client that destroys its window mid-map leaves nothing behind and reports
+    /// nothing: every step tolerates the window vanishing under it.
+    fn manage_window(
+        &mut self,
+        window: x::Window,
+        map: bool,
+        out: &mut Vec<SurfaceEvent>,
+    ) -> Result<(), BackendError> {
+        if self.table.contains(window) {
+            return Ok(());
+        }
+        let Some(geometry) = self.window_geometry(window)? else {
+            return Ok(());
+        };
+        let state = self.read_window_state(window)?;
+        // A dialog's parent: the transient target is kept only while it is a toplevel this
+        // backend already manages. Anything else — an unknown or untracked window, the root
+        // (ICCCM's "transient for the whole group"), the window itself (never tracked at
+        // its own map time) — leaves a plain toplevel. The property is read once, here:
+        // clients set it before mapping, and the wire has no message for a parent that
+        // changes later.
+        let parent = state
+            .transient_for
+            .and_then(|owner| self.table.get(owner))
+            .filter(|owner| owner.kind == WindowKind::Managed)
+            .map(|owner| owner.id);
+        let placed = self.layout.place(
+            state.hints.clamp(geometry.size, self.root_size),
+            self.root_size,
+        );
+
+        check_gone(self.conn.change_window_attributes(
+            window,
+            &x::ChangeWindowAttributesAux::new().event_mask(x::EventMask::PROPERTY_CHANGE),
+        )?)?;
+        check_gone(
+            self.conn.configure_window(
+                window,
+                &x::ConfigureWindowAux::new()
+                    .x(placed.origin.x)
+                    .y(placed.origin.y)
+                    .width(placed.size.width)
+                    .height(placed.size.height),
+            )?,
+        )?;
+        self.set_wm_state(window);
+        if map {
+            check_gone(self.conn.map_window(window)?)?;
+        }
+        let damage = self.create_damage(window);
+
+        let tracked = TrackedWindow {
+            id: self.table.peek_next_surface(),
+            window,
+            kind: WindowKind::Managed,
+            role: Role::Toplevel,
+            geometry: placed,
+            hints: state.hints,
+            has_delete: state.has_delete,
+            take_focus: state.take_focus,
+            title_net: state.title_net,
+            title_name: state.title_name,
+            app_id: state.app_id,
+            damage,
+            pixmap: None,
+        };
+        let id = self.table.insert(window, tracked);
+        out.push(SurfaceEvent::Created {
+            id,
+            role: Role::Toplevel,
+            size: placed.size,
+            parent,
+        });
+        self.report_metadata(window, out);
+        Ok(())
+    }
+
+    /// Shows a mapped override-redirect window as a popup, when a parent can be named for
+    /// it; a parentless one is not shown.
+    fn show_popup(
+        &mut self,
+        window: x::Window,
+        out: &mut Vec<SurfaceEvent>,
+    ) -> Result<(), BackendError> {
+        if self.table.contains(window) {
+            return Ok(());
+        }
+        let Some(geometry) = self.window_geometry(window)? else {
+            return Ok(());
+        };
+        let transient = self.read_transient_candidate(window)?;
+        let focused = self.focused_candidate();
+        let Some(role) = classify(
+            MappedWindow {
+                override_redirect: true,
+                origin: geometry.origin,
+                size: geometry.size,
+            },
+            transient,
+            focused,
+        ) else {
+            self.orphaned.insert(window);
+            return Ok(());
+        };
+        let size = popup_size(&role);
+        let damage = self.create_damage(window);
+        let tracked = TrackedWindow {
+            id: self.table.peek_next_surface(),
+            window,
+            kind: WindowKind::OverrideRedirect,
+            geometry: Rect::new(
+                geometry.origin.x,
+                geometry.origin.y,
+                size.width,
+                size.height,
+            ),
+            hints: SizeHints::default(),
+            has_delete: false,
+            take_focus: false,
+            role,
+            title_net: None,
+            title_name: None,
+            app_id: String::new(),
+            damage,
+            pixmap: None,
+        };
+        let role = tracked.role;
+        let id = self.table.insert(window, tracked);
+        out.push(SurfaceEvent::Created {
+            id,
+            role,
+            size,
+            parent: None,
+        });
+        Ok(())
+    }
+
+    /// Frees every server resource a window held and reports it gone.
+    fn destroy_window(&mut self, window: x::Window, out: &mut Vec<SurfaceEvent>) {
+        self.or_pending.remove(&window);
+        self.orphaned.remove(&window);
+        if let Some(tracked) = self.table.remove(window) {
+            if let Some(damage) = tracked.damage
+                && let Ok(cookie) = self.conn.damage_destroy(damage)
+            {
+                let _ = cookie.check();
+            }
+            if let Some((pixmap, _)) = tracked.pixmap
+                && let Ok(cookie) = self.conn.free_pixmap(pixmap)
+            {
+                let _ = cookie.check();
+            }
+            if self.focused == Some(tracked.id) {
+                self.focused = None;
+            }
+            if self.ensured == Some(tracked.id) {
+                self.ensured = None;
+            }
+            out.push(SurfaceEvent::Destroyed { id: tracked.id });
+        }
+    }
+
+    /// Maintains the ICCCM `WM_STATE` property; toolkits read it to see a real window
+    /// manager is present.
+    fn set_wm_state(&mut self, window: x::Window) {
+        let data: Vec<u8> = [WM_STATE_NORMAL, NONE]
+            .iter()
+            .flat_map(|word| word.to_ne_bytes())
+            .collect();
+        if let Ok(cookie) = self.conn.change_property(
+            x::PropMode::REPLACE,
+            window,
+            self.atoms.wm_state,
+            self.atoms.wm_state,
+            32,
+            2,
+            &data,
+        ) {
+            let _ = cookie.check();
+        }
+    }
+
+    /// Reports the window's current title and app id, when it has either.
+    fn report_metadata(&self, window: x::Window, out: &mut Vec<SurfaceEvent>) {
+        let Some(tracked) = self.table.get(window) else {
+            return;
+        };
+        let title = tracked.title();
+        if title.is_empty() && tracked.app_id.is_empty() {
+            return;
+        }
+        let id = tracked.id;
+        let app_id = tracked.app_id.clone();
+        out.push(SurfaceEvent::Metadata {
+            id,
+            title: bounded_field(&title, TITLE_CAP),
+            app_id: bounded_field(&app_id, APP_ID_CAP),
+        });
+    }
+
+    /// Creates a Damage object on a window, watching every raw rectangle. `RawRectangles`
+    /// reports at damage time, so nothing is lost between a notification and the subtract
+    /// that clears the server-side region (see the `DamageNotify` handler).
+    fn create_damage(&mut self, window: x::Window) -> Option<damage::Damage> {
+        let damage = self.conn.generate_id().ok()?;
+        match self
+            .conn
+            .damage_create(damage, window, damage::ReportLevel::RAW_RECTANGLES)
+        {
+            Ok(cookie) => cookie.check().is_ok().then_some(damage),
+            Err(_) => None,
+        }
+    }
+
+    // --- the event handlers ----------------------------------------------------------------
+
+    /// One event from the server, translated into bookkeeping and surface events.
+    // The Event is taken by value and torn apart by the match; clippy misreads the
+    // destructure as non-consuming.
+    #[allow(clippy::needless_pass_by_value)]
+    fn handle_event(
+        &mut self,
+        event: Event,
+        out: &mut Vec<SurfaceEvent>,
+    ) -> Result<(), BackendError> {
+        match event {
+            Event::MapRequest(e) => self.manage_window(e.window, true, out),
+            Event::CreateNotify(e) => {
+                // An override-redirect window is remembered at creation and classified
+                // when it maps: WM_TRANSIENT_FOR is set after creation, so classifying at
+                // CreateNotify would race the client's own property write.
+                if e.override_redirect {
+                    self.or_pending.insert(e.window);
+                }
+                Ok(())
+            }
+            Event::MapNotify(e) => {
+                if self.or_pending.remove(&e.window) {
+                    self.show_popup(e.window, out)
+                } else {
+                    Ok(())
+                }
+            }
+            Event::UnmapNotify(e) => {
+                // A popup unmapping is the popup going away; a managed toplevel
+                // unmapping is its surface going away too — a remap arrives as a new
+                // MapRequest and a new surface.
+                self.destroy_window(e.window, out);
+                Ok(())
+            }
+            Event::DestroyNotify(e) => {
+                self.destroy_window(e.window, out);
+                Ok(())
+            }
+            Event::ReparentNotify(e) => {
+                // A window reparented off the root is no longer ours to show.
+                if e.parent != self.root {
+                    self.destroy_window(e.window, out);
+                }
+                Ok(())
+            }
+            Event::ConfigureNotify(e) => {
+                self.configure_notify(e, out);
+                Ok(())
+            }
+            Event::ConfigureRequest(e) => self.configure_request(e, out),
+            Event::PropertyNotify(e) => self.property_notify(e, out),
+            Event::ClientMessage(e) => {
+                self.client_message(e, out);
+                Ok(())
+            }
+            Event::DamageNotify(e) => {
+                self.damage_notify(e, out);
+                Ok(())
+            }
+            Event::SelectionRequest(e) => self.selection_request(e, out),
+            Event::SelectionClear(e) => {
+                if e.selection == self.atoms.clipboard {
+                    self.clipboard.text = None;
+                }
+                Ok(())
+            }
+            Event::XfixesSelectionNotify(e) => {
+                if e.selection == self.atoms.clipboard && e.owner != self.owner_window {
+                    // Another client took the selection; the host's text is stale.
+                    self.clipboard.text = None;
+                }
+                Ok(())
+            }
+            Event::XfixesCursorNotify(_) => {
+                let reply = self.conn.xfixes_get_cursor_image()?.reply()?;
+                out.push(SurfaceEvent::CursorChanged {
+                    cursor: cursor_image(
+                        reply.cursor_serial,
+                        reply.width,
+                        reply.height,
+                        reply.xhot,
+                        reply.yhot,
+                        &reply.cursor_image,
+                    ),
+                });
+                Ok(())
+            }
+            Event::MappingNotify(_) => self.refresh_keymap(),
+            _ => Ok(()),
+        }
+    }
+
+    /// A tracked window's geometry changed; a size change is a `Resized`.
+    fn configure_notify(&mut self, e: x::ConfigureNotifyEvent, out: &mut Vec<SurfaceEvent>) {
+        if e.window == self.root {
+            self.root_size = Size::new(u32::from(e.width), u32::from(e.height));
+            return;
+        }
+        let Some(tracked) = self.table.get_mut(e.window) else {
+            return;
+        };
+        let new_size = Size::new(u32::from(e.width), u32::from(e.height));
+        let resized = tracked.size_changed(new_size);
+        tracked.geometry = Rect::new(
+            i32::from(e.x),
+            i32::from(e.y),
+            new_size.width,
+            new_size.height,
+        );
+        if resized {
+            // The named pixmap was named at the old size; it is named again at the next
+            // capture.
+            tracked.pixmap = None;
+            let root = self.root_size;
+            let id = tracked.id;
+            let size = Size::new(
+                new_size.width.min(root.width).max(1),
+                new_size.height.min(root.height).max(1),
+            );
+            out.push(SurfaceEvent::Resized { id, size });
+        }
+    }
+
+    /// A client asking to reconfigure its own toplevel: granted clamped, and reported.
+    fn configure_request(
+        &mut self,
+        e: x::ConfigureRequestEvent,
+        out: &mut Vec<SurfaceEvent>,
+    ) -> Result<(), BackendError> {
+        let wants = |bit: x::ConfigWindow| e.value_mask & bit == bit;
+        let Some(tracked) = self.table.get(e.window) else {
+            // Nothing we manage asked; grant the size clamped to the root.
+            let width = u32::from(e.width).min(self.root_size.width).max(1);
+            let height = u32::from(e.height).min(self.root_size.height).max(1);
+            check_gone(self.conn.configure_window(
+                e.window,
+                &x::ConfigureWindowAux::new().width(width).height(height),
+            )?)?;
+            return Ok(());
+        };
+
+        let width = if wants(x::ConfigWindow::WIDTH) {
+            u32::from(e.width)
+        } else {
+            tracked.geometry.size.width
+        };
+        let height = if wants(x::ConfigWindow::HEIGHT) {
+            u32::from(e.height)
+        } else {
+            tracked.geometry.size.height
+        };
+        let root = self.root_size;
+        let size = tracked.hints.clamp(Size::new(width, height), root);
+        let id = tracked.id;
+        let (x_pos, y_pos) = (tracked.geometry.origin.x, tracked.geometry.origin.y);
+        out.push(SurfaceEvent::ResizeRequested { id, size });
+        // The WM keeps its placement: only the size is granted, plus the stacking the
+        // client asked for (harmless under the kept-apart layout).
+        let mut aux = x::ConfigureWindowAux::new()
+            .x(x_pos)
+            .y(y_pos)
+            .width(size.width)
+            .height(size.height);
+        if wants(x::ConfigWindow::STACK_MODE) {
+            aux = aux.stack_mode(e.stack_mode);
+        }
+        check_gone(self.conn.configure_window(e.window, &aux)?)?;
+        Ok(())
+    }
+
+    /// Titles, app ids, protocols, size hints and the EWMH active window, read on change.
+    fn property_notify(
+        &mut self,
+        e: x::PropertyNotifyEvent,
+        out: &mut Vec<SurfaceEvent>,
+    ) -> Result<(), BackendError> {
+        let net_active = self.atoms.net_active_window;
+        if e.window == self.root && e.atom == net_active {
+            // A client set the property instead of sending the message.
+            if let Some(reply) = self.read_property(self.root, net_active, 1)? {
+                let window = reply
+                    .value
+                    .chunks_exact(4)
+                    .next()
+                    .map_or(NONE, |w| u32::from_ne_bytes([w[0], w[1], w[2], w[3]]));
+                if let Some(tracked) = self.table.get(window) {
+                    out.push(SurfaceEvent::FocusRequested { id: tracked.id });
+                }
+            }
+            return Ok(());
+        }
+
+        let atoms = &self.atoms;
+        let Some(tracked) = self.table.get_mut(e.window) else {
+            return Ok(());
+        };
+        if tracked.kind != WindowKind::Managed {
+            return Ok(());
+        }
+        // WM_TRANSIENT_FOR is deliberately absent from what follows: a dialog's parent is
+        // read once, at map (see manage_window), and the v0 wire has no message that could
+        // announce a parent changing later — SurfaceNew is the only parent-carrying message
+        // and it announces a surface once. A client that sets the property after mapping
+        // keeps whatever map time saw.
+        let atom = e.atom;
+        if atom == atoms.net_wm_name || atom == atoms.wm_name || atom == atoms.wm_class {
+            // Re-read the trio so a Metadata event carries both fields coherently.
+            let _ = tracked;
+            let state = self.read_window_state(e.window)?;
+            if let Some(tracked) = self.table.get_mut(e.window) {
+                tracked.title_net = state.title_net;
+                tracked.title_name = state.title_name;
+                tracked.app_id = state.app_id;
+            }
+            self.report_metadata(e.window, out);
+            return Ok(());
+        }
+        let is_protocols = atom == atoms.wm_protocols;
+        let is_hints = atom == atoms.wm_normal_hints;
+        if !is_protocols && !is_hints {
+            return Ok(());
+        }
+        let _ = tracked;
+        let reply = if is_protocols {
+            self.read_property(e.window, atoms.wm_protocols, 16)?
+        } else {
+            self.read_property(e.window, atoms.wm_normal_hints, 18)?
+        };
+        let Some(tracked) = self.table.get_mut(e.window) else {
+            return Ok(());
+        };
+        if is_protocols {
+            if let Some(reply) = reply {
+                let has = |atom: u32| {
+                    reply
+                        .value
+                        .chunks_exact(4)
+                        .any(|w| u32::from_ne_bytes([w[0], w[1], w[2], w[3]]) == atom)
+                };
+                tracked.has_delete = has(atoms.wm_delete_window);
+                tracked.take_focus = has(atoms.wm_take_focus);
+            }
+        } else if let Some(reply) = reply {
+            tracked.hints = SizeHints::parse(&reply.value);
+        }
+        Ok(())
+    }
+
+    /// Focus asks: `_NET_ACTIVE_WINDOW`, and a client sending itself `WM_TAKE_FOCUS`.
+    fn client_message(&mut self, e: x::ClientMessageEvent, out: &mut Vec<SurfaceEvent>) {
+        let atoms = &self.atoms;
+        let data = e.data.as_data32();
+        if e.type_ == atoms.net_active_window
+            && e.window == self.root
+            && let Some(&window) = data.get(2)
+            && let Some(tracked) = self.table.get(window)
+        {
+            out.push(SurfaceEvent::FocusRequested { id: tracked.id });
+            return;
+        }
+        if e.type_ == atoms.wm_protocols
+            && data.first() == Some(&atoms.wm_take_focus)
+            && let Some(tracked) = self.table.get(e.window)
+        {
+            out.push(SurfaceEvent::FocusRequested { id: tracked.id });
+        }
+    }
+
+    /// Damage happened on a tracked window: report it clamped, and clear the server-side
+    /// region.
+    fn damage_notify(&mut self, e: damage::NotifyEvent, out: &mut Vec<SurfaceEvent>) {
+        let rect = Rect::new(
+            i32::from(e.area.x),
+            i32::from(e.area.y),
+            u32::from(e.area.width),
+            u32::from(e.area.height),
+        );
+        let damage = self.table.get(e.drawable).and_then(|t| t.damage);
+        if let Some(tracked) = self.table.get_mut(e.drawable) {
+            let bounds = Rect::new(
+                0,
+                0,
+                tracked.geometry.size.width,
+                tracked.geometry.size.height,
+            );
+            if let Some(inside) = rect.intersection(bounds) {
+                let id = tracked.id;
+                out.push(SurfaceEvent::Damaged { id, rect: inside });
+            }
+        }
+        // Clear the region so it cannot grow without bound. New damage still reports:
+        // RawRectangles events were generated when the damage happened, not when the
+        // region empties.
+        if let Some(damage) = damage
+            && let Ok(cookie) = self.conn.damage_subtract(damage, NONE, NONE)
+        {
+            let _ = cookie.check();
+        }
+    }
+
+    // --- selections ------------------------------------------------------------------------
+
+    /// Answers a `SelectionRequest` against the CLIPBOARD the backend owns.
+    fn selection_request(
+        &mut self,
+        e: x::SelectionRequestEvent,
+        out: &mut Vec<SurfaceEvent>,
+    ) -> Result<(), BackendError> {
+        let atoms = &self.atoms;
+        // ICCCM: a request with no property names its target as the reply property.
+        let property = if e.property == NONE {
+            e.target
+        } else {
+            e.property
+        };
+        let is_text_target = e.target == atoms.utf8_string
+            || e.target == atoms.text
+            || e.target == atoms.string
+            || e.target == atoms.text_plain_utf8;
+
+        let answer = if e.selection != atoms.clipboard {
+            None
+        } else if e.target == atoms.targets {
+            let targets: [u32; 5] = [
+                atoms.targets,
+                atoms.utf8_string,
+                atoms.text,
+                atoms.string,
+                atoms.text_plain_utf8,
+            ];
+            let data: Vec<u8> = targets.iter().flat_map(|a| a.to_ne_bytes()).collect();
+            self.write_property(e.requestor, property, XA_ATOM, &data);
+            Some(property)
+        } else if let Some(text) = self.clipboard.text.clone() {
+            let (type_, data) =
+                if e.target == atoms.utf8_string || e.target == atoms.text_plain_utf8 {
+                    (atoms.utf8_string, text.into_bytes())
+                } else if e.target == atoms.text || e.target == atoms.string {
+                    (atoms.string, latin1_encode(&text))
+                } else {
+                    // COMPOUND_TEXT, MULTIPLE and anything else: refused, not half-served.
+                    (0, Vec::new())
+                };
+            if data.is_empty() {
+                None
+            } else {
+                self.write_property(e.requestor, property, type_, &data);
+                Some(property)
+            }
+        } else if is_text_target {
+            // The app pasted and the backend holds nothing to serve: report it and refuse
+            // this one paste.
+            out.push(SurfaceEvent::ClipboardRequested);
+            None
+        } else {
+            None
+        };
+
+        let notify = x::SelectionNotifyEvent {
+            response_type: x::SELECTION_NOTIFY_EVENT,
+            sequence: 0,
+            requestor: e.requestor,
+            selection: e.selection,
+            target: e.target,
+            property: answer.unwrap_or(NONE),
+            time: e.time,
+        };
+        if let Ok(cookie) = self
+            .conn
+            .send_event(false, e.requestor, x::EventMask::NO_EVENT, notify)
+        {
+            let _ = cookie.check();
+        }
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    /// Writes a reply property; a gone requestor ends the exchange, it does not fail it.
+    fn write_property(&self, requestor: x::Window, property: u32, type_: u32, data: &[u8]) -> bool {
+        match self.conn.change_property(
+            x::PropMode::REPLACE,
+            requestor,
+            property,
+            type_,
+            8,
+            u32::try_from(data.len()).unwrap_or(u32::MAX),
+            data,
+        ) {
+            Ok(cookie) => cookie.check().is_ok(),
+            Err(_) => false,
+        }
+    }
+
+    // --- input -----------------------------------------------------------------------------
+
+    /// Makes surface `id` the safe target of the next XTEST event: raised above its
+    /// siblings, holding the keyboard focus. An XTEST click lands on the top window at
+    /// its coordinates and keys reach the focused window (docs/architecture.md §3.2), so
+    /// both are set here, once per target change.
+    fn ensure_target(&mut self, id: SurfaceId) -> Result<(), BackendError> {
+        if self.ensured == Some(id) {
+            return Ok(());
+        }
+        let Some(tracked) = self.table.by_surface(id) else {
+            return Err(BackendError::UnknownSurface(id));
+        };
+        // A popup takes pointer events itself, but the keyboard stays with its parent
+        // toplevel.
+        let focus_tracked = match tracked.kind {
+            WindowKind::Managed => tracked,
+            WindowKind::OverrideRedirect => match &tracked.role {
+                Role::Popup { parent, .. } => self
+                    .table
+                    .by_surface(*parent)
+                    .filter(|p| p.kind == WindowKind::Managed)
+                    .unwrap_or(tracked),
+                Role::Toplevel => tracked,
+            },
+        };
+        let raise_window = tracked.window;
+        let focus_window = focus_tracked.window;
+        let take_focus = focus_tracked.take_focus;
+        let focus_id = focus_tracked.id;
+
+        check_gone(self.conn.configure_window(
+            raise_window,
+            &x::ConfigureWindowAux::new().stack_mode(x::StackMode::ABOVE),
+        )?)?;
+        check_gone(self.conn.set_input_focus(
+            x::InputFocus::POINTER_ROOT,
+            focus_window,
+            CURRENT_TIME,
+        )?)?;
+        if take_focus {
+            // The ICCCM focus handshake for clients that asked for it.
+            self.send_protocols_message(focus_window, self.atoms.wm_take_focus)?;
+        }
+        self.focused = Some(focus_id);
+        self.ensured = Some(id);
+        Ok(())
+    }
+
+    /// Sends a `WM_PROTOCOLS` client message carrying `protocol` to `window`.
+    fn send_protocols_message(
+        &mut self,
+        window: x::Window,
+        protocol: u32,
+    ) -> Result<(), BackendError> {
+        let event = x::ClientMessageEvent {
+            response_type: x::CLIENT_MESSAGE_EVENT,
+            sequence: 0,
+            format: 32,
+            window,
+            type_: self.atoms.wm_protocols,
+            data: x::ClientMessageData::from([protocol, CURRENT_TIME, 0, 0, 0]),
+        };
+        self.conn
+            .send_event(false, window, x::EventMask::NO_EVENT, event)?
+            .check()?;
+        Ok(())
+    }
+
+    /// Reads the keyboard mapping again.
+    fn refresh_keymap(&mut self) -> Result<(), BackendError> {
+        self.keymap = fetch_keymap(&self.conn)?;
+        Ok(())
+    }
+
+    /// One XTEST key event.
+    fn xtest_key(&mut self, keycode: u8, state: PressState) -> Result<(), BackendError> {
+        let kind = match state {
+            PressState::Pressed => X_KEY_PRESS,
+            PressState::Released => X_KEY_RELEASE,
+        };
+        self.conn
+            .xtest_fake_input(kind, keycode, CURRENT_TIME, self.root, 0, 0, 0)?
+            .check()?;
+        Ok(())
+    }
+
+    /// One XTEST button event.
+    fn xtest_button(&mut self, button: u8, state: PressState) -> Result<(), BackendError> {
+        let kind = match state {
+            PressState::Pressed => X_BUTTON_PRESS,
+            PressState::Released => X_BUTTON_RELEASE,
+        };
+        self.conn
+            .xtest_fake_input(kind, button, CURRENT_TIME, self.root, 0, 0, 0)?
+            .check()?;
+        Ok(())
+    }
+
+    /// One XTEST motion to root coordinates.
+    fn xtest_motion(&mut self, at: Point) -> Result<(), BackendError> {
+        self.conn
+            .xtest_fake_input(
+                X_MOTION_NOTIFY,
+                0,
+                CURRENT_TIME,
+                self.root,
+                clamp_i16(at.x),
+                clamp_i16(at.y),
+                0,
+            )?
+            .check()?;
+        Ok(())
+    }
+
+    /// The bytes per pixel the server stores a `depth` pixmap at; 0 when the server does
+    /// not list the depth, which the converter refuses.
+    fn bpp_for_depth(&self, depth: u8) -> usize {
+        self.pixel_bpp
+            .iter()
+            .find(|(d, _)| *d == depth)
+            .map_or(0, |(_, bpp)| *bpp)
+    }
+    /// Names the window's Composite pixmap at its current size, freeing any older one.
+    /// `None` means the window is gone or not yet mapped.
+    fn name_pixmap(
+        &mut self,
+        window: x::Window,
+        size: Size,
+    ) -> Result<Option<x::Pixmap>, BackendError> {
+        if let Some((old, _)) = self.table.get(window).and_then(|t| t.pixmap)
+            && let Ok(cookie) = self.conn.free_pixmap(old)
+        {
+            let _ = cookie.check();
+        }
+        let pixmap = self.conn.generate_id()?;
+        match self.conn.composite_name_window_pixmap(window, pixmap) {
+            Ok(cookie) => {
+                if cookie.check().is_ok() {
+                    if let Some(tracked) = self.table.get_mut(window) {
+                        tracked.pixmap = Some((pixmap, size));
+                    }
+                    Ok(Some(pixmap))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(_) => Ok(None),
+        }
+    }
+}
+
+impl CaptureBackend for X11Backend {
+    type Error = BackendError;
+
+    fn drain_events(&mut self, out: &mut Vec<SurfaceEvent>) -> Result<(), Self::Error> {
+        out.append(&mut self.pending);
+        self.conn.flush()?;
+        while let Some(event) = self.conn.poll_for_event()? {
+            self.handle_event(event, out)?;
+        }
+        Ok(())
+    }
+
+    fn root_size(&mut self) -> Result<Size, Self::Error> {
+        Ok(self.root_size)
+    }
+
+    fn capture(&mut self, id: SurfaceId, rect: Rect) -> Result<PixelBuffer, Self::Error> {
+        let Some(tracked) = self.table.by_surface(id) else {
+            return Err(BackendError::UnknownSurface(id));
+        };
+        let window = tracked.window;
+        let surface_size = tracked.geometry.size;
+        let bounds = Rect::new(0, 0, surface_size.width, surface_size.height);
+        let Some(clamped) = rect.intersection(bounds) else {
+            return Ok(empty_buffer(rect.size));
+        };
+        if clamped.is_empty() {
+            return Ok(empty_buffer(clamped.size));
+        }
+
+        // The named pixmap tracks the window's size; a resize dropped it, so name again.
+        let current = self
+            .table
+            .get(window)
+            .and_then(|t| t.pixmap)
+            .filter(|(_, size)| *size == surface_size);
+        let pixmap = if let Some((pixmap, _)) = current {
+            pixmap
+        } else {
+            let Some(pixmap) = self.name_pixmap(window, surface_size)? else {
+                return Err(BackendError::UnknownSurface(id));
+            };
+            pixmap
+        };
+
+        let reply = self
+            .conn
+            .get_image(
+                x::ImageFormat::Z_PIXMAP,
+                pixmap,
+                clamp_i16(clamped.origin.x),
+                clamp_i16(clamped.origin.y),
+                clamp_u16(clamped.size.width),
+                clamp_u16(clamped.size.height),
+                !0,
+            )?
+            .reply()?;
+        let bpp = self.bpp_for_depth(reply.depth);
+        convert_zpixmap(reply.depth, &reply.data, clamped.size, bpp)
+    }
+}
+
+impl InputSink for X11Backend {
+    type Error = BackendError;
+
+    fn pointer_motion(&mut self, id: SurfaceId, at: Point) -> Result<(), Self::Error> {
+        let Some(tracked) = self.table.by_surface(id) else {
+            return Err(BackendError::UnknownSurface(id));
+        };
+        let geometry = tracked.geometry;
+        self.ensure_target(id)?;
+        let local = clamp_inside(at, geometry.size);
+        let root_at = Point::new(
+            geometry.origin.x.saturating_add(local.x),
+            geometry.origin.y.saturating_add(local.y),
+        );
+        self.xtest_motion(root_at)?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    fn pointer_button(
+        &mut self,
+        id: SurfaceId,
+        button: PointerButton,
+        state: PressState,
+    ) -> Result<(), Self::Error> {
+        let detail = match button {
+            PointerButton::Left => BUTTON_LEFT,
+            PointerButton::Middle => BUTTON_MIDDLE,
+            PointerButton::Right => BUTTON_RIGHT,
+            _ => return Ok(()),
+        };
+        self.ensure_target(id)?;
+        match state {
+            PressState::Pressed => self.held.button_press(detail),
+            PressState::Released => self.held.button_release(detail),
+        }
+        self.xtest_button(detail, state)?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    fn pointer_axis(&mut self, id: SurfaceId, steps: Point) -> Result<(), Self::Error> {
+        self.ensure_target(id)?;
+        let vertical = if steps.y < 0 { WHEEL_UP } else { WHEEL_DOWN };
+        let horizontal = if steps.x < 0 { WHEEL_LEFT } else { WHEEL_RIGHT };
+        for _ in 0..steps.y.unsigned_abs() {
+            self.xtest_button(vertical, PressState::Pressed)?;
+            self.xtest_button(vertical, PressState::Released)?;
+        }
+        for _ in 0..steps.x.unsigned_abs() {
+            self.xtest_button(horizontal, PressState::Pressed)?;
+            self.xtest_button(horizontal, PressState::Released)?;
+        }
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    fn key(&mut self, key: KeyEvent) -> Result<(), Self::Error> {
+        if let Some(focused) = self.focused {
+            self.ensure_target(focused)?;
+        }
+        let resolved = resolve_pressable(&self.keymap, key.keysym.0)?;
+        let needs_shift = resolved.column == 1;
+        let shift_keycode = if needs_shift {
+            self.keymap
+                .shift_keycode()
+                .ok_or(BackendError::KeysymUnavailable(XK_SHIFT_L))?
+        } else {
+            resolved.keycode
+        };
+        let presses: VecPresses = match key.state {
+            PressState::Pressed => {
+                self.held
+                    .key_press(resolved.keycode, needs_shift, shift_keycode)
+            }
+            PressState::Released => {
+                self.held
+                    .key_release(resolved.keycode, needs_shift, shift_keycode)
+            }
+        };
+        for keycode in presses.as_slice().iter().flatten() {
+            self.xtest_key(*keycode, key.state)?;
+        }
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    fn focus(&mut self, id: SurfaceId) -> Result<(), Self::Error> {
+        self.ensure_target(id)?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    fn blur(&mut self) -> Result<(), Self::Error> {
+        let (keys, buttons) = self.held.release_all();
+        for keycode in keys {
+            self.xtest_key(keycode, PressState::Released)?;
+        }
+        for button in buttons {
+            self.xtest_button(button, PressState::Released)?;
+        }
+        check_gone(self.conn.set_input_focus(
+            x::InputFocus::POINTER_ROOT,
+            POINTER_ROOT_WINDOW,
+            CURRENT_TIME,
+        )?)?;
+        self.focused = None;
+        self.ensured = None;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    fn configure(&mut self, id: SurfaceId, size: Size) -> Result<(), Self::Error> {
+        let Some(tracked) = self.table.by_surface_mut(id) else {
+            return Err(BackendError::UnknownSurface(id));
+        };
+        let size = tracked.hints.clamp(size, self.root_size);
+        let window = tracked.window;
+        let (x_pos, y_pos) = (tracked.geometry.origin.x, tracked.geometry.origin.y);
+        check_gone(
+            self.conn.configure_window(
+                window,
+                &x::ConfigureWindowAux::new()
+                    .width(size.width)
+                    .height(size.height),
+            )?,
+        )?;
+        // The synthetic ICCCM ConfigureNotify: some clients only react to it. The size it
+        // names is the one applied; a following server ConfigureNotify reports what the
+        // app actually took.
+        let notify = x::ConfigureNotifyEvent {
+            response_type: x::CONFIGURE_NOTIFY_EVENT,
+            sequence: 0,
+            event: window,
+            window,
+            above_sibling: NONE,
+            x: clamp_i16(x_pos),
+            y: clamp_i16(y_pos),
+            width: clamp_u16(size.width),
+            height: clamp_u16(size.height),
+            border_width: 0,
+            override_redirect: false,
+        };
+        self.conn
+            .send_event(false, window, x::EventMask::STRUCTURE_NOTIFY, notify)?
+            .check()?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    fn close(&mut self, id: SurfaceId) -> Result<(), Self::Error> {
+        let Some(tracked) = self.table.by_surface(id) else {
+            return Err(BackendError::UnknownSurface(id));
+        };
+        // A window that never listed WM_DELETE_WINDOW is never killed: the request is
+        // simply not deliverable.
+        if tracked.has_delete {
+            let window = tracked.window;
+            self.send_protocols_message(window, self.atoms.wm_delete_window)?;
+            self.conn.flush()?;
+        }
+        Ok(())
+    }
+
+    fn clipboard_set(&mut self, text: &str) -> Result<(), Self::Error> {
+        self.clipboard.text = Some(text.to_owned());
+        self.conn
+            .set_selection_owner(self.owner_window, self.atoms.clipboard, CURRENT_TIME)?
+            .check()?;
+        self.conn.flush()?;
+        Ok(())
+    }
+}
+
+/// Takes the window-manager rights on the root: `SubstructureRedirect` (map and
+/// configure requests come here instead of happening) plus the notifications the backend
+/// reads. An `Access` error means another window manager is already there.
+fn take_root(conn: &RustConnection, root: x::Window) -> Result<(), BackendError> {
+    let mask = x::EventMask::SUBSTRUCTURE_REDIRECT
+        | x::EventMask::SUBSTRUCTURE_NOTIFY
+        | x::EventMask::STRUCTURE_NOTIFY
+        | x::EventMask::PROPERTY_CHANGE;
+    if let Err(e) = conn
+        .change_window_attributes(root, &x::ChangeWindowAttributesAux::new().event_mask(mask))?
+        .check()
+    {
+        return Err(match e {
+            x11rb::errors::ReplyError::X11Error(ref err) if err.error_kind == ErrorKind::Access => {
+                BackendError::NotWindowManager
+            }
+            other => BackendError::from(other),
+        });
+    }
+    Ok(())
+}
+
+/// Creates the invisible window that owns the CLIPBOARD selection, and takes ownership.
+fn create_selection_owner(
+    conn: &RustConnection,
+    root: x::Window,
+    clipboard: u32,
+) -> Result<x::Window, BackendError> {
+    let owner = conn.generate_id()?;
+    conn.create_window(
+        COPY_DEPTH_FROM_PARENT,
+        owner,
+        root,
+        0,
+        0,
+        1,
+        1,
+        0,
+        x::WindowClass::INPUT_ONLY,
+        COPY_FROM_PARENT,
+        &x::CreateWindowAux::new(),
+    )?
+    .check()?;
+    conn.set_selection_owner(owner, clipboard, CURRENT_TIME)?
+        .check()?;
+    Ok(owner)
+}
+
+/// Selects the XFixes notifications: cursor changes and CLIPBOARD ownership changes.
+fn select_xfixes(
+    conn: &RustConnection,
+    root: x::Window,
+    clipboard: u32,
+) -> Result<(), BackendError> {
+    conn.xfixes_select_cursor_input(root, xfixes::CursorNotifyMask::DISPLAY_CURSOR)?
+        .check()?;
+    conn.xfixes_select_selection_input(
+        root,
+        clipboard,
+        xfixes::SelectionEventMask::SET_SELECTION_OWNER,
+    )?
+    .check()?;
+    Ok(())
+}
+
+/// Writes the minimum EWMH presence, so apps can tell a window manager exists.
+fn announce_ewmh(
+    conn: &RustConnection,
+    root: x::Window,
+    owner: x::Window,
+    atoms: &Atoms,
+) -> Result<(), BackendError> {
+    conn.change_property(
+        x::PropMode::REPLACE,
+        root,
+        atoms.net_supporting_wm_check,
+        XA_WINDOW,
+        32,
+        1,
+        &owner.to_ne_bytes(),
+    )?
+    .check()?;
+    conn.change_property(
+        x::PropMode::REPLACE,
+        owner,
+        atoms.net_wm_name,
+        atoms.utf8_string,
+        8,
+        u32::try_from(b"appricot".len()).unwrap_or(u32::MAX),
+        b"appricot",
+    )?
+    .check()?;
+    conn.change_property(
+        x::PropMode::REPLACE,
+        root,
+        atoms.net_supported,
+        XA_ATOM,
+        32,
+        0,
+        &[],
+    )?
+    .check()?;
+    Ok(())
+}
+
+/// Runs `cookie` and treats a window-gone reply as success: the client died mid-handling
+/// and there is nothing left to do about it. Anything else fails the call.
+fn check_gone(cookie: VoidCookie<'_, RustConnection>) -> Result<(), BackendError> {
+    match cookie.check() {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let error = BackendError::from(e);
+            if error.is_window_gone() {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Clamps to the protocol's 16-bit coordinates.
+fn clamp_i16(v: i32) -> i16 {
+    i16::try_from(v.clamp(i32::from(i16::MIN), i32::from(i16::MAX))).unwrap_or(0)
+}
+
+/// Clamps to the protocol's 16-bit sizes.
+fn clamp_u16(v: u32) -> u16 {
+    u16::try_from(v.min(u32::from(u16::MAX))).unwrap_or(0)
+}
+
+/// Reads the whole core keyboard mapping.
+fn fetch_keymap(conn: &RustConnection) -> Result<Keymap, BackendError> {
+    let setup = conn.setup();
+    let min = setup.min_keycode;
+    let count = setup.max_keycode.saturating_sub(min).saturating_add(1);
+    let reply = conn.get_keyboard_mapping(min, count)?.reply()?;
+    Ok(Keymap::from_flat(
+        min,
+        reply.keysyms_per_keycode,
+        &reply.keysyms,
+    ))
+}
+
+/// The app id `WM_CLASS` carries: `res_class`, the second of its two strings.
+fn wm_class_res_class(raw: &[u8]) -> String {
+    let mut parts = raw.split(|&b| b == 0);
+    let _res_name = parts.next();
+    parts.next().map(latin1_decode).unwrap_or_default()
+}
+
+/// The size a role places a surface at.
+fn popup_size(role: &Role) -> Size {
+    match role {
+        Role::Popup { positioner, .. } => positioner.size,
+        Role::Toplevel => Size::default(),
+    }
+}
+
+/// Builds one of the bounded strings a `SurfaceEvent` field carries.
+///
+/// The backend cannot name the field's type: `appricot-proto` is not this crate's
+/// dependency (the workspace edges are core -> proto and x11 -> core, and the lockfile
+/// pins them), so the type is reached through the field itself — `T` is inferred from
+/// where the call sits. Text longer than `cap` bytes is cut at a character boundary; a
+/// string the cap still cannot fit (the caps are provisional until the wire spec task
+/// fixes them) becomes the empty string rather than a panic.
+fn bounded_field<T>(text: &str, cap: usize) -> T
+where
+    T: for<'a> TryFrom<&'a str>,
+{
+    let mut end = text.len().min(cap);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    match T::try_from(&text[..end]) {
+        Ok(value) => value,
+        Err(_) => T::try_from("").unwrap_or_else(|_| panic!("the empty string must fit every cap")),
+    }
+}
+
+/// The buffer a capture of nothing returns.
+fn empty_buffer(size: Size) -> PixelBuffer {
+    PixelBuffer {
+        size,
+        stride: 0,
+        format: PixelFormat::Bgrx8888,
+        data: Vec::new(),
+    }
+}
+
+/// Keeps a surface-local point inside the surface.
+fn clamp_inside(at: Point, size: Size) -> Point {
+    Point::new(
+        at.x.clamp(0, i32::try_from(size.width.saturating_sub(1)).unwrap_or(0)),
+        at.y.clamp(0, i32::try_from(size.height.saturating_sub(1)).unwrap_or(0)),
+    )
+}

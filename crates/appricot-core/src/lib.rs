@@ -6,6 +6,9 @@
 //! - Roles: a toplevel, or a popup placed by a positioner relative to its parent.
 //! - Per-surface damage accumulation, bounded.
 //! - Frame pacing by client credits, never by a timer.
+//! - One session's surface set under the wire caps: what the streamer must put on the wire,
+//!   the resume grace window, and the frames planned over per-surface credits
+//!   ([`Session`]).
 //! - The traits a capture backend implements: [`CaptureBackend`] and [`InputSink`]. Their
 //!   signatures are the frozen interface of implementation wave 1.
 //!
@@ -28,6 +31,7 @@ mod geometry;
 mod input;
 mod pixels;
 mod role;
+mod session;
 mod surface;
 
 pub use capture::{CaptureBackend, SurfaceEvent};
@@ -37,4 +41,8 @@ pub use geometry::{Point, Rect, Size};
 pub use input::{InputSink, KeyCode, KeyEvent, Keysym, PointerButton, PressState};
 pub use pixels::{CursorImage, PixelBuffer, PixelFormat};
 pub use role::{Anchor, Positioner, Role};
+pub use session::{
+    FramePlan, GoneReason, MAX_FRAME_CREDITS, MAX_POPUPS_PER_PARENT, MAX_SURFACES, RESUME_GRACE_MS,
+    Session, SessionEvent,
+};
 pub use surface::{AckError, ConfigureSerial, Scale, Surface, SurfaceId};

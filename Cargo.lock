@@ -27,6 +27,9 @@ dependencies = [
 [[package]]
 name = "appricot-encode"
 version = "0.0.0"
+dependencies = [
+ "appricot-core",
+]
 
 [[package]]
 name = "appricot-proto"

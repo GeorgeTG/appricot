@@ -24,6 +24,10 @@ pub enum SurfaceEvent {
         role: Role,
         /// Its size.
         size: Size,
+        /// A dialog's toplevel parent, when it names one at map time (X11
+        /// `WM_TRANSIENT_FOR`); `None` for a plain toplevel. A popup's parent lives in its
+        /// role, never here.
+        parent: Option<SurfaceId>,
     },
     /// The app set a title or an app id. Both are untrusted text, already capped.
     Metadata {

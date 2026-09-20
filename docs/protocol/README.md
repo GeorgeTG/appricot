@@ -1,9 +1,12 @@
 # Wire protocol
 
-**Status: placeholder.** Protocol v0 is not designed yet. It is designed in the task
-`l1-wire-spec-v0` (milestone M1, [roadmap.md](../roadmap.md)), together with the X11 capture
-spike, and the spec will live in this folder. The Rust types and codec live in
-`crates/appricot-proto`; the TypeScript mirror lives in `packages/client`.
+**Protocol v0 is designed** (2026-09-20). The normative message set lives in
+[`wire.proto`](../../crates/appricot-proto/proto/appricot/v0/wire.proto) and the human-readable
+spec in [v0.md](v0.md); where the two disagree, `wire.proto` wins, and the limits table's
+authoritative home is `wire.proto` too. The Rust types and codec live in `crates/appricot-proto`;
+the TypeScript mirror lives in `packages/client`. The encoding is Protocol Buffers, proto3,
+proposed in [ADR-0005](../adr/0005-wire-encoding-protobuf.md). v0 is a draft pending the X11
+capture spike's measurements ([roadmap.md](../roadmap.md)), so its numbers may still move.
 
 A first message list was sketched during the design research that preceded this repository. It is
 input to the design, not the design. The window model the protocol carries is in

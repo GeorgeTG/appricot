@@ -16,8 +16,11 @@
 //     are defined by protobuf itself).
 //   - An Envelope whose oneof names no known field is a protocol violation: the peer closes
 //     the connection without a reply. There is no skip-by-length in v0.
-//   - An unknown enum value inside a known message is kept, never fatal; handlers ignore
-//     what they do not understand.
+//   - An unknown enum value inside a known message is ALSO a protocol violation in v0 and
+//     closes the connection: new enum values ship only with a new protocol version, so a
+//     peer that meets one is talking to something it never agreed to. (Decided 2026-09-20
+//     when the Rust codec landed: prost rejects unknown values, and both codecs follow the
+//     strictest common rule rather than diverging silently.)
 //
 // AUTHENTICATION (rule 8, docs/protocol/README.md)
 //   The first client message is `Hello` and it carries the stream token for this leg. Nothing
@@ -69,12 +72,19 @@
 //   1  RAW  uncompressed pixels, row-major, top to bottom, 4 bytes per pixel in the order
 //           blue, green, red, unused (the X11 32-bit ZPixmap byte order), no stride padding:
 //           exactly width * 4 bytes per row.
-//   2  QOI  the QOI image format (https://qoiformat.org, BSD-3-Clause; implemented from the
+//   2  QOI  the QOI image format (https://qoiformat.org; the specification there is CC0 and
+//           the reference implementation MIT, checked 2026-09-20; implemented here from the
 //           published spec, no third-party code). The QOI header names 3- or 4-channel data;
 //           a 3-channel tile decodes to opaque pixels.
 //
 // KEYBOARD (rule: keysym first, physical code alongside)
-//   Key.keysym is an X11 keysym number. Key.code is the browser's physical key name
+//   Key.keysym is a keysym number under THIS protocol's convention: a printable character
+//   is sent as its Unicode codepoint (which equals the X11 keysym for the Latin-1 range);
+//   non-printing keys use their X11 keysym numbers (Enter 0xff0d, arrows 0xff50.., F-keys
+//   0xffbe.., modifiers 0xffe1..). APPricot, not X11, defines this mapping, and the
+//   streamer resolves a codepoint to the display server's own keysym when they differ
+//   (the Greek block 0x0370-0x03ff is X11 keysyms 0x07xx there). docs/protocol/v0.md §8
+//   is the normative table. Key.code is the browser's physical key name
 //   (KeyboardEvent.code, https://www.w3.org/TR/uievents-code), ASCII, non-empty.
 //   Key.modifiers is a bitmask: 1 shift, 2 lock (caps), 4 control, 8 alt, 16 meta, 32 altgr.
 //
@@ -218,8 +228,9 @@ enum ByeReason {
 
 /// S -> C, immediately before a close the client caused. Nothing follows it either.
 message ServerError {
-  /// A stable code number. v0 codes: 1 limit violation, 2 unknown message, 3 bad order,
-  /// 4 decode failure, 5 internal error.
+  /// A stable code number. v0 codes: 1 limit violation, 2 reserved (unused in v0 — with a
+  /// oneof envelope an unknown message is a decode failure), 3 bad order, 4 decode failure,
+  /// 5 internal error.
   uint32 code = 1;
   /// Untrusted text for display, bounded by MAX_ERROR_TEXT_BYTES.
   string text = 2;

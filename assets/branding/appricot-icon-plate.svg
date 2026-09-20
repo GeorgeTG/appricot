@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="plateGrad" gradientUnits="userSpaceOnUse" x1="140" y1="0" x2="880" y2="1024">
+      <stop offset="0" stop-color="#2A353D"/><stop offset="0.55" stop-color="#1B2429"/><stop offset="1" stop-color="#11181C"/>
+    </linearGradient>
+    <radialGradient id="warmGlow" gradientUnits="userSpaceOnUse" cx="512" cy="600" r="470">
+      <stop offset="0" stop-color="#F79B2E" stop-opacity="0.14"/><stop offset="1" stop-color="#F79B2E" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ringGrad" gradientUnits="userSpaceOnUse" x1="250" y1="300" x2="820" y2="980">
+      <stop offset="0" stop-color="#FFC776"/><stop offset="0.40" stop-color="#F79B2E"/><stop offset="1" stop-color="#DE6B0A"/>
+    </linearGradient>
+    <linearGradient id="leafL" gradientUnits="userSpaceOnUse" x1="272" y1="310" x2="468" y2="80">
+      <stop offset="0" stop-color="#1D8A3C"/><stop offset="1" stop-color="#6ECB68"/>
+    </linearGradient>
+    <linearGradient id="leafR" gradientUnits="userSpaceOnUse" x1="676" y1="290" x2="506" y2="100">
+      <stop offset="0" stop-color="#177A33"/><stop offset="1" stop-color="#57BA58"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224" fill="url(#plateGrad)"/>
+  <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224" fill="url(#warmGlow)"/>
+  <rect x="1.5" y="1.5" width="1021" height="1021" rx="222.5" ry="222.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.07" stroke-width="3"/>
+  <g transform="translate(87.39,88.63) scale(0.8293)">
+    <g transform="translate(0,-14)">
+      <path d="M 468,322 Q 471,120 272,88 Q 269,290 468,322 Z" fill="url(#leafL)"/>
+      <path d="M 506,304 Q 679,281 676,106 Q 503,129 506,304 Z" fill="url(#leafR)"/>
+      <path d="M 583.6,337.8 A 296,296 0 1 1 440.4,337.8" fill="none" stroke="url(#ringGrad)" stroke-width="80" stroke-linecap="round"/>
+      <g fill="none" stroke="#FFFFFF" stroke-opacity="0.62" stroke-width="19">
+        <rect x="352" y="508" width="320" height="234" rx="32" ry="32"/>
+        <path d="M 352,574 L 672,574"/>
+      </g>
+      <g fill="#FFFFFF" fill-opacity="0.62">
+        <circle cx="389" cy="541" r="9"/><circle cx="418" cy="541" r="9"/><circle cx="447" cy="541" r="9"/>
+      </g>
+    </g>
+  </g>
+</svg>

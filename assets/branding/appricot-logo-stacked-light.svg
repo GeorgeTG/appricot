@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1000" viewBox="0 0 900 1000">
+  <defs>
+    <linearGradient id="ringGrad" gradientUnits="userSpaceOnUse" x1="250" y1="300" x2="820" y2="980"><stop offset="0" stop-color="#FFC776"/><stop offset="0.40" stop-color="#F79B2E"/><stop offset="1" stop-color="#DE6B0A"/></linearGradient>
+    <linearGradient id="leafL" gradientUnits="userSpaceOnUse" x1="272" y1="310" x2="468" y2="80"><stop offset="0" stop-color="#1D8A3C"/><stop offset="1" stop-color="#6ECB68"/></linearGradient>
+    <linearGradient id="leafR" gradientUnits="userSpaceOnUse" x1="676" y1="290" x2="506" y2="100"><stop offset="0" stop-color="#177A33"/><stop offset="1" stop-color="#57BA58"/></linearGradient>
+  </defs>
+  <g transform="translate(203.65,171.4) scale(0.4811)">
+    <g transform="translate(0,-14)">
+      <path d="M 468,322 Q 471,120 272,88 Q 269,290 468,322 Z" fill="url(#leafL)"/>
+      <path d="M 506,304 Q 679,281 676,106 Q 503,129 506,304 Z" fill="url(#leafR)"/>
+      <path d="M 583.6,337.8 A 296,296 0 1 1 440.4,337.8" fill="none" stroke="url(#ringGrad)" stroke-width="80" stroke-linecap="round"/>
+      <g fill="none" stroke="#1B2429" stroke-opacity="0.5" stroke-width="19"><rect x="352" y="508" width="320" height="234" rx="32" ry="32"/><path d="M 352,574 L 672,574"/></g>
+      <g fill="#1B2429" fill-opacity="0.5"><circle cx="389" cy="541" r="9"/><circle cx="418" cy="541" r="9"/><circle cx="447" cy="541" r="9"/></g>
+    </g>
+  </g>
+  <text x="450" y="793.2" text-anchor="middle" font-family="DejaVu Sans" font-weight="bold" font-size="132" letter-spacing="5" fill="#1B2429">APP<tspan fill="#F79B2E">ricot</tspan></text>
+</svg>

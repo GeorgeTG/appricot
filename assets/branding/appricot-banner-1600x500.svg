@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="500" viewBox="0 0 1600 500">
+  <defs>
+    <linearGradient id="bg" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1600" y2="500"><stop offset="0" stop-color="#28333B"/><stop offset="0.55" stop-color="#182127"/><stop offset="1" stop-color="#0C1114"/></linearGradient>
+    <radialGradient id="glow" gradientUnits="userSpaceOnUse" cx="330" cy="260" r="700"><stop offset="0" stop-color="#F79B2E" stop-opacity="0.17"/><stop offset="0.55" stop-color="#F79B2E" stop-opacity="0.045"/><stop offset="1" stop-color="#F79B2E" stop-opacity="0"/></radialGradient>
+    <linearGradient id="ringGrad" gradientUnits="userSpaceOnUse" x1="250" y1="300" x2="820" y2="980"><stop offset="0" stop-color="#FFC776"/><stop offset="0.40" stop-color="#F79B2E"/><stop offset="1" stop-color="#DE6B0A"/></linearGradient>
+    <linearGradient id="leafL" gradientUnits="userSpaceOnUse" x1="272" y1="310" x2="468" y2="80"><stop offset="0" stop-color="#1D8A3C"/><stop offset="1" stop-color="#6ECB68"/></linearGradient>
+    <linearGradient id="leafR" gradientUnits="userSpaceOnUse" x1="676" y1="290" x2="506" y2="100"><stop offset="0" stop-color="#177A33"/><stop offset="1" stop-color="#57BA58"/></linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1600" height="500" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1600" height="500" fill="url(#glow)"/>
+  <g transform="translate(193.5,74.6) scale(0.3436)">
+    <g transform="translate(0,-14)">
+      <path d="M 468,322 Q 471,120 272,88 Q 269,290 468,322 Z" fill="url(#leafL)"/>
+      <path d="M 506,304 Q 679,281 676,106 Q 503,129 506,304 Z" fill="url(#leafR)"/>
+      <path d="M 583.6,337.8 A 296,296 0 1 1 440.4,337.8" fill="none" stroke="url(#ringGrad)" stroke-width="80" stroke-linecap="round"/>
+      <g fill="none" stroke="#FFFFFF" stroke-opacity="0.72" stroke-width="19"><rect x="352" y="508" width="320" height="234" rx="32" ry="32"/><path d="M 352,574 L 672,574"/></g>
+      <g fill="#FFFFFF" fill-opacity="0.72"><circle cx="389" cy="541" r="9"/><circle cx="418" cy="541" r="9"/><circle cx="447" cy="541" r="9"/></g>
+    </g>
+  </g>
+  <text x="551" y="237" font-family="DejaVu Sans" font-weight="bold" font-size="140" letter-spacing="5" fill="#F2F6F8">APP<tspan fill="#F79B2E">ricot</tspan></text>
+  <rect x="553" y="271" width="78" height="4.5" rx="2.25" fill="#F79B2E" fill-opacity="0.9"/>
+  <text x="551" y="325" font-family="DejaVu Sans" font-weight="bold" font-size="28" letter-spacing="4" fill="#A9BAC3">PER-WINDOW APPLICATION STREAMING</text>
+  <text x="551" y="360" font-family="DejaVu Sans" font-size="20" letter-spacing="0.4" fill="#7C8D96">Sandboxed sessions &#183; Damage-driven pixels &#183; An embeddable browser client</text>
+</svg>

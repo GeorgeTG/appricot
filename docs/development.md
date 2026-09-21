@@ -1,0 +1,217 @@
+# Development
+
+How to work in this repository. The contract is [AGENTS.md](../AGENTS.md) at the root — the
+gates, the hard rules, the map of what belongs where; this page is the narrative version, with
+the reasons. Where the two disagree, AGENTS.md wins, and one of them is then a bug.
+
+## 1. Everything runs in Docker
+
+No `cargo`, `pnpm`, `node`, `just` or `rustc` ever runs on the host. Everything — build, lint,
+test, docs, licence gate, the demo — runs in the `dev` service of [compose.yml](../compose.yml),
+built from [docker/dev/Dockerfile](../docker/dev/Dockerfile). Three reasons:
+
+- **The toolchain is pinned and the image is the only place it is guaranteed.** The image is
+  `rust:1.94.1-slim-bookworm` (rust-toolchain.toml pins 1.94.1, with rustfmt and clippy
+  preinstalled so a gate never stalls downloading components), node 22.23.2 (tarball pinned to a
+  SHA-256), pnpm 10.33.0 through corepack, `just` 1.58.0 and cargo-deny 0.20.2 — every download
+  version-pinned and hash-checked.
+- **The X11 integration test needs a display server.**
+  `crates/appricot-x11/tests/extensions.rs` asserts Composite, Damage, XTEST and XFixes are on
+  `$DISPLAY`, and it panics rather than skips when there is none. The container's entrypoint
+  starts one.
+- **The host stays clean.** No toolchain directories, no caches, no ports — and no "works on my
+  machine": a clean clone plus two commands is the whole setup.
+
+One more rule that saves an afternoon: **use the host `docker compose` CLI, and only that.** A
+second compose driver against the same project name — an editor integration, an agent tool
+running `docker compose` from inside its own helper container — fights the first over the same
+containers, and the loser's error message never says so.
+
+```sh
+docker compose build dev                    # build the dev image (appricot-dev:local)
+docker compose run --rm dev just check      # THE gate: everything, in order
+docker compose run --rm dev just            # list the recipes
+docker compose run --rm dev bash            # a shell, with Xvfb already up on :99
+```
+
+`scripts/dev.sh <cmd...>` (Git Bash) and `scripts/dev.ps1 <cmd...>` (PowerShell) are thin
+wrappers around `docker compose run --rm dev <cmd...>`. They do not build the image, and they
+return the command's own exit code. With no arguments they list the recipes.
+
+## 2. The gates
+
+`just check` = `fmt-check clippy test doc deny web-check`, and `web-check` in turn is
+`web-install web-build web-typecheck web-lint web-test`. The recipes (see
+[justfile](../justfile)):
+
+| Recipe | What it runs |
+|---|---|
+| `just fmt` / `fmt-check` | `cargo fmt --all` / `--check` |
+| `just clippy` | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` |
+| `just test` | `cargo test --workspace --all-features --locked` |
+| `just doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked` |
+| `just deny` | `cargo deny check advisories bans licenses sources` — **needs network** (it clones the RustSec database; the image carries git for exactly this) |
+| `just web-typecheck` / `web-lint` / `web-test` / `web-build` | `pnpm -r typecheck` / `lint` / `test` / `build` |
+| `just run-streamer` | prints the streamer's version line and exits 0 |
+| `just demo` | builds the web packages and serves the demo host page on container port 8390 |
+
+`web-build` runs before `web-typecheck`/`web-test` inside `web-check` on purpose:
+`@appricot/react` resolves `@appricot/client` through its exports map, which points at `dist/`,
+so the client must be built before anything can typecheck against it.
+
+**Read the exit code, never the tail of the log.** Chain commands with `&&`; a `| tail -N`
+throws the status away and turns a red gate green.
+
+## 3. Iterating one gate at a time
+
+`just check` is the final word, not the inner loop. While iterating, run the one gate you are
+actually touching — it is faster and its failure is the only signal you want:
+
+- Rust formatting drift: `just fmt`, then `just fmt-check`.
+- A clippy warning is an error (`-D warnings`); fix the code, never silence the lint.
+- `just test` covers the workspace, the X11 integration test and doc tests.
+- TypeScript: `web-install` once per dependency change, `web-build`, then `web-typecheck`,
+  `web-lint`, `web-test`.
+- `just deny` needs network and is slow; run it when dependencies move, not on every edit.
+
+On a fresh clone, before the lockfiles have ever resolved: `just lock web-lock` once (see §5) —
+in practice they are committed, so `web-install` alone brings `node_modules` in exactly as
+pinned.
+
+## 4. The dev image and its volumes
+
+What the image holds beyond the toolchains:
+
+- **protoc** (`protobuf-compiler`) — prost-build compiles
+  `crates/appricot-proto/proto/appricot/v0/wire.proto` at build time. A build tool like `just`,
+  never part of the linked graph ADR-0002 gates.
+- **Xvfb, xauth, x11-utils, xdotool, x11-apps, fonts-dejavu-core** — the headless X server, the
+  readiness probe (xdpyinfo) and window-driving tools (xdotool type/click, xwininfo, xprop) for
+  debugging the backend by hand.
+- **No X11 -dev headers and no libxcb.** x11rb 0.14.0 has no default features and its
+  `RustConnection` speaks the X protocol in pure Rust; the workspace enables neither
+  `allow-unsafe-code` nor `dl-libxcb`.
+
+The X server: the entrypoint starts `Xvfb :99 -screen 0 1400x900x24 -nolisten tcp -noreset` and
+waits until it answers. `-nolisten tcp` keeps it reachable only through its unix socket inside
+the container. `-noreset` is load-bearing: Xvfb resets its state when its **last** client
+disconnects, `cargo test --workspace` runs several test binaries back to back in one container,
+and a reset between two binaries wipes the window manager's state out from under the next
+binary's tests (measured 2026-09-20). Two levers, both honoured rather than silently
+overridden: `-e APPRICOT_XVFB=0` starts no X server and leaves `DISPLAY` as it arrived (that is
+how you prove the X11 test fails loudly instead of skipping), and `-e DISPLAY=<value>` uses the
+caller's display and starts nothing.
+
+The volumes (compose.yml narrates each one):
+
+- The repository is bind-mounted at `/work`, source only.
+- `cargo_home` (CARGO_HOME is `/cargo`, off the image's rustup proxies), `target`
+  (CARGO_TARGET_DIR) and `pnpm_store` are named volumes: build output and caches live inside
+  the Docker Desktop VM's native filesystem, not through the slow bind mount — and debuginfo
+  makes `target/` large.
+- **One `node_modules` volume per workspace package, plus the root.** pnpm's `node_modules` is
+  a symlink farm, and symlinks created through a Windows bind mount are slow and unreliable;
+  the per-package volumes hold relative links into the root volume's `node_modules/.pnpm`, both
+  sides inside the container. **A new package under `packages/` needs its own volume line in
+  compose.yml and its own directory in the Dockerfile** — forgetting the second half is why a
+  fresh build suddenly cannot resolve imports.
+
+The image runs as uid/gid 1000 by default (`APPRICOT_UID`/`APPRICOT_GID` build args); CI passes
+the runner's own so the checkout stays writable.
+
+## 5. Lockfiles
+
+`Cargo.lock` and `pnpm-lock.yaml` are committed, so a fresh clone needs no resolution step and
+every build is reproducible. Only two recipes may rewrite them: `just lock`
+(`cargo generate-lockfile`) and `just web-lock` (`pnpm install`). Every other recipe builds
+`--locked` / `--frozen-lockfile` and fails loudly on a stale lockfile instead of rewriting it
+behind your back. A deliberate dependency change is: edit the manifest, run the matching lock
+recipe, commit both files together.
+
+## 6. The demo host page
+
+The demo is a whole host product in miniature: `@appricot/demo` draws the streamed windows as
+its own floating windows (title bars, minimise, focus, popups clamped to their parent), served
+by a zero-dependency static server under the strict CSP of ADR-0003 — no `'unsafe-inline'`, no
+`'unsafe-eval'` in `script-src`. From the host:
+
+```sh
+docker compose run --rm -p "127.0.0.1:${APPRICOT_DEMO_HOST_PORT:-8390}:8390" dev just demo
+```
+
+then open `http://127.0.0.1:8390` and paste the token (printed by the recipe, or set
+`APPRICOT_DEMO_TOKEN`). Ctrl-C stops both processes.
+
+Port 8390 is the repository's **one** published port, loopback-only, overridable through
+`APPRICOT_DEMO_HOST_PORT`. The streamer itself is never published: the demo's in-container
+server reverse-proxies `/session` (the WebSocket upgrade and plain requests) and `/readyz` to
+the streamer's loopback bind at `127.0.0.1:8391`, so the streamer keeps its loopback-only rule
+even in the manual demo run.
+
+## 7. Adding a dependency
+
+The linked core graph is **Tier A only**: MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception,
+BSD-2-Clause, BSD-3-Clause, ISC, Unicode-3.0, Zlib, 0BSD
+([ADR-0002](adr/0002-licence.md) §2). `deny.toml` has no deny list — anything not on the allow
+list is denied, including unknown licences — and `exceptions = []`. Concretely:
+
+1. Pin the crate in `[workspace.dependencies]` in the root `Cargo.toml`, with a comment naming
+   the version, its licence, where that was checked, and the date.
+2. `just lock`, then `just deny` (needs network). A denial is the answer, not an obstacle.
+3. Anything under GPL, LGPL, AGPL, MPL-2.0, EPL or a source-available licence needs an
+   **amendment to ADR-0002 first** — not a `deny.toml` edit.
+
+The Rust rules are gated; the npm side is not yet: ADR-0002 §2 asks for an npm licence gate
+that does not exist today, so a new runtime dependency in `packages/*` is checked by hand
+against the same list until it does.
+
+## 8. The untrusted-server rules
+
+The server is untrusted ([ADR-0003](adr/0003-untrusted-server-client.md), Proposed — and
+enforced as if Accepted): the streamer shares the application's sandbox, so the client treats
+every server byte as hostile. Strings become text, never markup; sizes and counts are checked
+against the limits table before anything is allocated; pixels land only in host-given canvases.
+
+This is enforced by lint, not by good intentions. `eslint.config.js` forbids the sinks by name
+(`innerHTML`, `outerHTML`, `insertAdjacentHTML`, `setHTMLUnsafe`, `dangerouslySetInnerHTML`,
+`document.write`, every `location`/`history` mutation, computed `setAttribute` names,
+non-literal `import()`, …), and
+`packages/client/src/untrusted-server.lint.test.ts` runs 33 cases against that config to prove
+each rule fires. To stay green:
+
+- Render text through `setTextOnly()` (from `@appricot/client`) or as React children — never
+  through a sink.
+- `packages/client/src/hostile/` proves the whole policy end-to-end in CI: a fixture server
+  that sends markup in every string field, oversized lengths, a popup the size of the screen
+  and focus requests, none of which may become markup, escape the parent's box, or take focus.
+- **Weakening a lint rule turns that test red — fix the code instead.**
+
+## 9. Port policy
+
+No host port is published by default, and the gates need none: the streamer binds loopback or
+a unix socket inside its container. The development host runs many other stacks at once, so
+before ever adding a port:
+
+1. Check what is taken: the host's listening sockets (`netstat -ano | findstr LISTENING` on
+   Windows, `ss -ltnp` on Linux) and every running container's published ports
+   (`docker ps --format '{{.Names}}\t{{.Ports}}'`).
+2. Pick a free **high** port.
+3. Publish it through a named variable bound to loopback, so a collision stays debuggable —
+   one `.env` line moves it, and the name says which service it belongs to:
+
+   ```yaml
+   ports:
+     - "127.0.0.1:${APPRICOT_<SERVICE>_HOST_PORT:-NNNN}:<container port>"
+   ```
+
+The comment block at the top of [compose.yml](../compose.yml) is the canonical scheme; update
+it when you add a port.
+
+## 10. Where things are written down
+
+The documentation index is [docs/README.md](README.md). Two rules from it bite most often:
+every claim about an external project carries a checked URL or the word **(unverified)**, and
+every measured number is attributed to the internal benchmark with its date and method — never
+rounded, never reworded. Decisions are ADRs under [adr/](adr/README.md); their bodies are
+history and are never rewritten, only amended or superseded, and the index table is updated in
+the same change.

@@ -2,7 +2,8 @@
 
 Written 2026-09-19. Milestones are ordered by dependency. Each one lists the BigBrain task that
 tracks it (workspace `appricot`) and the exit criteria that close it. A milestone is done when
-every exit criterion is met, not when its code exists.
+every exit criterion is met, not when its code exists. The "where it stands" notes are dated
+2026-09-21.
 
 The effort estimates are one senior engineer's own figures from the September 2026 research, with
 no external source: about 8-12 engineer-weeks to an S1 MVP and 20-28 to parity with a mature
@@ -26,7 +27,7 @@ Exit criteria:
 
 - `docker compose build dev` and `docker compose run --rm dev just check` pass on a clean clone.
   Nothing runs on the host. No host port is published.
-- `CLAUDE.md` and `AGENTS.md` state the working rules, and they agree with the compose file, the
+- `AGENTS.md` states the working rules, and they agree with the compose file, the
   justfile and the scripts.
 - The five Rust crates and two npm packages exist as stubs, and the check runs format, lint, test
   and the licence gate for both graphs.
@@ -37,6 +38,11 @@ Exit criteria:
   2026-09-20: APPricot is **MIT OR Apache-2.0**. `LICENSE-MIT` and `LICENSE-APACHE` sit at the
   root, every crate and every package carries that SPDX expression, and `cargo deny` gates the
   Rust graph against the permissive list in ADR-0002 §2.
+
+Where it stands (2026-09-21): done. The gates pass on a clean clone, the five crates and the
+client/react packages exist with full contents, and the docs are written. A third npm package,
+`@appricot/demo` (the demo host page), joined later with the client work — the criterion's "two
+npm packages" counted `client` and `react`.
 
 ## M1: Wire spec v0 and the X11 capture spike
 
@@ -85,6 +91,12 @@ Xvfb, using `appricot-x11` as the window manager.
 M1 is done when both tasks are done and the spec has been revised with what the spike measured.
 Decision point: S1 or S3 for M2. If neither lands within the estimates, stop and say so.
 
+Where it stands (2026-09-21): the code side of `l1-wire-spec-v0` has landed — `appricot-proto`
+encodes and decodes all 24 v0 messages, refuses any input that breaks a limit before it
+allocates, generates the test vectors, and the TypeScript mirror in `@appricot/client` passes
+them; both decoders are fuzzed. `l1-spike-x11-capture` has not run: every measurement it owns
+is still open, and v0 stays a draft until it does.
+
 ## M2: Client MVP
 
 `l1-client-mvp`. A host page shows the application's windows as its own windows.
@@ -107,15 +119,23 @@ Exit criteria:
   parent-plus-margin box, or take focus. This is a CI test.
 - Decoders in the browser realm have fuzz tests.
 
+Where it stands (2026-09-21): the code side has landed and is gated in CI — the streamer
+(token auth, readiness, ack-based flow control, the resume grace), `@appricot/client` and
+`@appricot/react`, the hostile fixture and the decoder fuzz tests, and a demo host page that
+draws the streamed windows as its own floating windows under a strict CSP. Still open: the
+real-browser pass on desktop Chrome, Firefox and Safari, and everything that needs the pilot
+application on a real device.
+
 ## M3: First host integration behind a flag
 
 `first-host-integration`. The pilot application becomes APPricot's first app profile, inside the
 first host application.
 
 That host application lives in its own repository ([ADR-0001](adr/0001-separate-repository.md)).
-The work in this milestone happens **there**, by that project's own process and review. APPricot delivers versioned artefacts
-— the streamer binary or image layer, and the npm packages — plus an app profile, and nothing
-else. Nothing in this milestone edits APPricot to suit one consumer; anything that looks like it
+The work in this milestone happens **there**, by that project's own process and review. APPricot
+delivers versioned artefacts — the streamer binary or image layer, and the npm packages — plus
+an app profile, and nothing else. Nothing in this milestone edits APPricot to suit one consumer;
+anything that looks like it
 must is a gap in the interface and is fixed as one.
 
 Exit criteria:

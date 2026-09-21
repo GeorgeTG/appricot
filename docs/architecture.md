@@ -1,13 +1,17 @@
 # Architecture
 
-**Status: Draft** (2026-09-19). Only L1 will have code at first. L2 and L3 are described here so
-that L1 does not paint them into a corner. Anything marked "open" is decided in the task named
-next to it (see [roadmap.md](roadmap.md)).
+**Status: as-built for L1** (refreshed 2026-09-21). Layer 1 — the wire protocol, the five Rust
+crates, the streamer binary and the TypeScript client — is implemented and its gates pass. The
+X11 capture spike has not run: every measurement the spike owns is still open, and each such
+place says so. L2 and L3 remain described here only, so that L1 does not paint them into a
+corner. Anything marked "open" is decided in the task named next to it (see
+[roadmap.md](roadmap.md)).
 
-Much of this document describes a **proposed** design. The three layers, the Wayland-shaped window
-model and the backend order come from [ADR-0004](adr/0004-layers-window-model-and-first-backend.md);
-the client's rules for server data come from [ADR-0003](adr/0003-untrusted-server-client.md). Both
-are Proposed, not accepted. The licence is decided: APPricot is **MIT OR Apache-2.0**
+The three layers, the Wayland-shaped window model and the backend order come from
+[ADR-0004](adr/0004-layers-window-model-and-first-backend.md); the client's rules for server
+data come from [ADR-0003](adr/0003-untrusted-server-client.md). Both are still Proposed, not
+accepted: the landed code follows them, and the user has not adopted them as decisions. The
+licence is decided: APPricot is **MIT OR Apache-2.0**
 ([ADR-0002](adr/0002-licence.md)), and the permissive-only rule for dependencies comes with it.
 If the user amends an ADR, this document follows it.
 
@@ -21,56 +25,61 @@ it. A claim with no measurement behind it says so.
 
 ## 1. The shape in one picture
 
-```
- host app backend ----(session-ticket API, server to server)----> L3 broker / L2 node
-        |
-        | serves the host page, hands the browser a ticket
-        v
- browser: host page (origin H)
-   host chrome: floating windows, title bars, taskbar      <- drawn by the host
-     +-- <canvas> "App - login"        <- @appricot/client draws pixels only
-     +-- <canvas> "App - main window"
-          \_____________ one WebSocket per session (binary frames) ___________/
-                                     |
- L3 edge router         routes by the node named in the ticket (planned)
-                                     |
- L2 node proxy          checks the ticket, relays frames, bounded buffers (planned)
-                                     |   loopback or unix socket, per-session stream token
- app container (one per session, sandboxed)
-   appricot-streamer    window manager + capture + encode + input + protocol server
-   Xvfb                 headless X server; the streamer needs its Composite, DAMAGE,
-                        XFIXES, XTEST, RANDR and XKB extensions
-   the app              e.g. a Qt6/xcb X11 desktop application
-```
+![The shape in one picture](diagrams/shape.svg)
+
+*The shape in one picture: the host app backend hands the browser a ticket, the host page draws
+its own chrome around one canvas per streamed window, and the app container holds Xvfb, the
+application and `appricot-streamer` behind a loopback or unix socket with a per-session stream
+token. The edge router and node proxy are planned (L2/L3); everything else in the picture is
+built.*
+
+In the container, the streamer's real shape: `appricot-streamer` is a single **axum** server
+bound to `loopback:<port>` (an ephemeral port by default) or a `unix:<path>` socket — every
+other address form is refused loudly. It exposes two routes: `GET /readyz`, which answers
+`200 ready` only once the backend has connected and probed its display (before that, `503
+starting`), and `GET /session`, the binary-only WebSocket. It serves **one session per
+process**: a second upgrade while a session is live is refused over HTTP, a clean `Bye` ends
+the slot forever, and a socket that drops without one parks the session for the resume grace
+(10 s, [protocol/v0.md §7](protocol/v0.md#7-reattachment)) — a reconnect with the right
+`resume_serial` gets the whole window set back plus one full redraw per surface, and at grace
+expiry the backend is torn down.
 
 The host app owns the page, the chrome and the user's identity. APPricot owns the stream. The
 app inside the container owns nothing outside its own windows.
 
 ## 2. Components per layer
 
-### 2.1 L1 streamer (code at bootstrap)
+### 2.1 L1 streamer (implemented)
 
 | Component | Kind | Job | Must not |
 |---|---|---|---|
-| `crates/appricot-proto` | Rust library | Wire protocol v0: message types, encode and decode, version negotiation, the limits table. Pure: no I/O, no async runtime. | Allocate from a length it has not checked against a limit. |
-| `crates/appricot-core` | Rust library | The window model ([§4](#4-the-window-model)): surfaces, roles, positioners, scale, configure/ack. The `CaptureBackend` and `InputSink` traits. Per-surface damage accumulation. Frame scheduling driven by client acks (credits), never by a timer. | Name an X11 or Wayland type. |
-| `crates/appricot-x11` | Rust library | The S1 backend on x11rb. Composite redirect, Damage, pixel grab from the named window pixmap, XTEST input, XFixes cursor and selections, RandR root sizing. It is also the window manager: there is no other WM in the container. | Trust anything an X client says about stacking, focus or size without clamping it. |
-| `crates/appricot-encode` | Rust library | Tile encoders. Lossless first. The codec is open; the candidates are compared in [prior-art.md](prior-art.md). | Pull a crate off the permissive allow list into the graph ([ADR-0002](adr/0002-licence.md)). |
-| `crates/appricot-streamer` | Rust binary | Runs inside the app container. Serves the protocol over a WebSocket bound to loopback or a unix socket. Authenticates the first message with a per-session token handed in by L2 or the host. Exposes a readiness endpoint. | Listen on a non-loopback address. Accept a stream without the token. |
-| `packages/client` (`@appricot/client`) | TypeScript, no framework | Connection and reconnect, the codec mirror, a window registry with events, tile decode (`createImageBitmap` where possible), input capture and key mapping, clipboard hand-off under host policy. Draws into canvases the host provides. | Touch the DOM outside those canvases. Turn a server string into markup, script or a URL ([ADR-0003](adr/0003-untrusted-server-client.md)). |
+| `crates/appricot-proto` | Rust library | Wire protocol v0: all 24 messages, generated by prost from `wire.proto`, with encode, decode and validation; the limits table (24 caps); the shared test vectors both codecs must reproduce. Pure: no I/O, no async runtime. | Allocate from a length it has not checked against a limit. |
+| `crates/appricot-core` | Rust library | The window model ([§4](#4-the-window-model)): surfaces, roles, positioners, scale, configure/ack. The frozen `CaptureBackend` and `InputSink` traits. The session state machine: bounded per-surface damage accumulation, frame scheduling driven by client acks (credits, never a timer), detach, grace expiry and resume. | Name an X11 or Wayland type. |
+| `crates/appricot-x11` | Rust library | The S1 backend on x11rb — and the window manager: there is no other WM in the container. Composite manual redirect held from `connect()` for the connection's life, Damage, pixel grab from the named window pixmap (`GetImage`), XTEST input, XFixes cursor and selections, the keymap. Toplevels are kept apart in a large root ([§4.2](#42-how-x11-maps-into-the-model)). | Trust anything an X client says about stacking, focus or size without clamping it. |
+| `crates/appricot-encode` | Rust library | Tile encoders: RAW and QOI, both written in-house from the published specification — no third-party codec code in the graph ([ADR-0002](adr/0002-licence.md)). Tiles are cut on a 256-pixel grid aligned to the surface origin (`TILE_SIZE` = 256; a tile never crosses a grid line), at most 48 per frame; QOI falls back to RAW whenever it would not shrink the tile. | Pull a crate off the permissive allow list into the graph ([ADR-0002](adr/0002-licence.md)). |
+| `crates/appricot-streamer` | Rust library + binary | The binary that runs inside the app container, in the shape [§1](#1-the-shape-in-one-picture) describes: axum, loopback/unix bind, token auth (byte compare with no early exit), readiness, the resume grace and its keeper, the backend actor on its own OS thread. | Listen on a non-loopback address. Accept a stream without the token. |
+| `packages/client` (`@appricot/client`) | TypeScript, no framework, zero runtime dependencies | Connection and reconnect, the hand-written codec mirror (pinned byte-exact by the Rust-generated test vectors), a window registry with events, tile decode into `ImageData`, input capture and key mapping, clipboard hand-off under host policy. Draws into canvases the host provides. | Touch the DOM outside those canvases. Turn a server string into markup, script or a URL ([ADR-0003](adr/0003-untrusted-server-client.md)). |
 | `packages/react` (`@appricot/react`) | TypeScript, React | Provider, hooks over the registry, a window-canvas component. The host renders its own chrome around it. | Render chrome. |
+| `packages/demo` (`@appricot/demo`) | TypeScript, React | The demo host page and its static server: serves the page under a strict CSP and reverse-proxies `/session` and `/readyz` to the streamer's loopback bind, so the streamer is never published. Dev-only; never in a shipped dependency graph. | Shipping in anyone's dependency graph. |
 
-Crate dependencies point one way: `proto` <- `core` <- `x11`, and `appricot-streamer` may depend on
-all of them. Nothing points back: neither `appricot-proto` nor `appricot-core` depends on a backend
-or on an encoder, and `appricot-proto` depends on no sibling at all. At bootstrap the edges that
-exist are `core` -> `proto`, `x11` -> `core` and `streamer` -> `proto`; `appricot-encode` has no
-sibling dependency yet, and gets one when it has code to share. How much of `proto`'s vocabulary
-`core` reuses, and how much the streamer maps between the two, is settled in l1-wire-spec-v0. The
-TypeScript client mirrors `proto`; it does not depend on Rust code at run time.
+Crate dependencies point one way: `proto` <- `core` <- `x11`, `encode` -> `core`, and
+`appricot-streamer` may depend on all of them. Nothing points back: neither `appricot-proto`
+nor `appricot-core` depends on a backend or on an encoder, and `appricot-proto` depends on no
+sibling at all. The edges as built are `core` -> `proto`, `x11` -> `core`, `encode` -> `core`
+and `streamer` -> `proto`/`core`/`x11`/`encode`. What `core` reuses from `proto` is the bounded
+string types (`Title`, `AppId`); the rest of the model is its own, and the streamer maps
+between model events and wire messages. The TypeScript client mirrors `wire.proto` by hand —
+zero runtime dependencies, held byte-exact by the shared test vectors — and depends on no Rust
+code at run time.
+
+![The code map](diagrams/code-map.svg)
+
+*The code map: every crate and package, what each owns, and the one-way edges between them.*
 
 **Open (l1-spike-x11-capture):** who starts Xvfb and the app, and who ends the container when the
 app's last process exits. In the pilot deployment a small in-image supervisor does this. Here it
-may become a streamer mode or a sibling binary.
+may become a streamer mode or a sibling binary. (The dev container's entrypoint starts Xvfb for
+the integration tests; that is a development convenience, not this decision.)
 
 ### 2.2 L2 node (documented, not scaffolded)
 
@@ -124,25 +133,36 @@ rules follow from them, and the rest of this section is their implementation:
 3. **A reconnect must not cost the session.** The application's lifetime belongs to its container,
    not to the transport. A browser that drops reconnects to the same session, on the same node.
 
+![The data path](diagrams/data-path.svg)
+
+*The data path, end to end: damage to tiles to Frame to host canvas to FrameAck — ack-driven,
+never a timer; input flows the other way.*
+
 ### 3.1 Pixels: app to host canvas
 
 1. The app draws into its X window.
 2. Composite keeps that window's pixels in an off-screen pixmap. The redirect must be held from
    before the app starts: in the benchmark, a redirect made at grab time returned stale pixels.
+   The backend holds `CompositeRedirectSubwindows(root, Manual)` for its connection's whole
+   life.
 3. The Damage extension reports changed rectangles. `appricot-core` adds them to that surface's
    dirty region.
-4. The scheduler checks the surface's credits (frames sent but not yet acked). With a credit
-   free, it takes the dirty region. Without one, it keeps coalescing. Nothing runs on a timer, so
-   an idle window costs nothing.
-5. The backend reads the dirty rectangles from the named window pixmap (`GetImage`, or MIT-SHM
-   later). The benchmark confirmed this works while the window is covered by another window.
-6. `appricot-encode` encodes tiles. The frame carries surface id, sequence number, rectangles,
-   codec and payload.
-7. The streamer sends it as one binary WebSocket message. The node proxy and the edge relay it
-   without parsing, under a size cap.
-8. The client checks the header against the limits, decodes the tiles (in a Worker where
-   possible), draws them into the canvas the host attached for that surface, and acks the
-   sequence number.
+4. The scheduler checks the surface's credits (frames sent but not yet acked;
+   `MAX_FRAME_CREDITS` = 4). With a credit free, it takes the dirty region. Without one, it
+   keeps coalescing. Nothing runs on a timer, so an idle window costs nothing.
+5. The backend reads the dirty rectangles from the named window pixmap (`GetImage`, rectangle
+   by rectangle). The benchmark confirmed this works while the window is covered by another
+   window.
+6. `appricot-encode` cuts the taken region into tiles on the 256-pixel grid aligned to the
+   surface origin and encodes each tile as QOI, falling back to RAW when QOI would not shrink
+   it, keeping a frame to at most `MAX_TILES_PER_FRAME` (48) tiles. The frame carries surface
+   id, sequence number, rectangles, per-tile codec and payload, and the `full_redraw` flag.
+7. The streamer sends it as one binary WebSocket message. The node proxy and the edge (planned,
+   L2/L3) relay it without parsing, under a size cap.
+8. The client checks the message against the limits table, decodes the tiles into `ImageData`
+   and draws them into the canvas the host attached for that surface (a scratch canvas carries
+   tiles through `drawImage` when the surface is scaled), then acks the sequence number. The
+   ack means drawn, not received.
 
 ### 3.2 Input: host canvas to app
 
@@ -154,7 +174,10 @@ rules follow from them, and the rest of this section is their implementation:
 4. The streamer maps it to X. Two facts measured in the benchmark shape this: XTEST keys reach a
    covered window only after the streamer sets X focus on it, and an XTEST click lands on
    whichever window is on top at that point. So the streamer, as window manager, sets focus and
-   raises (or keeps apart) the target before it injects pointer events.
+   raises (or keeps apart) the target before it injects pointer events. As built, the S1 backend
+   keeps toplevels apart in a large root ([§4.2](#42-how-x11-maps-into-the-model)), so the
+   click lands on the right window by construction and injection stays a plain coordinate
+   computation.
 5. On blur, the client releases every held key and button.
 
 ### 3.3 Window lifecycle
@@ -163,7 +186,7 @@ rules follow from them, and the rest of this section is their implementation:
    the streamer sends `surface_new` with its role, parent and hints.
 2. The client registry emits a "window added" event. The host creates its own floating window and
    hands the client a canvas for it.
-3. The host sends a **configure** (serial, size, states). The streamer applies it to the X window.
+3. The host sends a **configure** (serial, size). The streamer applies it to the X window.
    When the app has taken the new size, the streamer sends **ack_configure** with the serial and
    the size the app really took (it may clamp to its minimum). The host sizes its chrome to that.
 4. Title, app id and icon changes arrive as metadata. The client exposes them as plain data.
@@ -172,10 +195,11 @@ rules follow from them, and the rest of this section is their implementation:
 
 ## 4. The window model
 
-The proposed model is shaped after Wayland's xdg-shell, whatever the backend is. The reasons are
-in [ADR-0004](adr/0004-layers-window-model-and-first-backend.md) (Proposed). In short: Wayland
-already names the right concepts (surfaces with roles, damage per surface, popups placed relative to a parent,
-per-surface scale, explicit configure and ack), and a later Wayland backend should need no change
+The model is shaped after Wayland's xdg-shell, whatever the backend is; the decision is
+[ADR-0004](adr/0004-layers-window-model-and-first-backend.md) (Proposed, and followed by the
+landed code). The reasons are in the ADR. In short: Wayland already names the right concepts
+(surfaces with roles, damage per surface, popups placed relative to a parent, per-surface
+scale, explicit configure and ack), and a later Wayland backend should need no change
 to the wire or the client.
 
 ### 4.1 Concepts
@@ -204,7 +228,7 @@ streamer, and ack comes back.
 | popup | An **override-redirect** window. It maps without asking the WM; ICCCM reserves it for cases like pop-up menus (same spec). Parent: `WM_TRANSIENT_FOR` if set, otherwise the focused toplevel. |
 | positioner | Derived: the popup's root position minus its parent's root position gives the anchor offset. The client clamps it ([ADR-0003](adr/0003-untrusted-server-client.md)). |
 | damage | `DamageNotify` on each managed and override-redirect window, subtracted into a per-surface region. |
-| pixels | `CompositeRedirectSubwindows(root, Manual)` from start-up, then `NameWindowPixmap`, which "will remain allocated until freed, even if 'window' is unmapped, reconfigured or destroyed" ([Composite protocol](https://xorg.freedesktop.org/archive/current/doc/compositeproto/compositeproto.txt)). A new pixmap is named after each map or resize. The benchmark held an `Automatic` redirect, not `Manual`; `Manual` is checked in l1-spike-x11-capture. |
+| pixels | `CompositeRedirectSubwindows(root, Manual)` from start-up, then `NameWindowPixmap`, which "will remain allocated until freed, even if 'window' is unmapped, reconfigured or destroyed" ([Composite protocol](https://xorg.freedesktop.org/archive/current/doc/compositeproto/compositeproto.txt)). A new pixmap is named after each map or resize. The benchmark held an `Automatic` redirect, not `Manual` — the stale-pixels finding above is why the landed backend takes `Manual` at `connect()` and holds it for the connection's life. |
 | scale | One scale per session, set at app launch (for Qt, `QT_SCALE_FACTOR`). Whether a given application honours it is a per-profile fact, and unverified until that profile is tested. The wire still carries scale per surface. |
 | configure / ack | `ConfigureWindow` plus a synthetic `ConfigureNotify`; ack when the app's window has the new geometry. `_NET_WM_SYNC_REQUEST` is optional. |
 | title, app id | `_NET_WM_NAME` (UTF-8) or `WM_NAME`; `WM_CLASS` for the app id. Sent as text, capped. |
@@ -218,8 +242,14 @@ start size: xorg-server 21.1.7 sets the RandR range to "1, 1, pScreen->width, pS
 ([`hw/vfb/InitOutput.c:821`](https://gitlab.freedesktop.org/xorg/xserver/-/raw/xorg-server-21.1.7/hw/vfb/InitOutput.c),
 checked 2026-09-19). So it starts large and shrinks. Shrinking needs a new RandR
 mode set on the CRTC, not only a new screen size. Whether the X root follows the host's viewport,
-or the streamer keeps X toplevels apart in a large root, is **open (l1-spike-x11-capture)**: the
-first makes Qt flip menus at the edges the user sees; the second makes pointer injection simpler.
+or the streamer keeps X toplevels apart in a large root, was **open (l1-spike-x11-capture)**.
+The landed `appricot-x11` resolves it for now the second way: toplevels are **kept apart**,
+placed left to right in rows in the root with a 16-pixel gap, wrapping, restarting at the origin
+when full — because an XTEST click lands on whichever window is on top at that point (§3.2),
+windows that never overlap need no stacking management for input to be correct, and the host
+clamps whatever it shows. The spike logs how the pilot application's override-redirect windows
+actually place and may flip the choice (the decision is documented at the top of
+`crates/appricot-x11/src/wm.rs`).
 
 For the pilot application the choice matters less than it might. Its menus and its settings panel
 are drawn **inside** its main window, not as extra X windows (internal benchmark), so there are
@@ -378,9 +408,10 @@ attacks:
 
 | Question | Decided in |
 |---|---|
-| Codec for the MVP (lossless) and later for motion | l1-wire-spec-v0, with the spike's measurements |
-| X root equals the viewport, or toplevels kept apart in a large root | l1-spike-x11-capture |
+| Codec for motion (the lossless pair, RAW and in-house QOI, is decided for v0, [protocol/v0.md §11](protocol/v0.md#11-tile-codecs)) | l1-spike-x11-capture (encode time and bytes on real rectangles) |
+| X root equals the viewport, or toplevels kept apart in a large root | landed as kept-apart (§4.2); l1-spike-x11-capture revisits it against real popups |
 | Who supervises Xvfb and the app inside the container | l1-spike-x11-capture |
 | Does the streamer run under a different uid from the app | l1-spike-x11-capture (and L2's egress design) |
 | The pilot application's full window inventory once it connects to a back end | l1-spike-x11-capture (needs a back end to connect to) |
 | S1 versus S3 | l1-spike-x11-capture |
+| The streamer's own memory and CPU cost, next to the reference figures of §6 | l1-spike-x11-capture (unmeasured until then) |

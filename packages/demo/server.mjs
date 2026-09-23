@@ -24,6 +24,11 @@ const port = Number.isInteger(portArg) && portArg >= 0 && portArg <= 65535 ? por
 try {
   const running = await startDemoServer({
     port,
+    // 0.0.0.0 inside the container, on purpose: Docker's port publishing forwards to the
+    // container's own interface, so a loopback bind here would be unreachable from the host.
+    // The exposure is set on the host side instead, where the port is published on the
+    // host's loopback only (`-p "127.0.0.1:...:8390"`). The session endpoint also refuses
+    // any Host that is not a loopback name, and any Origin that is not the page's own.
     host: '0.0.0.0',
     // The proxy's per-session lines are the demo's only eye on streamer refusals (the
     // streamer itself logs nothing per connection); without this they were silently

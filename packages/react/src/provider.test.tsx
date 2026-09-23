@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import type { ReactElement } from 'react';
+import { StrictMode, type ReactElement } from 'react';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -137,7 +137,129 @@ describe('AppricotProvider', () => {
     expect(m.connect).toHaveBeenLastCalledWith('wss://two.test/session', {
       token: new TextEncoder().encode('stream-token'),
     });
+    const [first, second] = m.connections();
+    expect(first).not.toBe(second);
+    // The OLD connection is the one closed, and it keeps no listener of the provider's.
+    expect(first?.close).toHaveBeenCalledTimes(1);
+    expect(first !== undefined && m.connectionListenerCount(first)).toBe(0);
+    // The new one is live and followed.
+    expect(second?.close).not.toHaveBeenCalled();
+    act(() => {
+      m.setStatus('open');
+    });
+    expect(screen.getByTestId('status').textContent).toBe('open');
+  });
+
+  it('ignores status and messages from a connection it already replaced', () => {
+    const m = clientMock();
+    const view = render(
+      <AppricotProvider url="wss://one.test/session" token="stream-token">
+        <Probe />
+      </AppricotProvider>,
+    );
+    const first = m.latest();
+    view.rerender(
+      <AppricotProvider url="wss://two.test/session" token="stream-token">
+        <Probe />
+      </AppricotProvider>,
+    );
+    act(() => {
+      first?.events.emit('status', 'open');
+      first?.events.emit('message', { kind: 'surfaceNew', surfaceNew: { surfaceId: 1 } });
+    });
+    expect(screen.getByTestId('status').textContent).toBe('connecting');
+    expect(m.apply).not.toHaveBeenCalled();
+  });
+
+  it('reconnects when the token changes', () => {
+    const m = clientMock();
+    const view = render(
+      <AppricotProvider url={TEST_URL} token="ticket-a">
+        <Probe />
+      </AppricotProvider>,
+    );
+    view.rerender(
+      <AppricotProvider url={TEST_URL} token="ticket-b">
+        <Probe />
+      </AppricotProvider>,
+    );
+    expect(m.connect).toHaveBeenCalledTimes(2);
+    expect(m.connect).toHaveBeenLastCalledWith(TEST_URL, {
+      token: new TextEncoder().encode('ticket-b'),
+    });
     expect(m.connections()[0]?.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('compares a byte token by content: an equal new Uint8Array does not reconnect', () => {
+    const m = clientMock();
+    const view = render(
+      <AppricotProvider url={TEST_URL} token={new TextEncoder().encode('ticket')}>
+        <Probe />
+      </AppricotProvider>,
+    );
+    // An inline encode on every render is the common host pattern.
+    view.rerender(
+      <AppricotProvider url={TEST_URL} token={new TextEncoder().encode('ticket')}>
+        <Probe />
+      </AppricotProvider>,
+    );
+    view.rerender(
+      <AppricotProvider url={TEST_URL} token="ticket">
+        <Probe />
+      </AppricotProvider>,
+    );
+    expect(m.connect).toHaveBeenCalledTimes(1);
+    expect(m.connections()[0]?.close).not.toHaveBeenCalled();
+
+    // Different bytes do reconnect.
+    view.rerender(
+      <AppricotProvider url={TEST_URL} token={new TextEncoder().encode('other')}>
+        <Probe />
+      </AppricotProvider>,
+    );
+    expect(m.connect).toHaveBeenCalledTimes(2);
+    expect(m.connect).toHaveBeenLastCalledWith(TEST_URL, {
+      token: new TextEncoder().encode('other'),
+    });
+  });
+
+  it('leaves exactly one live connection after a StrictMode mount', () => {
+    const m = clientMock();
+    render(
+      <StrictMode>
+        <AppricotProvider url={TEST_URL} token="stream-token">
+          <Probe />
+        </AppricotProvider>
+      </StrictMode>,
+    );
+    // StrictMode runs the effect, its cleanup, and the effect again.
+    expect(m.connect).toHaveBeenCalledTimes(2);
+    const live = m.connections().filter((c) => c.close.mock.calls.length === 0);
+    expect(live).toHaveLength(1);
+    expect(live[0]).toBe(m.latest());
+    // The closed one has no listener left, and the live one drives the status.
+    const closed = m.connections()[0];
+    expect(closed !== undefined && m.connectionListenerCount(closed)).toBe(0);
+    act(() => {
+      m.setStatus('open');
+    });
+    expect(screen.getByTestId('status').textContent).toBe('open');
+  });
+
+  it('gives every connection a fresh registry', () => {
+    const m = clientMock();
+    const view = render(
+      <AppricotProvider url="wss://one.test/session" token="stream-token">
+        <Probe />
+      </AppricotProvider>,
+    );
+    const before = m.registries().length;
+    view.rerender(
+      <AppricotProvider url="wss://two.test/session" token="stream-token">
+        <Probe />
+      </AppricotProvider>,
+    );
+    expect(m.registries().length).toBe(before + 1);
   });
 
   it('throws below the provider', () => {

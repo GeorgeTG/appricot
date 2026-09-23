@@ -77,6 +77,24 @@ export function applyResize(
 }
 
 /**
+ * The size the demo grants an app's ResizeAsk (C1: hosts honour the ask by default): the
+ * asked size, clamped to the protocol's surface bound `max` and to the desktop, which is the
+ * viewport less the title bar. A viewport with no size yet (not laid out) clamps to `max`
+ * only. An ask with no area asks for nothing a Configure could carry: null.
+ */
+export function grantResize(asked: Size, viewport: Size, max: Size): Size | null {
+  if (asked.width < 1 || asked.height < 1) {
+    return null;
+  }
+  const roomWidth = viewport.width >= 1 ? viewport.width : max.width;
+  const roomHeight = viewport.height > TITLEBAR_HEIGHT ? viewport.height - TITLEBAR_HEIGHT : max.height;
+  return {
+    width: Math.max(1, Math.min(asked.width, max.width, roomWidth)),
+    height: Math.max(1, Math.min(asked.height, max.height, roomHeight)),
+  };
+}
+
+/**
  * The position for the n-th window of a cascade: diagonally offset, wrapped before it runs
  * off the viewport, and clamped so the title bar stays inside. Pure bookkeeping — the wm
  * passes the count of windows already placed.

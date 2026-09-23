@@ -10,10 +10,12 @@
  * drag-to-move, a close button that sends CloseRequest, a minimize button that hides the
  * window without touching the session (the canvas, the renderer and the input stay attached;
  * a minimized parent hides its popups with it, since the popup layer is inside the window),
- * a canvas the SDK's SurfaceRenderer attaches to, click-to-focus (FocusNotify plus a visual
- * focus ring), a resize grip that sends Configure on release and sizes the chrome to the
- * ConfigureAck, an absolutely-positioned popup layer clamped to the parent (ADR-0003 §5),
- * and a cursor overlay drawn from the wire's cursor pixels.
+ * a focusable canvas the SDK's SurfaceRenderer attaches to, click-to-focus (FocusNotify, a
+ * visual focus ring, and DOM focus on the canvas so the keyboard reaches it), a resize grip
+ * that sends Configure on release, a ResizeAsk answered with a Configure clamped to the
+ * desktop, chrome sized to every ConfigureAck (serial 0 included: the app resized itself), an
+ * absolutely-positioned popup layer clamped to the parent (ADR-0003 §5), and a cursor
+ * overlay drawn from the wire's cursor pixels.
  *
  * All decisions live in the pure modules under src/wm/ and src/token.ts; this file only
  * mirrors their results into the DOM and feeds them events. Nothing here reads the page's
@@ -38,7 +40,7 @@ import type {
   SurfaceRecord,
 } from '@appricot/client';
 import { POPUP_MARGIN_PX, popupLocalRect } from './wm/popups';
-import { applyDrag, applyResize } from './wm/geometry';
+import { applyDrag, applyResize, grantResize } from './wm/geometry';
 import type { Point, Size } from './wm/geometry';
 import { WindowManager } from './wm/windows';
 import type { ToplevelState } from './wm/windows';
@@ -159,12 +161,47 @@ function syncStacking(): void {
   }
 }
 
-/** Click-to-focus: the host raises the window and tells the server (FocusNotify). */
-function focusSurface(surfaceId: number): void {
+/**
+ * How a focus change moves DOM focus:
+ * - 'user': the user acted on the window (a click, minimize, restore): its canvas takes DOM
+ *   focus.
+ * - 'auto': the change came from the session (a new window, a focus-ask, a window going
+ *   away): the canvas takes DOM focus only when the user is not typing into a host field, so
+ *   a server can never pull the keyboard out of one (ADR-0003 §6: keys typed for the host
+ *   never reach a session).
+ * - 'none': a popup of the window takes the click, and DOM focus belongs on its canvas.
+ */
+type DomFocus = 'user' | 'auto' | 'none';
+
+/** True when DOM focus is not in a host text field: no input (other than a button or a
+ * checkbox), no textarea, no select, nothing editable. */
+function domFocusIsFree(): boolean {
+  const active = document.activeElement;
+  if (active instanceof HTMLInputElement) {
+    return ['button', 'checkbox', 'radio', 'reset', 'submit'].includes(active.type);
+  }
+  if (active instanceof HTMLTextAreaElement || active instanceof HTMLSelectElement) {
+    return false;
+  }
+  return !(active instanceof HTMLElement && active.isContentEditable);
+}
+
+/**
+ * Click-to-focus: the host raises the window and tells the server (FocusNotify). DOM focus
+ * follows onto the window's canvas, because that is where attachInput listens for keys: a
+ * canvas without DOM focus never sees one (C11). See DomFocus for when it follows.
+ */
+function focusSurface(surfaceId: number, domFocus: DomFocus = 'user'): void {
   app.wm.focus(surfaceId);
   syncStacking();
-  if (app.conn !== null && app.conn.status === 'open' && app.wm.focusedId === surfaceId) {
+  if (app.wm.focusedId !== surfaceId) {
+    return; // unknown or minimized: nothing was focused
+  }
+  if (app.conn !== null && app.conn.status === 'open') {
     app.conn.send({ kind: 'focusNotify', focusNotify: { surfaceId } });
+  }
+  if (domFocus === 'user' || (domFocus === 'auto' && domFocusIsFree())) {
+    app.windows.get(surfaceId)?.canvas.focus({ preventScroll: true });
   }
 }
 
@@ -277,7 +314,13 @@ function repositionPopupsOf(parentId: number): void {
     if (popup === undefined || record === undefined) {
       continue;
     }
-    const local = popupLocalRect(record.positioner ?? { anchor: 0, gravity: 0 }, parent.size);
+    const positioner = record.positioner ?? { anchor: 0, gravity: 0 };
+    // Placed at the size the popup has now: one that resized itself (a serial-0
+    // ConfigureAck, C1) is drawn at its new size, not the size its positioner first named.
+    const sized = record.size.width > 0 && record.size.height > 0
+      ? { ...positioner, size: record.size }
+      : positioner;
+    const local = popupLocalRect(sized, parent.size);
     // The layer sits POPUP_MARGIN_PX outside the content box, so layer coordinates are
     // parent-local coordinates shifted by that margin.
     popup.el.style.left = `${local.x + POPUP_MARGIN_PX}px`;
@@ -350,17 +393,35 @@ function wireDrag(dom: WindowDom, state: ToplevelState): void {
     focusSurface(state.surfaceId);
     const grab = { x: down.clientX - state.x, y: down.clientY - state.y };
     titlebar.setPointerCapture(down.pointerId);
+    // One controller per gesture: whichever of up or cancel ends it removes all three
+    // listeners, so no stale handler outlives the gesture.
+    const gesture = new AbortController();
     const onMove = (move: PointerEvent): void => {
       const placed = applyDrag(grab, { x: move.clientX, y: move.clientY }, state.size, viewportSize(windowsLayer));
       app.wm.move(state.surfaceId, placed.x, placed.y);
       applyWindowPosition(state.surfaceId);
     };
     const onUp = (): void => {
-      titlebar.removeEventListener('pointermove', onMove);
+      gesture.abort();
     };
-    titlebar.addEventListener('pointermove', onMove);
-    titlebar.addEventListener('pointerup', onUp, { once: true });
-    titlebar.addEventListener('pointercancel', onUp, { once: true });
+    titlebar.addEventListener('pointermove', onMove, { signal: gesture.signal });
+    titlebar.addEventListener('pointerup', onUp, { signal: gesture.signal });
+    titlebar.addEventListener('pointercancel', onUp, { signal: gesture.signal });
+  });
+}
+
+/**
+ * Keeps a press on non-focusable host chrome (the title bar, the resize grip) from moving DOM
+ * focus: the browser's default for a mousedown there is to focus the body, which would take
+ * the keyboard away from the canvas focusSurface just focused. The window controls and the
+ * canvases keep their default.
+ */
+function keepFocusOnChrome(element: HTMLElement, controls: readonly Element[]): void {
+  element.addEventListener('mousedown', (down) => {
+    if (down.target instanceof Element && controls.includes(down.target)) {
+      return;
+    }
+    down.preventDefault();
   });
 }
 
@@ -377,6 +438,9 @@ function wireResizeGrip(dom: WindowDom, state: ToplevelState): void {
     const startSize = { ...state.size };
     const grabStart = { x: down.clientX, y: down.clientY };
     grip.setPointerCapture(down.pointerId);
+    // One controller per gesture: up or cancel ends it once and removes all three
+    // listeners, so a later pointercancel cannot fire a stale handler and send a Configure.
+    const gesture = new AbortController();
     const onMove = (move: PointerEvent): void => {
       const size = applyResize(startSize, grabStart, { x: move.clientX, y: move.clientY }, {
         width: MAX_SURFACE_WIDTH,
@@ -386,7 +450,7 @@ function wireResizeGrip(dom: WindowDom, state: ToplevelState): void {
       applyWindowSize(state.surfaceId);
     };
     const onUp = (): void => {
-      grip.removeEventListener('pointermove', onMove);
+      gesture.abort();
       if (app.conn !== null && app.conn.status === 'open') {
         app.configureSerial += 1;
         app.conn.send({
@@ -399,9 +463,9 @@ function wireResizeGrip(dom: WindowDom, state: ToplevelState): void {
         });
       }
     };
-    grip.addEventListener('pointermove', onMove);
-    grip.addEventListener('pointerup', onUp, { once: true });
-    grip.addEventListener('pointercancel', onUp, { once: true });
+    grip.addEventListener('pointermove', onMove, { signal: gesture.signal });
+    grip.addEventListener('pointerup', onUp, { signal: gesture.signal });
+    grip.addEventListener('pointercancel', onUp, { signal: gesture.signal });
   });
 }
 
@@ -445,13 +509,19 @@ function buildWindow(record: SurfaceRecord): void {
   close.title = 'Close (sends CloseRequest)';
   titlebar.append(hostMark, appText, titleText, grow, minimize, close);
 
+  // The popup layer is a sibling of .content, not a child: .content clips at its own box
+  // (overflow: hidden), and the layer must reach --popup-margin past it (styles.css).
+  const frame = el('div', 'content-frame');
   const content = el('div', 'content');
   const canvas = el('canvas', 'surface');
+  // Focusable, so the keys attachInput listens for can reach it (C11).
+  canvas.tabIndex = 0;
   const overlay = el('canvas', 'cursor-overlay');
   const popupLayer = el('div', 'popup-layer');
-  content.append(canvas, overlay, popupLayer);
+  content.append(canvas, overlay);
+  frame.append(content, popupLayer);
   const grip = el('div', 'resize-grip');
-  root.append(titlebar, content, grip);
+  root.append(titlebar, frame, grip);
 
   const conn = app.conn;
   const renderer = SurfaceRenderer.attach(canvas, record.id, { registry: app.registry, conn });
@@ -465,8 +535,24 @@ function buildWindow(record: SurfaceRecord): void {
   app.windows.set(record.id, dom);
   windowsLayer.append(root);
 
-  // Click anywhere on the window focuses it (capture, so it lands before input sends).
-  root.addEventListener('pointerdown', () => focusSurface(record.id), true);
+  // Click anywhere on the window focuses it (capture, so it lands before input sends). A
+  // press inside a popup is the popup's: its own capture handler focuses this window
+  // without taking DOM focus from the popup's canvas.
+  root.addEventListener('pointerdown', (down) => {
+    if (down.target instanceof Node && popupLayer.contains(down.target)) {
+      return;
+    }
+    focusSurface(record.id);
+  }, true);
+  keepFocusOnChrome(titlebar, [minimize, close]);
+  keepFocusOnChrome(grip, []);
+  // DOM focus arriving some other way (Tab, say) focuses the window too, so the wm and the
+  // keyboard agree on which surface is focused.
+  canvas.addEventListener('focus', () => {
+    if (app.wm.focusedId !== record.id) {
+      focusSurface(record.id, 'none');
+    }
+  });
   close.addEventListener('click', () => {
     if (conn.status === 'open') {
       conn.send({ kind: 'closeRequest', closeRequest: { surfaceId: record.id } });
@@ -477,7 +563,8 @@ function buildWindow(record: SurfaceRecord): void {
   });
   wireDrag(dom, state);
   wireResizeGrip(dom, state);
-  content.addEventListener('pointermove', (move) => {
+  // On the frame, not the content: moves over a popup (a sibling of the content now) count too.
+  frame.addEventListener('pointermove', (move) => {
     const box = canvas.getBoundingClientRect();
     app.pointerBySurface.set(record.id, { x: move.clientX - box.left, y: move.clientY - box.top });
     if (app.wm.focusedId === record.id) {
@@ -487,7 +574,7 @@ function buildWindow(record: SurfaceRecord): void {
 
   applyWindowPosition(record.id);
   applyWindowSize(record.id);
-  focusSurface(record.id);
+  focusSurface(record.id, 'auto');
   updateWindowCount();
 }
 
@@ -501,21 +588,31 @@ function buildPopup(record: SurfaceRecord): void {
     return;
   }
   const conn = app.conn;
+  const parentId = record.parent;
   const popupEl = el('div', 'popup');
   const canvas = el('canvas', 'surface');
+  // Focusable: a menu takes the keyboard (arrows, Enter, Escape) while it is open (C11).
+  canvas.tabIndex = 0;
   popupEl.append(canvas);
   parentDom.popupLayer.append(popupEl);
   const renderer = SurfaceRenderer.attach(canvas, record.id, { registry: app.registry, conn });
   const detachInput = attachInput(canvas, record.id, {
     conn,
-    isFocused: () => app.wm.focusedId === record.parent,
+    isFocused: () => app.wm.focusedId === parentId,
     size: () => ({ width: canvas.clientWidth, height: canvas.clientHeight }),
   });
+  // A press on the popup focuses its parent window, and DOM focus goes to the popup's own
+  // canvas: keys are not addressed to a surface on the wire, the server routes them to the
+  // app's focus, so either canvas delivers them.
   popupEl.addEventListener('pointerdown', () => {
-    if (record.parent !== undefined) {
-      focusSurface(record.parent);
-    }
+    focusSurface(parentId, 'none');
+    canvas.focus({ preventScroll: true });
   }, true);
+  canvas.addEventListener('focus', () => {
+    if (app.wm.focusedId !== parentId) {
+      focusSurface(parentId, 'none');
+    }
+  });
   app.wm.addPopup(record.id, record.parent);
   app.popups.set(record.id, { el: popupEl, parentId: record.parent, renderer, detachInput });
   repositionPopupsOf(record.parent);
@@ -553,7 +650,7 @@ function wireRegistry(registry: SurfaceRegistry): void {
     }
     if (removal !== undefined) {
       if (removal.refocus !== null) {
-        focusSurface(removal.refocus);
+        focusSurface(removal.refocus, 'auto');
       } else if (app.wm.focusedId === null && app.conn?.status === 'open') {
         app.conn.send({ kind: 'blurRelease', blurRelease: {} });
       }
@@ -568,8 +665,9 @@ function wireRegistry(registry: SurfaceRegistry): void {
       setTextOnly(dom.titleText, surface.title);
       setTextOnly(dom.appText, surface.appId);
     }
-    // A title that changes while its window sits minimized must not leave a stale label on
-    // the restore strip.
+    // The wm keeps its own copy of the title, and the restore strip reads that copy: update
+    // it too, or a title that changes while its window sits minimized leaves a stale label.
+    app.wm.setMetadata(surface.id, { title: surface.title, appId: surface.appId });
     if (app.wm.isMinimized(surface.id)) {
       updateMinimizedStrip();
     }
@@ -580,26 +678,64 @@ function wireRegistry(registry: SurfaceRegistry): void {
   });
 
   registry.events.on('focus-ask', ({ surfaceId }) => {
-    // The host decides (ADR-0003 §5); the demo honours the ask like a desktop would.
+    // The host decides (ADR-0003 §5); the demo honours the ask like a desktop would, but it
+    // never pulls DOM focus out of a host text field for it ('auto').
     if (app.windows.has(surfaceId)) {
-      focusSurface(surfaceId);
+      focusSurface(surfaceId, 'auto');
     }
   });
 
   registry.events.on('configure-acked', ({ surfaceId, size }) => {
-    // Size the chrome to what the app actually took, not what we proposed.
+    // Size the chrome to what the app actually took, not what we proposed. Serial 0 is no
+    // answer to a Configure of ours: the app resized itself (C1), and the chrome follows it
+    // all the same. A popup is re-placed at its new size.
     if (app.windows.has(surfaceId)) {
       app.wm.resize(surfaceId, size);
       applyWindowSize(surfaceId);
+      return;
+    }
+    const popup = app.popups.get(surfaceId);
+    if (popup !== undefined) {
+      repositionPopupsOf(popup.parentId);
     }
   });
 
-  // resize-ask is deliberately not honoured: the host owns size (ADR-0003 §5). The demo
-  // could offer a confirmation affordance later; for now the ask changes nothing.
+  registry.events.on('resize-ask', ({ surfaceId, size }) => {
+    // The host decides size (ADR-0003 §5), and the demo grants what fits (C1): a Configure
+    // of the asked size, clamped to its desktop and to the v0 surface bound. The ack then
+    // sizes the chrome, as for a resize by the grip. A popup's ask is not a window's: its
+    // size comes from its positioner, so it changes nothing here.
+    const conn = app.conn;
+    if (!app.windows.has(surfaceId) || conn === null || conn.status !== 'open') {
+      return;
+    }
+    const granted = grantResize(size, viewportSize(windowsLayer), {
+      width: MAX_SURFACE_WIDTH,
+      height: MAX_SURFACE_HEIGHT,
+    });
+    if (granted === null) {
+      return;
+    }
+    app.configureSerial += 1;
+    conn.send({
+      kind: 'configure',
+      configure: { surfaceId, serial: app.configureSerial, size: granted },
+    });
+  });
 }
 
 // --- connection lifecycle -----------------------------------------------------------------------
 
+/** A fresh, wired registry for the next session. Surface ids are per session, so a registry
+ * never outlives the session it was fed from: the old one is dropped, not cleared. */
+function resetRegistry(): void {
+  const registry = new SurfaceRegistry();
+  wireRegistry(registry);
+  app.registry = registry;
+}
+
+/** Drops every window, popup and cursor from the page, and starts a fresh registry: after
+ * this, a re-announced surface (a resume on the same connection) is a new window again. */
 function teardownSession(): void {
   for (const surfaceId of [...app.windows.keys()]) {
     const dom = app.windows.get(surfaceId);
@@ -616,9 +752,21 @@ function teardownSession(): void {
     removePopupDom(surfaceId);
   }
   app.wm = new WindowManager();
+  resetRegistry();
   setCursorImage(null);
   updateMinimizedStrip();
   updateWindowCount();
+}
+
+/** Closes the current connection for good (a pending reconnect with it) and clears the page.
+ * The connection's later events are ignored: it is no longer `app.conn`. */
+function endSession(): void {
+  const conn = app.conn;
+  app.conn = null;
+  app.userOwned = false;
+  conn?.close();
+  teardownSession();
+  setTextOnly(sessionIdText, '');
 }
 
 function connect(): void {
@@ -632,21 +780,29 @@ function connect(): void {
     setStatus('enter the token first', 'error');
     return;
   }
+  // A closed connection may still be waiting to reconnect (the SDK reports 'closed' before
+  // its backoff). It must not come back next to the new session: close it for good, and
+  // drop what it left on the page, whose ids would collide with the new session's.
+  endSession();
   app.reconnectWanted = reconnectBox.checked;
-  const registry = new SurfaceRegistry();
   const conn = connectAppricot(sessionUrl(), {
     token: state.token,
     reconnect: app.reconnectWanted,
   });
   app.conn = conn;
-  app.registry = registry;
   app.userOwned = true;
   app.configureSerial = 0;
-  wireRegistry(registry);
+  // Every handler checks that this connection is still the page's: a replaced one can keep
+  // emitting (a late close, a status change), and it must not touch the new session.
   conn.events.on('message', (envelope) => {
-    registry.apply(envelope);
+    if (app.conn === conn) {
+      app.registry.apply(envelope);
+    }
   });
   conn.events.on('status', (status) => {
+    if (app.conn !== conn) {
+      return;
+    }
     if (status === 'open') {
       setStatus('open', 'open');
       // sessionId is untrusted text from HelloReply: text only, never markup.
@@ -656,28 +812,24 @@ function connect(): void {
       return;
     }
     setStatus(status);
+    if (status === 'connecting') {
+      connectButton.disabled = true;
+      closeButton.disabled = false;
+      return;
+    }
     if (status === 'closed') {
-      connectButton.disabled = false;
-      closeButton.disabled = true;
-    }
-  });
-  conn.events.on('close', (code) => {
-    if (app.conn !== conn) {
-      return; // a newer connect() (or a user close) owns the state now
-    }
-    // While a reconnect is pending (abnormal close, reconnect wanted), the connection
-    // object, registry and chrome all stay: the SDK re-uses them and the server resumes
-    // with one full redraw per surface. Everything else tears down.
-    const willReconnect = app.reconnectWanted && code !== 1000;
-    if (!willReconnect) {
+      // The page does not guess whether the SDK will reconnect: the windows go now. If it
+      // does reconnect and the server resumes, the server re-announces every surface, and
+      // the fresh registry builds each one again, with one full redraw. Connect starts
+      // over; Close stays enabled while a reconnect may still come, so the user can stop it.
       teardownSession();
       setTextOnly(sessionIdText, '');
-      app.conn = null;
-      app.userOwned = false;
       connectButton.disabled = false;
-      closeButton.disabled = true;
+      closeButton.disabled = !app.reconnectWanted;
     }
   });
+  connectButton.disabled = true;
+  closeButton.disabled = false;
   setStatus('connecting');
 }
 
@@ -685,12 +837,7 @@ function disconnect(): void {
   if (app.conn === null) {
     return;
   }
-  const conn = app.conn;
-  app.conn = null;
-  app.userOwned = false;
-  conn.close();
-  teardownSession();
-  setTextOnly(sessionIdText, '');
+  endSession();
   closeButton.disabled = true;
   connectButton.disabled = false;
   setStatus('idle');

@@ -146,6 +146,80 @@ describe('AppricotSurface', () => {
     expect(send).toHaveBeenCalledTimes(2);
   });
 
+  it('renders a focusable, interactive canvas', () => {
+    const { container } = renderInProvider(<AppricotSurface id={7} />);
+    const canvas = container.querySelector('canvas');
+    expect(canvas?.tabIndex).toBe(0);
+    expect(canvas?.getAttribute('role')).toBe('application');
+  });
+
+  it('moves DOM focus to the canvas when it becomes focused, so the keyboard reaches it', () => {
+    const m = clientMock();
+    m.setMeta(fakeSurfaceRecord(7));
+    const outside = document.createElement('input');
+    document.body.append(outside);
+    try {
+      const view = renderInProvider(<AppricotSurface id={7} />);
+      const canvas = view.container.querySelector('canvas');
+      outside.focus();
+      expect(document.activeElement).toBe(outside);
+
+      view.rerender(
+        <AppricotProvider url={TEST_URL} token="stream-token">
+          <AppricotSurface id={7} focused />
+        </AppricotProvider>,
+      );
+      expect(document.activeElement).toBe(canvas);
+
+      // A key typed now lands on the canvas the input listeners are attached to.
+      const keys: string[] = [];
+      canvas?.addEventListener('keydown', (e) => keys.push(e.key));
+      document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true }));
+      expect(keys).toEqual(['a']);
+    } finally {
+      outside.remove();
+    }
+  });
+
+  it('focuses the canvas on mount when it mounts focused', () => {
+    const { container } = renderInProvider(<AppricotSurface id={7} focused />);
+    expect(document.activeElement).toBe(container.querySelector('canvas'));
+  });
+
+  it('attaches the renderer and input when the surface arrives after mount', () => {
+    const m = clientMock();
+    const { container } = renderInProvider(<AppricotSurface id={7} />);
+    expect(m.rendererCalls()).toHaveLength(0);
+
+    m.setMeta(fakeSurfaceRecord(7));
+    act(() => {
+      m.emitRegistry('window-added', { surface: { id: 7 } });
+    });
+    const canvas = container.querySelector('canvas');
+    expect(m.rendererCalls()).toHaveLength(1);
+    expect(m.rendererCalls()[0]?.canvas).toBe(canvas);
+    expect(m.inputCalls()).toHaveLength(1);
+    expect(m.inputCalls()[0]?.surfaceId).toBe(7);
+  });
+
+  it('detaches the old surface and attaches the new one when the id changes', () => {
+    const m = clientMock();
+    m.setMeta(fakeSurfaceRecord(7));
+    const view = renderInProvider(<AppricotSurface id={7} />);
+    expect(m.rendererCalls().map((c) => c.surfaceId)).toEqual([7]);
+
+    m.setMetaFor(8, fakeSurfaceRecord(8));
+    view.rerender(
+      <AppricotProvider url={TEST_URL} token="stream-token">
+        <AppricotSurface id={8} />
+      </AppricotProvider>,
+    );
+    expect(m.rendererDetach).toHaveBeenCalledTimes(1);
+    expect(m.detachInput).toHaveBeenCalledTimes(1);
+    expect(m.rendererCalls().map((c) => c.surfaceId)).toEqual([7, 8]);
+    expect(m.inputCalls().map((c) => c.surfaceId)).toEqual([7, 8]);
+  });
+
   it('feeds the focused prop to attachInput through isFocused, without re-attaching', () => {
     const m = clientMock();
     m.setMeta(fakeSurfaceRecord(7));
@@ -255,6 +329,33 @@ describe('AppricotSurface', () => {
       expect(m.connections()[0]?.send).not.toHaveBeenCalled();
     });
 
+    it('proposes nothing for an unsized canvas at a scale other than 1x (no ratchet)', () => {
+      vi.useFakeTimers();
+      const m = clientMock();
+      // 2x: the renderer sized the backing store to twice the logical size, and without a
+      // host CSS size the canvas box is that backing store.
+      m.setMeta(fakeSurfaceRecord(7, { scale: 240, size: { width: 640, height: 480 } }));
+      const { container } = renderInProvider(<AppricotSurface id={7} autoConfigure />);
+      const canvas = container.querySelector('canvas') as HTMLCanvasElement;
+      canvas.width = 1280;
+      canvas.height = 960;
+      sizeOf(canvas, 1280, 960);
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(m.connections()[0]?.send).not.toHaveBeenCalled();
+
+      // Once the host gives it a size of its own, that size is proposed.
+      sizeOf(canvas, 800, 600);
+      act(() => {
+        vi.advanceTimersByTime(250);
+      });
+      expect(m.connections()[0]?.send).toHaveBeenCalledWith({
+        kind: 'configure',
+        configure: { surfaceId: 7, serial: 1, size: { width: 800, height: 600 } },
+      });
+    });
+
     it('proposes nothing when autoConfigure is off', () => {
       vi.useFakeTimers();
       const m = clientMock();
@@ -266,6 +367,77 @@ describe('AppricotSurface', () => {
         vi.advanceTimersByTime(1000);
       });
       expect(m.connections()[0]?.send).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('ResizeAsk', () => {
+    it('is honoured by default: a Configure of the asked size, clamped to the v0 limits', () => {
+      const m = clientMock();
+      m.setMeta(fakeSurfaceRecord(7));
+      renderInProvider(<AppricotSurface id={7} />);
+      const send = m.connections()[0]?.send;
+
+      act(() => {
+        m.emitRegistry('resize-ask', { surfaceId: 7, size: { width: 900, height: 700 } });
+      });
+      expect(send).toHaveBeenCalledWith({
+        kind: 'configure',
+        configure: { surfaceId: 7, serial: 1, size: { width: 900, height: 700 } },
+      });
+
+      act(() => {
+        m.emitRegistry('resize-ask', { surfaceId: 7, size: { width: 9000, height: 9000 } });
+      });
+      expect(send).toHaveBeenLastCalledWith({
+        kind: 'configure',
+        configure: { surfaceId: 7, serial: 2, size: { width: 1920, height: 1200 } },
+      });
+      expect(send).toHaveBeenCalledTimes(2);
+    });
+
+    it("ignores another surface's ask and an empty size", () => {
+      const m = clientMock();
+      m.setMeta(fakeSurfaceRecord(7));
+      renderInProvider(<AppricotSurface id={7} />);
+      act(() => {
+        m.emitRegistry('resize-ask', { surfaceId: 8, size: { width: 900, height: 700 } });
+        m.emitRegistry('resize-ask', { surfaceId: 7, size: { width: 0, height: 0 } });
+      });
+      expect(m.connections()[0]?.send).not.toHaveBeenCalled();
+    });
+
+    it("hands the ask to the host's handler instead, and sends nothing itself", () => {
+      const m = clientMock();
+      m.setMeta(fakeSurfaceRecord(7));
+      const onResizeAsk = vi.fn();
+      renderInProvider(<AppricotSurface id={7} onResizeAsk={onResizeAsk} />);
+      act(() => {
+        m.emitRegistry('resize-ask', { surfaceId: 7, size: { width: 900, height: 700 } });
+      });
+      expect(onResizeAsk).toHaveBeenCalledWith({ surfaceId: 7, size: { width: 900, height: 700 } });
+      expect(m.connections()[0]?.send).not.toHaveBeenCalled();
+    });
+
+    it("answers with the host's box under autoConfigure: the host's size decides", () => {
+      vi.useFakeTimers();
+      const m = clientMock();
+      m.setMeta(fakeSurfaceRecord(7));
+      const { container } = renderInProvider(<AppricotSurface id={7} autoConfigure />);
+      sizeOf(container.querySelector('canvas') as Element, 800, 600);
+      act(() => {
+        vi.advanceTimersByTime(250);
+      });
+      const send = m.connections()[0]?.send;
+      expect(send).toHaveBeenCalledTimes(1);
+
+      act(() => {
+        m.emitRegistry('resize-ask', { surfaceId: 7, size: { width: 300, height: 200 } });
+      });
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send).toHaveBeenLastCalledWith({
+        kind: 'configure',
+        configure: { surfaceId: 7, serial: 2, size: { width: 800, height: 600 } },
+      });
     });
   });
 });

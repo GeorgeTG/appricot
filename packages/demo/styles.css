@@ -184,6 +184,9 @@ body {
 }
 
 .window .titlebar {
+  /* Above the popup layer (z-index 1): no popup paints over the host's label. */
+  position: relative;
+  z-index: 2;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -254,6 +257,13 @@ body {
   color: #ff8f6b;
 }
 
+/* The content frame: the positioned box the popup layer hangs off. It holds the content and
+   the layer side by side and clips nothing, so the layer's margin band stays visible (the
+   content box itself clips at its own edge, below). */
+.window .content-frame {
+  position: relative;
+}
+
 /* The streamed content: one canvas per toplevel, sized by the host at one CSS pixel per
    logical pixel; the SDK's renderer owns the backing store. */
 .window .content {
@@ -268,7 +278,7 @@ body {
   display: block;
 }
 
-.window.focused .content canvas.surface {
+.window.focused .content-frame canvas.surface {
   cursor: none; /* the streamed cursor is drawn instead */
 }
 
@@ -292,9 +302,16 @@ body {
 
 /* Popups: a layer that extends exactly --popup-margin past the parent's content box on every
    side and clips at its own edges, so a popup can never show outside the parent-plus-margin
-   neighbourhood the SDK's clampPopup allowed (ADR-0003 §5). */
+   neighbourhood the SDK's clampPopup allowed (ADR-0003 §5). The layer is a sibling of
+   .content inside .content-frame, never a child of .content: .content clips at the content
+   box, and inside it the margin band would be cut away.
+
+   The margin is intended: a dropdown near a window's edge may spill that far. Host chrome
+   still wins over it: the title bar and the resize grip stack above the layer, so a popup can
+   never paint over the host-drawn label (ADR-0003 §5). */
 .window .popup-layer {
   position: absolute;
+  z-index: 1;
   left: calc(-1 * var(--popup-margin));
   top: calc(-1 * var(--popup-margin));
   right: calc(-1 * var(--popup-margin));
@@ -315,6 +332,7 @@ body {
 /* The resize grip: host chrome, bottom-right corner. */
 .window .resize-grip {
   position: absolute;
+  z-index: 2; /* above the popup layer: host chrome stays reachable */
   right: 0;
   bottom: 0;
   width: 16px;

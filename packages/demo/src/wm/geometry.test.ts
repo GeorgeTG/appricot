@@ -8,6 +8,7 @@ import {
   applyResize,
   cascadePosition,
   clampDrag,
+  grantResize,
 } from './geometry';
 
 const VIEWPORT = { width: 1280, height: 800 };
@@ -92,5 +93,36 @@ describe('cascadePosition', () => {
     expect(placed.x).toBeLessThanOrEqual(VIEWPORT.width - DRAG_KEEP_PX);
     expect(placed.y).toBeGreaterThanOrEqual(0);
     expect(placed.y).toBeLessThanOrEqual(VIEWPORT.height - TITLEBAR_HEIGHT);
+  });
+});
+
+describe('grantResize', () => {
+  const MAX = { width: 1920, height: 1200 };
+
+  it('grants an ask that fits as asked', () => {
+    expect(grantResize({ width: 500, height: 400 }, VIEWPORT, MAX)).toEqual({ width: 500, height: 400 });
+  });
+
+  it('clamps to the desktop: the viewport, less the title bar in height', () => {
+    expect(grantResize({ width: 5000, height: 5000 }, VIEWPORT, MAX)).toEqual({
+      width: VIEWPORT.width,
+      height: VIEWPORT.height - TITLEBAR_HEIGHT,
+    });
+  });
+
+  it('clamps to the protocol bound when the desktop is larger', () => {
+    expect(grantResize({ width: 5000, height: 5000 }, { width: 4000, height: 3000 }, MAX)).toEqual(MAX);
+  });
+
+  it('clamps to the protocol bound alone while the viewport has no size', () => {
+    expect(grantResize({ width: 5000, height: 900 }, { width: 0, height: 0 }, MAX)).toEqual({
+      width: 1920,
+      height: 900,
+    });
+  });
+
+  it('grants nothing for an ask with no area', () => {
+    expect(grantResize({ width: 0, height: 400 }, VIEWPORT, MAX)).toBeNull();
+    expect(grantResize({ width: 400, height: 0 }, VIEWPORT, MAX)).toBeNull();
   });
 });

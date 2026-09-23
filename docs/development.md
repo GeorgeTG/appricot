@@ -133,7 +133,7 @@ recipe, commit both files together.
 The demo is a whole host product in miniature: `@appricot/demo` draws the streamed windows as
 its own floating windows (title bars, minimise, focus, popups clamped to their parent), served
 by a zero-dependency static server under the strict CSP of ADR-0003 — no `'unsafe-inline'`, no
-`'unsafe-eval'` in `script-src`. From the host:
+`'unsafe-eval'` in `script-src`, and Trusted Types required for every script sink. From the host:
 
 ```sh
 docker compose run --rm -p "127.0.0.1:${APPRICOT_DEMO_HOST_PORT:-8390}:8390" dev just demo
@@ -144,9 +144,16 @@ then open `http://127.0.0.1:8390` and paste the token (printed by the recipe, or
 
 Port 8390 is the repository's **one** published port, loopback-only, overridable through
 `APPRICOT_DEMO_HOST_PORT`. The streamer itself is never published: the demo's in-container
-server reverse-proxies `/session` (the WebSocket upgrade and plain requests) and `/readyz` to
-the streamer's loopback bind at `127.0.0.1:8391`, so the streamer keeps its loopback-only rule
-even in the manual demo run.
+server reverse-proxies the `/session` WebSocket upgrade and `/readyz` to the streamer's
+loopback bind at `127.0.0.1:8391`, so the streamer keeps its loopback-only rule even in the
+manual demo run. The streamer is untrusted (ADR-0003), and the proxy treats it so:
+
+- it accepts the upgrade only from the page itself: a loopback `Host` (`127.0.0.1`,
+  `localhost` or `[::1]`, any port) and an `Origin` equal to it, so another site open in the
+  same browser cannot drive the session;
+- it passes allowlisted headers only, both ways: no cookie goes to the streamer, and no
+  `Set-Cookie`, redirect or content type comes back from it;
+- it answers a plain request to `/session` with 426, and times out a silent streamer.
 
 ## 7. Adding a dependency
 

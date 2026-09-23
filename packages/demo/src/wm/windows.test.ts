@@ -258,3 +258,15 @@ describe('WindowManager move and resize', () => {
     expect(wm.get(2)?.size).toEqual({ width: 500, height: 400 });
   });
 });
+
+describe('WindowManager metadata', () => {
+  it('setMetadata replaces the title and app id the wm reports', () => {
+    const wm = wmWithThree();
+    wm.minimize(2);
+    wm.setMetadata(2, { title: '<b>renamed</b>', appId: 'b2' });
+    expect(wm.get(2)).toMatchObject({ title: '<b>renamed</b>', appId: 'b2' });
+    // Unknown ids are ignored.
+    wm.setMetadata(99, { title: 'x', appId: 'y' });
+    expect(wm.get(99)).toBeUndefined();
+  });
+});

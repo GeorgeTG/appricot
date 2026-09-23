@@ -14,6 +14,11 @@
  * setTextOnly, so the hostile-title test exercises the real text-only path. This module
  * must not import anything that (transitively) imports '@appricot/client' — the vi.mock
  * factory runs while that module is being resolved.
+ *
+ * Every connectAppricot() call hands out a FRESH connection, with its own emitter and its
+ * own mocks, and every `new SurfaceRegistry()` gets its own emitter: a provider that closes
+ * the wrong connection, leaks a listener on an old one, or keeps feeding an old registry is
+ * visible to the tests instead of hiding behind one shared object.
  */
 import { vi, type Mock } from 'vitest';
 
@@ -45,6 +50,13 @@ class FakeEmitter {
     return this.#listeners.get(event)?.size ?? 0;
   }
 
+  /** Every listener on every event name. */
+  totalListeners(): number {
+    let total = 0;
+    for (const set of this.#listeners.values()) total += set.size;
+    return total;
+  }
+
   clear(): void {
     this.#listeners.clear();
   }
@@ -57,7 +69,14 @@ export interface FakeConnection {
   readonly events: FakeEmitter;
   readonly connect: Mock;
   readonly send: Mock;
+  /** Marks the connection closed (status 'closed'); emits nothing, like a close whose
+   * transport callback has not run yet. */
   readonly close: Mock;
+}
+
+/** One `new SurfaceRegistry()` the code under test made. */
+export interface FakeRegistry {
+  readonly events: FakeEmitter;
 }
 
 /**
@@ -104,9 +123,13 @@ export interface ClientMock {
   readonly overrides: Record<string, unknown>;
   /** connectAppricot; one call per provider connection. */
   readonly connect: Mock;
-  /** Every connection connectAppricot handed out (the same object, once per call). */
+  /** Every connection connectAppricot handed out, oldest first: one distinct object per call. */
   readonly connections: () => readonly FakeConnection[];
-  /** SurfaceRegistry.apply — what the provider feeds inbound envelopes into. */
+  /** The newest connection, or undefined before the first connect. */
+  readonly latest: () => FakeConnection | undefined;
+  /** Every registry the code under test constructed, oldest first. */
+  readonly registries: () => readonly FakeRegistry[];
+  /** SurfaceRegistry.apply — what the provider feeds inbound envelopes into (every registry). */
   readonly apply: Mock;
   /** SurfaceRegistry.get — back it with setMeta(). */
   readonly get: Mock;
@@ -129,42 +152,53 @@ export interface ClientMock {
     readonly surfaceId: number;
     readonly deps: unknown;
   }>;
+  /** Backs `get` for every id. */
   setMeta(meta: FakeSurfaceRecord | undefined): void;
+  /** Backs `get` per id; overrides setMeta for the ids it names. */
+  setMetaFor(id: number, meta: FakeSurfaceRecord | undefined): void;
   setSurfaces(surfaces: readonly FakeSurfaceRecord[]): void;
-  /** Sets the connection status and emits it, as the real connection would. */
+  /** Sets the NEWEST connection's status and emits it, as the real connection would. */
   setStatus(status: FakeConnectionStatus): void;
+  /** Emits one registry event on the NEWEST registry. */
   emitRegistry(event: string, value?: unknown): void;
+  /** Emits one inbound envelope on the NEWEST connection. */
   deliverEnvelope(envelope: unknown): void;
   emitResumed(): void;
-  /** How many listeners the fake registry emitter holds for one event name. */
+  /** How many listeners the newest registry's emitter holds for one event name. */
   registryListenerCount(event: string): number;
+  /** How many listeners one connection's emitter holds, over every event name. */
+  connectionListenerCount(connection: FakeConnection): number;
   reset(): void;
 }
 
 function createMock(): ClientMock {
-  const connEvents = new FakeEmitter();
-  const registryEvents = new FakeEmitter();
   const rendererCalls: Array<{ canvas: unknown; surfaceId: number; deps: unknown }> = [];
   const inputCalls: Array<{ element: unknown; surfaceId: number; deps: unknown }> = [];
   const connections: FakeConnection[] = [];
+  const registries: FakeRegistry[] = [];
 
   let meta: FakeSurfaceRecord | undefined;
+  const metaById = new Map<number, FakeSurfaceRecord | undefined>();
   let surfaces: readonly FakeSurfaceRecord[] = [];
 
-  const connection: FakeConnection = {
-    status: 'connecting',
-    events: connEvents,
-    connect: vi.fn(),
-    send: vi.fn(),
-    close: vi.fn(),
-  };
   const connect = vi.fn((): FakeConnection => {
+    const connection: FakeConnection = {
+      status: 'connecting',
+      events: new FakeEmitter(),
+      connect: vi.fn(),
+      send: vi.fn(),
+      close: vi.fn((): void => {
+        connection.status = 'closed';
+      }),
+    };
     connections.push(connection);
     return connection;
   });
 
   const apply = vi.fn();
-  const get = vi.fn((): FakeSurfaceRecord | undefined => meta);
+  const get = vi.fn((id: number): FakeSurfaceRecord | undefined =>
+    metaById.has(id) ? metaById.get(id) : meta,
+  );
   const list = vi.fn((): FakeSurfaceRecord[] => [...surfaces]);
 
   const rendererDetach = vi.fn();
@@ -184,10 +218,13 @@ function createMock(): ClientMock {
   const overrides: Record<string, unknown> = {
     connectAppricot: connect,
     SurfaceRegistry: class {
-      readonly events = registryEvents;
+      readonly events = new FakeEmitter();
       readonly apply = apply;
       readonly get = get;
       readonly list = list;
+      constructor() {
+        registries.push(this);
+      }
     },
     SurfaceRenderer: { attach: rendererAttach },
     attachInput,
@@ -195,9 +232,6 @@ function createMock(): ClientMock {
 
   const mocks = [
     connect,
-    connection.connect,
-    connection.send,
-    connection.close,
     apply,
     get,
     list,
@@ -207,10 +241,28 @@ function createMock(): ClientMock {
     detachInput,
   ];
 
+  const latest = (): FakeConnection | undefined => connections.at(-1);
+  const latestRegistry = (): FakeRegistry => {
+    const registry = registries.at(-1);
+    if (registry === undefined) {
+      throw new Error('no SurfaceRegistry was constructed yet');
+    }
+    return registry;
+  };
+  const latestConnection = (): FakeConnection => {
+    const connection = latest();
+    if (connection === undefined) {
+      throw new Error('connectAppricot was not called yet');
+    }
+    return connection;
+  };
+
   return {
     overrides,
     connect,
     connections: () => connections,
+    latest,
+    registries: () => registries,
     apply,
     get,
     list,
@@ -222,34 +274,40 @@ function createMock(): ClientMock {
     setMeta(next: FakeSurfaceRecord | undefined): void {
       meta = next;
     },
+    setMetaFor(id: number, next: FakeSurfaceRecord | undefined): void {
+      metaById.set(id, next);
+    },
     setSurfaces(next: readonly FakeSurfaceRecord[]): void {
       surfaces = next;
     },
     setStatus(status: FakeConnectionStatus): void {
+      const connection = latestConnection();
       connection.status = status;
-      connEvents.emit('status', status);
+      connection.events.emit('status', status);
     },
     emitRegistry(event: string, value?: unknown): void {
-      registryEvents.emit(event, value);
+      latestRegistry().events.emit(event, value);
     },
     deliverEnvelope(envelope: unknown): void {
-      connEvents.emit('message', envelope);
+      latestConnection().events.emit('message', envelope);
     },
     emitResumed(): void {
-      connEvents.emit('resumed', undefined);
+      latestConnection().events.emit('resumed', undefined);
     },
     registryListenerCount(event: string): number {
-      return registryEvents.listenerCount(event);
+      return latestRegistry().events.listenerCount(event);
+    },
+    connectionListenerCount(connection: FakeConnection): number {
+      return connection.events.totalListeners();
     },
     reset(): void {
-      connEvents.clear();
-      registryEvents.clear();
       rendererCalls.length = 0;
       inputCalls.length = 0;
       connections.length = 0;
+      registries.length = 0;
       meta = undefined;
+      metaById.clear();
       surfaces = [];
-      connection.status = 'connecting';
       for (const mock of mocks) mock.mockClear();
     },
   };

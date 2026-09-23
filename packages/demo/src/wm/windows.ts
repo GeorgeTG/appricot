@@ -188,6 +188,20 @@ export class WindowManager {
     state.y = y;
   }
 
+  /**
+   * Records a window's new title and app id (untrusted text, from a SurfaceMetadata), so
+   * every label drawn from the wm — the restore strip, say — shows the current one and not the
+   * title the window was created with. Unknown ids are ignored.
+   */
+  setMetadata(surfaceId: number, metadata: { title: string; appId: string }): void {
+    const state = this.#windows.get(surfaceId);
+    if (state === undefined) {
+      return;
+    }
+    state.title = metadata.title;
+    state.appId = metadata.appId;
+  }
+
   /** Resizes a window (a host proposal or a configure ack). Unknown ids are ignored. */
   resize(surfaceId: number, size: Size): void {
     const state = this.#windows.get(surfaceId);

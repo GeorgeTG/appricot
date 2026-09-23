@@ -53,6 +53,11 @@ beforeAll(async () => {
   // upgrade succeeds and echoes raw bytes.
   upstream = createServer((req, res) => {
     upstreamPaths.push(req.url ?? '');
+    if (req.url === '/readyz?down') {
+      res.writeHead(503, { 'content-type': 'text/plain' });
+      res.end('no');
+      return;
+    }
     if ((req.url ?? '').startsWith('/readyz')) {
       res.writeHead(200, { 'content-type': 'text/plain' });
       res.end('ready');
@@ -208,7 +213,8 @@ describe('every response carries the strict CSP', () => {
   it('on a static CSS hit', cspCase('/styles.css'));
   it('on a 404', cspCase('/missing.js'));
   it('on a proxied 200 (/readyz)', cspCase('/readyz'));
-  it('on a proxied 503 (/session)', cspCase('/session'));
+  it('on a proxied 503 (/readyz, streamer not ready)', cspCase('/readyz?down'));
+  it('on a 426 (a plain request to /session)', cspCase('/session'));
 
   it('on a 405 (POST on a static route)', async () => {
     const res = await fetch(url('/dist/main.js'), { method: 'POST' });
@@ -219,6 +225,12 @@ describe('every response carries the strict CSP', () => {
   it('has no unsafe-inline and no unsafe-eval anywhere', () => {
     expect(CSP).not.toContain('unsafe-inline');
     expect(CSP).not.toContain('unsafe-eval');
+  });
+
+  it('requires Trusted Types for every script sink, and allows no policy (ADR-0003 §3)', () => {
+    const directives = CSP.split(';').map((d) => d.trim());
+    expect(directives).toContain("require-trusted-types-for 'script'");
+    expect(directives).toContain("trusted-types 'none'");
   });
 
   it('gives a HEAD request the headers and no body', async () => {
@@ -232,18 +244,27 @@ describe('every response carries the strict CSP', () => {
 // --- the proxy ------------------------------------------------------------------------------------
 
 describe('the /readyz and /session proxy', () => {
-  it('relays a readyz request and reply verbatim, CSP added', async () => {
+  it('relays a readyz status and body, as plain text with the CSP', async () => {
     const res = await fetch(url('/readyz'));
     expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('text/plain; charset=utf-8');
     expect(await res.text()).toBe('ready');
     expect(upstreamPaths.at(-1)).toBe('/readyz');
   });
 
   it('relays the upstream status when the answer is not a success', async () => {
-    const res = await fetch(url('/session'));
+    const res = await fetch(url('/readyz?down'));
     expect(res.status).toBe(503);
     expect(await res.text()).toBe('no');
-    expect(upstreamPaths.at(-1)).toBe('/session');
+    expect(upstreamPaths.at(-1)).toBe('/readyz?down');
+  });
+
+  it('answers a plain request to /session with 426 and never proxies it', async () => {
+    const seen = upstreamPaths.length;
+    const res = await fetch(url('/session'));
+    expect(res.status).toBe(426);
+    expect(res.headers.get('upgrade')).toBe('websocket');
+    expect(upstreamPaths).toHaveLength(seen);
   });
 
   it('answers 502 with the CSP when the streamer is not listening', async () => {
@@ -277,6 +298,7 @@ describe('the /session WebSocket upgrade proxy', () => {
         socket.on('connect', () => {
           socket.write(
             `GET /session HTTP/1.1\r\nHost: 127.0.0.1:${demo.port}\r\nUpgrade: websocket\r\n` +
+              `Origin: http://127.0.0.1:${demo.port}\r\n` +
               `Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n` +
               `Sec-WebSocket-Version: 13\r\n\r\n`,
           );

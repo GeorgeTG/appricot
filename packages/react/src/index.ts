@@ -15,7 +15,7 @@ export {
 } from './hooks';
 export type { SessionEvent } from './hooks';
 export { AppricotSurface } from './surface';
-export type { AppricotSurfaceProps } from './surface';
+export type { AppricotResizeAsk, AppricotSurfaceProps } from './surface';
 export { AppricotTitle } from './title';
 export type { AppricotTitleElement, AppricotTitleProps } from './title';
 // The client types the hooks expose, re-exported so a host needs no direct

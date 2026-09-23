@@ -1,7 +1,7 @@
 import { useCallback } from 'react';
 
-import { setTextOnly } from './client';
-import { useSurfaceMeta } from './hooks';
+import { setTextOnly } from './client.js';
+import { useSurfaceMeta } from './hooks.js';
 
 /** The text-only elements AppricotTitle can render. The title never becomes markup. */
 export type AppricotTitleElement = 'div' | 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6' | 'p' | 'span';

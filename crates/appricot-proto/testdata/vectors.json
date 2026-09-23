@@ -26,7 +26,7 @@
     { "name": "pointer-button", "note": "Left button (X button 1) pressed", "hex": "8a0106080110011801" },
     { "name": "pointer-axis", "note": "Two discrete wheel steps up (steps_y negative is up), none sideways", "hex": "92010408011803" },
     { "name": "key-press", "note": "'a' down with shift (modifier 1)", "hex": "9a010c086112044b65794118012001" },
-    { "name": "key-altgr-greek", "note": "Greek alpha (keysym 0x03b1) through AltGr (modifier bit 32)", "hex": "9a010d08b10712044b65794118012020" },
+    { "name": "key-altgr-greek", "note": "Greek alpha (Unicode keysym 0x010003b1) through AltGr (modifier bit 32)", "hex": "9a010f08b187800812044b65794118012020" },
     { "name": "focus-notify", "note": "The host moving focus to surface 3", "hex": "a201020803" },
     { "name": "blur-release", "note": "The empty BlurRelease message", "hex": "aa0100" },
     { "name": "clipboard-set", "note": "Paste text from the host to the app", "hex": "b2010d0a0b68656c6c6f20776f726c64" },

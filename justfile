@@ -170,8 +170,8 @@ web-check: web-install web-licences web-build web-typecheck web-lint web-test
 #
 #   docker compose run --rm -p "127.0.0.1:${APPRICOT_DEMO_HOST_PORT:-8390}:8390" dev just demo
 #
-# then open http://127.0.0.1:8390 and paste the token (printed below, or set
-# APPRICOT_DEMO_TOKEN). Ctrl-C stops both.
+# then open http://127.0.0.1:8390 and paste the token the recipe prints. The token is random,
+# fresh for every run, unless APPRICOT_DEMO_TOKEN sets one. Ctrl-C stops both.
 #
 # The streamer is supervised: it is built first, so a compile error fails the recipe; the page is
 # served only once its /readyz answers 200; and when either process exits, the other is stopped
@@ -180,8 +180,13 @@ web-check: web-install web-licences web-build web-typecheck web-lint web-test
 demo:
     #!/usr/bin/env bash
     set -euo pipefail
-    token="${APPRICOT_DEMO_TOKEN:-demo-token}"
-    echo "demo token: ${token}"
+    if [ -n "${APPRICOT_DEMO_TOKEN:-}" ]; then
+        token="${APPRICOT_DEMO_TOKEN}"
+    else
+        # 24 bytes from the kernel, as hex: a fresh token every run, never a fixed default.
+        token="$(head -c 24 /dev/urandom | od -An -vtx1 | tr -d ' \n')"
+    fi
+    echo "demo token (paste it into the page): ${token}"
     pnpm build
     cargo build --locked -p appricot-streamer
     streamer="" server=""

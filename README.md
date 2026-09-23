@@ -79,8 +79,8 @@ container. `just deny` clones the RustSec advisory database, so the gate needs n
 The demo recipe builds the web packages, starts the streamer on loopback inside the container and
 serves the demo host page on port 8390 (published loopback-only through `APPRICOT_DEMO_HOST_PORT`;
 the demo's server proxies the streamer's WebSocket, so the streamer keeps its loopback-only bind).
-Open **http://127.0.0.1:8390** and paste the token the recipe prints — the default is
-`demo-token`; override it with `APPRICOT_DEMO_TOKEN`. Ctrl-C stops both processes.
+Open **http://127.0.0.1:8390** and paste the token the recipe prints: a random one, fresh for
+every run, unless `APPRICOT_DEMO_TOKEN` sets it. Ctrl-C stops both processes.
 
 Useful variants:
 

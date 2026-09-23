@@ -4,8 +4,8 @@ import { readFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
 
-import * as limits from './limits';
-import { ProtocolError, decodeEnvelope, encodeEnvelope } from './wire';
+import * as limits from './limits.js';
+import { ProtocolError, decodeEnvelope, encodeEnvelope } from './wire.js';
 
 /**
  * The drift detector. wire.ts is a hand-written mirror of wire.proto and limits.ts a

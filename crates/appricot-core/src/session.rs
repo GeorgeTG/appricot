@@ -16,11 +16,11 @@
 //! The caps are the wire limits table's own rows, re-exported from [`appricot_proto::limits`],
 //! so a number is changed in one place and the session honours what the streamer advertises.
 
-pub use appricot_proto::limits::{MAX_FRAME_CREDITS, MAX_POPUPS_PER_PARENT, MAX_SURFACES};
-
-use appricot_proto::limits::{
-    AppId, MAX_CURSOR_HEIGHT, MAX_CURSOR_WIDTH, MAX_SURFACE_HEIGHT, MAX_SURFACE_WIDTH, Title,
+pub use appricot_proto::limits::{
+    MAX_FRAME_CREDITS, MAX_POPUPS_PER_PARENT, MAX_SURFACE_HEIGHT, MAX_SURFACE_WIDTH, MAX_SURFACES,
 };
+
+use appricot_proto::limits::{AppId, MAX_CURSOR_HEIGHT, MAX_CURSOR_WIDTH, Title};
 
 use crate::capture::SurfaceEvent;
 use crate::frame::FrameCredits;

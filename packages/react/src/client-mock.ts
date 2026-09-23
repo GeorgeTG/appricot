@@ -62,15 +62,22 @@ class FakeEmitter {
   }
 }
 
-export type FakeConnectionStatus = 'idle' | 'connecting' | 'open' | 'closed';
+export type FakeConnectionStatus = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'closed';
+
+/** Why a fake connection ended: the SDK's CloseReason, with the causes as plain strings. */
+export interface FakeCloseReason {
+  readonly cause: string;
+  readonly code?: number;
+  readonly bye?: unknown;
+}
 
 export interface FakeConnection {
   status: FakeConnectionStatus;
   readonly events: FakeEmitter;
   readonly connect: Mock;
   readonly send: Mock;
-  /** Marks the connection closed (status 'closed'); emits nothing, like a close whose
-   * transport callback has not run yet. */
+  /** Closes as the real connection does: status 'closed' at once, then `ended` with cause
+   * 'user'. A second call changes nothing. */
   readonly close: Mock;
 }
 
@@ -159,6 +166,11 @@ export interface ClientMock {
   setSurfaces(surfaces: readonly FakeSurfaceRecord[]): void;
   /** Sets the NEWEST connection's status and emits it, as the real connection would. */
   setStatus(status: FakeConnectionStatus): void;
+  /**
+   * Ends the NEWEST connection the way the real one reaches 'closed': the 'closed' status,
+   * then `ended` with `reason` (a Bye, a grace that ran out, a refusal, ...).
+   */
+  end(reason: FakeCloseReason): void;
   /** Emits one registry event on the NEWEST registry. */
   emitRegistry(event: string, value?: unknown): void;
   /** Emits one inbound envelope on the NEWEST connection. */
@@ -188,7 +200,7 @@ function createMock(): ClientMock {
       connect: vi.fn(),
       send: vi.fn(),
       close: vi.fn((): void => {
-        connection.status = 'closed';
+        endConnection(connection, { cause: 'user' });
       }),
     };
     connections.push(connection);
@@ -241,6 +253,16 @@ function createMock(): ClientMock {
     detachInput,
   ];
 
+  /** The real connection's one way to 'closed': the status, then `ended`; once only. */
+  const endConnection = (connection: FakeConnection, reason: FakeCloseReason): void => {
+    if (connection.status === 'closed') {
+      return;
+    }
+    connection.status = 'closed';
+    connection.events.emit('status', 'closed');
+    connection.events.emit('ended', reason);
+  };
+
   const latest = (): FakeConnection | undefined => connections.at(-1);
   const latestRegistry = (): FakeRegistry => {
     const registry = registries.at(-1);
@@ -284,6 +306,9 @@ function createMock(): ClientMock {
       const connection = latestConnection();
       connection.status = status;
       connection.events.emit('status', status);
+    },
+    end(reason: FakeCloseReason): void {
+      endConnection(latestConnection(), reason);
     },
     emitRegistry(event: string, value?: unknown): void {
       latestRegistry().events.emit(event, value);

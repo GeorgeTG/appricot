@@ -48,8 +48,10 @@ pub enum SurfaceEvent {
         rect: Rect,
     },
     /// The app's surface has this size: after a configure, or on its own. A backend reports
-    /// it for every configure it applies, even when the size did not change (the app
-    /// clamped the proposal back to the size it had), so the configure is answered.
+    /// it for every configure it is asked to apply, even one that changes nothing: a
+    /// proposal of the size the surface already has, or one the app clamped back to that
+    /// size. That report is what answers the configure: the session acks the waiting
+    /// proposal with it, and without it the host's configure would wait for an ack forever.
     Resized {
         /// The surface.
         id: SurfaceId,
@@ -87,11 +89,13 @@ pub enum SurfaceEvent {
 
 /// Reads surfaces and their pixels from a display server.
 ///
-/// `appricot-x11` implements it on X11; a later Wayland backend would too. The calls do not
-/// block: the streamer makes them when the display connection is readable, or when a frame
-/// credit is free. The session cuts every size a backend reports to the wire's surface caps,
-/// and asks for pixels only inside the size it tracks; a backend still clamps what the
-/// display server itself reports to what it can serve.
+/// `appricot-x11` implements it on X11; a later Wayland backend would too. The calls are
+/// synchronous and may wait on the display server: on X11 a capture or a size query is a
+/// round trip. None of them waits on the app or on a timer. The streamer keeps them off its
+/// async runtime, on a thread of their own: it drains events on a short poll, and captures
+/// when a frame credit is free. The session cuts every size a backend reports to the wire's
+/// surface caps, and asks for pixels only inside the size it tracks; a backend still clamps
+/// what the display server itself reports to what it can serve.
 pub trait CaptureBackend {
     /// What can go wrong talking to the display server.
     type Error: std::error::Error + Send + Sync + 'static;

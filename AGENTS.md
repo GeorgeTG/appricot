@@ -31,7 +31,8 @@ docker compose build dev                    # build the dev image (appricot-dev:
 docker compose run --rm dev just check      # THE gate: everything, in order
 docker compose run --rm dev just            # list the recipes
 docker compose run --rm dev bash            # a shell, with Xvfb already up on :99
-docker compose run --rm -p "127.0.0.1:8390:8390" dev just demo   # the demo host page
+# the demo host page, on the loopback port APPRICOT_DEMO_HOST_PORT (default 8390):
+docker compose run --rm -p "127.0.0.1:${APPRICOT_DEMO_HOST_PORT:-8390}:8390" dev just demo
 ```
 
 `scripts/dev.sh <cmd...>` (Git Bash) and `scripts/dev.ps1 <cmd...>` (PowerShell) are thin wrappers

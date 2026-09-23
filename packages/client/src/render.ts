@@ -13,13 +13,13 @@
  * of it reaches the backing store — and never acked; the server's credits stall for that
  * surface instead of the client pretending it drew hostile bytes (ADR-0003 §4).
  */
-import type { Envelope, Frame } from './protocol';
-import { decodeTile } from './tile';
-import type { DecodedTile } from './tile';
-import type { AppricotConnection } from './connection';
-import { Emitter } from './events';
-import { bindFrameSink } from './registry';
-import type { SurfaceRecord, SurfaceRegistry } from './registry';
+import type { Envelope, Frame } from './protocol.js';
+import { decodeTile } from './tile.js';
+import type { DecodedTile } from './tile.js';
+import type { AppricotConnection } from './connection.js';
+import { Emitter } from './events.js';
+import { bindFrameSink } from './registry.js';
+import type { SurfaceRecord, SurfaceRegistry } from './registry.js';
 
 export interface SurfaceRendererDeps {
   registry: SurfaceRegistry;

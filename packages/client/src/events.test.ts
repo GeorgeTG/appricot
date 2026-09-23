@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { Emitter } from './events';
+import { Emitter } from './events.js';
 
 interface TestEvents {
   ping: number;

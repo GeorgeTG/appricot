@@ -52,7 +52,7 @@ import {
   MAX_TILE_WIDTH,
   MAX_TITLE_BYTES,
   MAX_TOKEN_BYTES,
-} from './limits';
+} from './limits.js';
 
 // ---------------------------------------------------------------------------
 // Errors

@@ -1,11 +1,21 @@
 import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
 
-import type { ConnectionStatus, RegistryEvents, SurfaceRecord, SurfaceRegistry } from './client';
-import { ROLE_TOPLEVEL } from './client';
-import { useAppricot } from './provider';
+import type { ConnectionStatus, RegistryEvents, SurfaceRecord, SurfaceRegistry } from './client.js';
+import { ROLE_TOPLEVEL } from './client.js';
+import { useAppricot } from './provider.js';
 
-/** The registry events that change what the hooks below read back. */
-const RECORD_EVENTS = ['window-added', 'window-removed', 'metadata', 'configure-acked'] as const;
+/**
+ * The registry events that change what the hooks below read back: every event the registry
+ * emits for a record that came, went or changed. A resume's re-announcement updates records in
+ * place and reports them through `metadata` and `configure-acked`, and its sweep through
+ * `window-removed` (v0 §7).
+ */
+const RECORD_EVENTS = [
+  'window-added',
+  'window-removed',
+  'metadata',
+  'configure-acked',
+] as const satisfies readonly (keyof RegistryEvents)[];
 
 /**
  * The last snapshot handed out per live registry record. The registry mutates its records

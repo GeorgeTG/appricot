@@ -10,7 +10,10 @@
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-use appricot_core::{CaptureBackend, InputSink, Rect, Role, Size, SurfaceEvent, SurfaceId};
+use appricot_core::{
+    CaptureBackend, InputSink, MAX_SURFACE_HEIGHT, MAX_SURFACE_WIDTH, Rect, Role, Size,
+    SurfaceEvent, SurfaceId,
+};
 use appricot_x11::X11Backend;
 use x11rb::connection::Connection as _;
 use x11rb::protocol::Event;
@@ -21,10 +24,6 @@ use x11rb::{COPY_DEPTH_FROM_PARENT, COPY_FROM_PARENT, NONE};
 
 const RUN_HINT: &str = "run inside the dev container: docker compose run --rm dev just test";
 const TIMEOUT: Duration = Duration::from_secs(5);
-
-/// The widest and tallest surface the wire carries (`appricot-proto`'s limits table).
-const MAX_SURFACE_WIDTH: u32 = 1920;
-const MAX_SURFACE_HEIGHT: u32 = 1200;
 
 /// Predefined atoms: `ATOM`, `WINDOW`, `WM_NORMAL_HINTS` and its type `WM_SIZE_HINTS`.
 const XA_ATOM: u32 = 4;

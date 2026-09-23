@@ -3,7 +3,8 @@
  *
  * This is a host UI of its own: a toolbar (same-origin session URL shown as text, a token
  * INPUT field that is the token's only source — never the URL or its query — connect/close
- * buttons, a status line, a reconnect toggle, and a strip of restore buttons for the
+ * buttons, a status line, a reconnect toggle, an opt-in toggle that sends pasted text to the
+ * streamed app (off by default, ADR-0003 §7), and a strip of restore buttons for the
  * minimized windows, each titled with the window's own — untrusted — title through
  * `setTextOnly`) and, per streamed toplevel, one floating window of demo chrome: a title bar
  * whose title and app id go in through `setTextOnly` (untrusted text, ADR-0003 §1),
@@ -15,7 +16,11 @@
  * that sends Configure on release, a ResizeAsk answered with a Configure clamped to the
  * desktop, chrome sized to every ConfigureAck (serial 0 included: the app resized itself), an
  * absolutely-positioned popup layer clamped to the parent (ADR-0003 §5), and a cursor
- * overlay drawn from the wire's cursor pixels.
+ * overlay drawn from the wire's cursor pixels, its hotspot on the pointer.
+ *
+ * The connection's lifecycle follows the SDK's statuses: 'reconnecting' is a retry still
+ * pending, so the windows stay and a resume reconciles them in place (v0 §7); the `ended`
+ * event (after the 'closed' status) is the end, and the windows go.
  *
  * All decisions live in the pure modules under src/wm/ and src/token.ts; this file only
  * mirrors their results into the DOM and feeds them events. Nothing here reads the page's
@@ -29,12 +34,14 @@ import {
   SurfaceRenderer,
   attachInput,
   connectAppricot,
+  cursorOrigin,
   drawCursor,
   setTextOnly,
 } from '@appricot/client';
 import type {
   AppricotConnection,
   AttachedSurface,
+  CloseReason,
   CursorImage,
   DetachInput,
   SurfaceRecord,
@@ -61,6 +68,7 @@ interface WindowDom {
 /** One popup layer entry. */
 interface PopupDom {
   el: HTMLElement;
+  canvas: HTMLCanvasElement;
   parentId: number;
   renderer: AttachedSurface;
   detachInput: DetachInput;
@@ -121,6 +129,16 @@ const sessionIdText = requireElement<HTMLElement>('session-id');
 const windowsCountText = requireElement<HTMLElement>('windows-count');
 const sessionUrlText = requireElement<HTMLElement>('session-url');
 const minimizedStrip = requireElement<HTMLElement>('minimized');
+/**
+ * The paste opt-in (ADR-0003 §7). Unchecked, or missing from the page, pasted text stays in
+ * the host; checked, a paste into a streamed window sends its text to the app.
+ */
+const pasteBox = document.getElementById('paste');
+
+/** The demo's paste policy: the user's own opt-in, read at every paste. */
+function pastePolicy(): boolean {
+  return pasteBox instanceof HTMLInputElement && pasteBox.checked;
+}
 
 const app: App = {
   conn: null,
@@ -340,11 +358,17 @@ function removePopupDom(surfaceId: number): void {
   if (popup === undefined) {
     return;
   }
+  // A menu that closes while it holds the keyboard hands it back to its window (C11): the
+  // browser would drop DOM focus to the body, and the keys typed next would reach nothing.
+  const hadFocus = document.activeElement === popup.canvas;
   app.popups.delete(surfaceId);
   app.wm.removePopup(surfaceId, popup.parentId);
   popup.renderer.detach();
   popup.detachInput();
   popup.el.remove();
+  if (hadFocus) {
+    app.windows.get(popup.parentId)?.canvas.focus({ preventScroll: true });
+  }
 }
 
 // --- cursor overlay --------------------------------------------------------------------------
@@ -356,13 +380,17 @@ function drawCursorOverlay(surfaceId: number): void {
   if (dom === undefined || pointer === undefined || image === null || image === undefined) {
     return;
   }
+  // The overlay is the image's size, placed so the hotspot sits on the pointer, and the image
+  // is drawn at its origin: drawing at the pointer would crop every cursor whose hotspot is not
+  // its top-left corner.
+  const origin = cursorOrigin(image, pointer.x, pointer.y);
   dom.overlay.width = image.width;
   dom.overlay.height = image.height;
-  dom.overlay.style.left = `${pointer.x}px`;
-  dom.overlay.style.top = `${pointer.y}px`;
+  dom.overlay.style.left = `${origin.x}px`;
+  dom.overlay.style.top = `${origin.y}px`;
   const ctx = dom.overlay.getContext('2d');
   if (ctx !== null) {
-    drawCursor(ctx, image, 0, 0);
+    drawCursor(ctx, image);
   }
 }
 
@@ -529,6 +557,7 @@ function buildWindow(record: SurfaceRecord): void {
     conn,
     isFocused: () => app.wm.focusedId === record.id,
     size: () => app.registry.get(record.id)?.size ?? { width: 0, height: 0 },
+    paste: pastePolicy,
   });
 
   const dom: WindowDom = { root, titleText, appText, canvas, overlay, popupLayer, renderer, detachInput };
@@ -596,10 +625,14 @@ function buildPopup(record: SurfaceRecord): void {
   popupEl.append(canvas);
   parentDom.popupLayer.append(popupEl);
   const renderer = SurfaceRenderer.attach(canvas, record.id, { registry: app.registry, conn });
-  const detachInput = attachInput(canvas, record.id, {
+  // The size is the registry's: the popup's CSS box may be clamped smaller than the surface
+  // (ADR-0003 §5), and a position is scaled from that box to the surface.
+  const surfaceId = record.id;
+  const detachInput = attachInput(canvas, surfaceId, {
     conn,
     isFocused: () => app.wm.focusedId === parentId,
-    size: () => ({ width: canvas.clientWidth, height: canvas.clientHeight }),
+    size: () => app.registry.get(surfaceId)?.size,
+    paste: pastePolicy,
   });
   // A press on the popup focuses its parent window, and DOM focus goes to the popup's own
   // canvas: keys are not addressed to a surface on the wire, the server routes them to the
@@ -614,7 +647,7 @@ function buildPopup(record: SurfaceRecord): void {
     }
   });
   app.wm.addPopup(record.id, record.parent);
-  app.popups.set(record.id, { el: popupEl, parentId: record.parent, renderer, detachInput });
+  app.popups.set(record.id, { el: popupEl, canvas, parentId: record.parent, renderer, detachInput });
   repositionPopupsOf(record.parent);
 }
 
@@ -780,9 +813,9 @@ function connect(): void {
     setStatus('enter the token first', 'error');
     return;
   }
-  // A closed connection may still be waiting to reconnect (the SDK reports 'closed' before
-  // its backoff). It must not come back next to the new session: close it for good, and
-  // drop what it left on the page, whose ids would collide with the new session's.
+  // A connection waiting out its backoff ('reconnecting') must not come back next to the new
+  // session: close it for good, and drop what it left on the page, whose ids would collide
+  // with the new session's.
   endSession();
   app.reconnectWanted = reconnectBox.checked;
   const conn = connectAppricot(sessionUrl(), {
@@ -817,20 +850,43 @@ function connect(): void {
       closeButton.disabled = false;
       return;
     }
-    if (status === 'closed') {
-      // The page does not guess whether the SDK will reconnect: the windows go now. If it
-      // does reconnect and the server resumes, the server re-announces every surface, and
-      // the fresh registry builds each one again, with one full redraw. Connect starts
-      // over; Close stays enabled while a reconnect may still come, so the user can stop it.
-      teardownSession();
-      setTextOnly(sessionIdText, '');
+    if (status === 'reconnecting') {
+      // A retry is pending, not an end: the windows stay. A resume re-announces them and the
+      // registry updates each in place (v0 §7); a fresh session instead removes them through
+      // the registry. Connect starts over, and Close stops the retry.
       connectButton.disabled = false;
-      closeButton.disabled = !app.reconnectWanted;
+      closeButton.disabled = false;
+      return;
     }
+    if (status === 'closed') {
+      // Terminal: the SDK retries nothing after 'closed'. The `ended` event follows.
+      closed(conn);
+    }
+  });
+  conn.events.on('ended', (reason) => {
+    closed(conn, reason);
   });
   connectButton.disabled = true;
   closeButton.disabled = false;
   setStatus('connecting');
+}
+
+/**
+ * The connection is over for good (the 'closed' status, then `ended` with its reason): the
+ * windows go, and Connect starts over. Idempotent, and a no-op for a replaced connection.
+ */
+function closed(conn: AppricotConnection, reason?: CloseReason): void {
+  if (app.conn !== conn) {
+    return;
+  }
+  teardownSession();
+  setTextOnly(sessionIdText, '');
+  // The cause is the SDK's own word, never server text; a Bye's text is not shown.
+  if (reason !== undefined) {
+    setStatus(`closed: ${reason.cause}`, reason.cause === 'user' ? '' : 'error');
+  }
+  connectButton.disabled = false;
+  closeButton.disabled = true;
 }
 
 function disconnect(): void {

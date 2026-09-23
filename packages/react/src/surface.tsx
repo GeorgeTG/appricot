@@ -7,9 +7,9 @@ import {
   sendConfigure,
   sendFocusNotify,
   SurfaceRenderer,
-} from './client';
-import { useSurfaceMeta } from './hooks';
-import { useAppricot } from './provider';
+} from './client.js';
+import { useSurfaceMeta } from './hooks.js';
+import { useAppricot } from './provider.js';
 
 // Without ResizeObserver (jsdom, older environments) the size is polled. Every current
 // browser has ResizeObserver, so this exists for tests and exotic runtimes.
@@ -114,8 +114,10 @@ export function AppricotSurface({
     };
   }, [conn, id, known, registry]);
 
-  // Input capture. Attached once; attachInput asks isFocused() per event, so the focused
-  // prop flows through the ref without re-attaching listeners.
+  // Input capture. Attached once; attachInput asks isFocused() and size() per event, so the
+  // focused prop and the surface's size flow through without re-attaching listeners. The size
+  // is the registry's: pointer positions are scaled from the canvas's CSS box to the logical
+  // surface, so a click lands right whatever CSS size the host gives the canvas.
   useEffect(() => {
     if (conn === null || !known) return;
     const canvas = canvasRef.current;
@@ -123,8 +125,9 @@ export function AppricotSurface({
     return attachInput(canvas, id, {
       conn,
       isFocused: () => focusedRef.current,
+      size: () => registry.get(id)?.size,
     });
-  }, [conn, id, known]);
+  }, [conn, id, known, registry]);
 
   // Focus notification: sent when the surface is (or becomes) focused while the connection
   // is open, and re-sent when the connection reaches 'open' again — the SDK drops sends

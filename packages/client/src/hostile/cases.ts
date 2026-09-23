@@ -22,8 +22,8 @@ import type {
   Positioner,
   Rect,
   Tile,
-} from '../protocol';
-import { encodeEnvelope } from '../protocol';
+} from '../protocol.js';
+import { encodeEnvelope } from '../protocol.js';
 import {
   MAX_APP_ID_BYTES,
   MAX_BYE_TEXT_BYTES,
@@ -37,7 +37,7 @@ import {
   MAX_TILE_WIDTH,
   MAX_TILES_PER_FRAME,
   MAX_TITLE_BYTES,
-} from '../protocol';
+} from '../protocol.js';
 
 /** The global the markup payloads try to set; the tests assert it stays undefined. */
 export const PWNED_PROPERTY = '__pwned';

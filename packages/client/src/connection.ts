@@ -6,7 +6,7 @@
  * order v0 allows reaches the host through `events`; nothing the server sends ever becomes
  * markup or navigation (ADR-0003).
  */
-import { Emitter } from './events';
+import { Emitter } from './events.js';
 import {
   CODEC,
   MAX_CLIPBOARD_BYTES,
@@ -15,8 +15,8 @@ import {
   RESUME_GRACE_MS,
   decodeEnvelope,
   encodeEnvelope,
-} from './protocol';
-import type { Bye, ByeReason, Envelope, Hello, HelloReply } from './protocol';
+} from './protocol.js';
+import type { Bye, ByeReason, Envelope, Hello, HelloReply } from './protocol.js';
 
 const utf8Encoder = new TextEncoder();
 

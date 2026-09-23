@@ -1,8 +1,8 @@
 //! [`X11Backend`]: the `CaptureBackend` and `InputSink` implementation on X11.
 
 use appricot_core::{
-    CaptureBackend, InputSink, KeyCode, KeyEvent, PixelBuffer, Point, PointerButton, PressState,
-    Rect, Role, Size, SurfaceEvent, SurfaceId,
+    CaptureBackend, InputSink, KeyCode, KeyEvent, MAX_POINTER_AXIS_STEPS, PixelBuffer, Point,
+    PointerButton, PressState, Rect, Role, Size, SurfaceEvent, SurfaceId,
 };
 use x11rb::connection::Connection as _;
 use x11rb::cookie::VoidCookie;
@@ -56,10 +56,6 @@ const WHEEL_UP: u8 = 4;
 const WHEEL_DOWN: u8 = 5;
 const WHEEL_LEFT: u8 = 6;
 const WHEEL_RIGHT: u8 = 7;
-
-/// The most wheel steps one `pointer_axis` call sends per axis; more are dropped.
-// mirrors appricot_proto::limits::MAX_POINTER_AXIS_STEPS
-const MAX_POINTER_AXIS_STEPS: u32 = 64;
 
 /// The ICCCM `WM_STATE` value of a normal (not iconified) window.
 const WM_STATE_NORMAL: u32 = 1;
@@ -1512,7 +1508,7 @@ impl InputSink for X11Backend {
         Ok(())
     }
 
-    /// At most 64 steps per axis are sent (the wire's `MAX_POINTER_AXIS_STEPS`); the rest
+    /// At most [`MAX_POINTER_AXIS_STEPS`] steps per axis are sent (the wire's cap); the rest
     /// are dropped.
     fn pointer_axis(&mut self, id: SurfaceId, steps: Point) -> Result<(), Self::Error> {
         let Some(tracked) = self.table.by_surface(id) else {

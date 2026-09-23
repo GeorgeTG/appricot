@@ -12,5 +12,5 @@ export const PROTOCOL_VERSION = 0;
  * encodeEnvelope/decodeEnvelope pair, the limits table and the tile codec ids. Tile pixel
  * decoding (decodeTile) lives in tile.ts.
  */
-export * from './limits';
-export * from './wire';
+export * from './limits.js';
+export * from './wire.js';

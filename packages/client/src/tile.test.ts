@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 
-import type { Tile } from './wire';
-import { CODEC } from './limits';
-import { decodeTile } from './tile';
+import type { Tile } from './wire.js';
+import { CODEC } from './limits.js';
+import { decodeTile } from './tile.js';
 
 /**
  * jsdom does not implement ImageData (it is part of its unimplemented canvas set), so the test

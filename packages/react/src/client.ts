@@ -5,13 +5,17 @@
  * move, this file is the only place to adapt. What crosses the seam:
  *
  *   connectAppricot(url, { token: Uint8Array, reconnect? }) -> AppricotConnection
- *   AppricotConnection: get status(), connect(), send(Envelope) (dropped while not open),
- *                       close(), events (an Emitter: 'message', 'close', 'status', 'resumed')
+ *   AppricotConnection: get status() ('idle' | 'connecting' | 'open' | 'reconnecting' |
+ *                       'closed'), connect(), send(Envelope) (dropped while not open),
+ *                       close(), events (an Emitter: 'message', 'close', 'status',
+ *                       'resumed', and 'ended' with the CloseReason after 'closed')
  *   new SurfaceRegistry(): get(id), list(), apply(Envelope),
  *                          events (window-added/removed, metadata, cursor-changed,
- *                          focus-ask, resize-ask, configure-acked, clipboard-ask)
+ *                          focus-ask, resize-ask, configure-acked, clipboard-ask); a
+ *                          resume's re-announcement reports a changed record through
+ *                          metadata and configure-acked (serial 0), never remove plus add
  *   SurfaceRenderer.attach(canvas, surfaceId, { registry, conn }) -> { detach() }
- *   attachInput(element, surfaceId, { conn, isFocused() }) -> detach()
+ *   attachInput(element, surfaceId, { conn, isFocused(), size?() }) -> detach()
  *
  * Everything below is a re-export of those pins plus the two outbound messages these
  * bindings construct themselves.

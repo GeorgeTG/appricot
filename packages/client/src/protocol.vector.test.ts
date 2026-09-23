@@ -5,10 +5,10 @@ import { existsSync, readFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
 
-import type { Envelope, Positioner } from './wire';
-import { ProtocolError, decodeEnvelope, encodeEnvelope } from './wire';
-import { CODEC } from './limits';
-import { decodeTile } from './tile';
+import type { Envelope, Positioner } from './wire.js';
+import { ProtocolError, decodeEnvelope, encodeEnvelope } from './wire.js';
+import { CODEC } from './limits.js';
+import { decodeTile } from './tile.js';
 
 /**
  * The node environment has no ImageData global either, so the test provides the constructor a
@@ -257,14 +257,15 @@ describe('semantic spot-checks', () => {
     expect(decoded.imageData.height).toBe(tile.rect.height);
   });
 
-  it('the AltGr key vector carries the altgr modifier bit and a Greek keysym', () => {
+  it('the AltGr key vector carries the altgr modifier bit and a Greek Unicode keysym', () => {
     const { envelope } = decodeNamed(/altgr/i);
     expect(envelope.kind).toBe('key');
     if (envelope.kind !== 'key') {
       return;
     }
     expect(envelope.key.modifiers & 32).toBe(32);
-    expect(envelope.key.keysym).toBe(0x03b1);
+    // Codepoint + 0x01000000 (v0 §8): the bare codepoint 0x03b1 is a legacy X11 keysym.
+    expect(envelope.key.keysym).toBe(0x010003b1);
   });
 });
 

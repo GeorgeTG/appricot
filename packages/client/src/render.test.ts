@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { Envelope, SurfaceNew } from './protocol';
-import { Emitter } from './events';
-import type { AppricotConnection, ConnectionEvents } from './connection';
-import { SurfaceRegistry } from './registry';
-import { SurfaceRenderer } from './render';
+import type { Envelope, SurfaceNew } from './protocol.js';
+import { Emitter } from './events.js';
+import type { AppricotConnection, ConnectionEvents } from './connection.js';
+import { SurfaceRegistry } from './registry.js';
+import { SurfaceRenderer } from './render.js';
 
 /**
  * jsdom has no canvas rasteriser: getContext returns null. Every canvas in this file gets a

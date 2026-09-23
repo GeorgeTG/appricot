@@ -49,7 +49,7 @@ use appricot_core::{
     PointerButton, Positioner, PressState, Rect, Role, Scale, Session, SessionEvent, Size,
     SurfaceId,
 };
-use appricot_encode::{Encoding, cut_into_tiles, encode_tile};
+use appricot_encode::{Encoding, cut_into_tiles, encode_tile_owned};
 use appricot_proto::PROTOCOL_VERSION;
 use appricot_proto::limits::{MAX_FRAME_CREDITS, MAX_TILES_PER_FRAME, codec};
 use appricot_proto::wire::{
@@ -1194,14 +1194,19 @@ where
             continue;
         };
         let bounds = surface.size();
-        match build_frame(pump, id, bounds, plan).await {
+        match build_frame(pump, id, bounds, &plan).await {
             Ok(Some(frame)) => {
                 if let Err(fault) = send_body(sink, Body::Frame(frame)).await {
                     return fault_flow(sink, fault).await;
                 }
             }
-            // Nothing to send (the damage vanished, or every tile was skipped mid-frame).
-            Ok(None) => {}
+            // Nothing to send: every tile was skipped (contract C2), or the damage vanished.
+            // A frame with no tile never goes out, and the plan goes back as if it had never
+            // been made: its credit, its sequence (the client sees no gap), its damage and any
+            // full redraw it owed. The next damage or ack plans it again.
+            Ok(None) => {
+                pump.session.abort_frame(id, &plan);
+            }
             Err(e) => {
                 // Building a frame cannot fail in a correct process; if it does, the session
                 // is lying about its own state and must not continue. The fault is this
@@ -1224,12 +1229,13 @@ where
 /// the buffer does not match the tile's rectangle (the surface changed size under the capture,
 /// against the `CaptureBackend` contract), or when the encoder refuses the buffer: a tile on
 /// the wire always carries exactly the pixels its rectangle names (contract C2). The event
-/// that explains the change follows on the feed.
+/// that explains the change follows on the feed. `Ok(None)` means no tile is left, and the
+/// caller hands the plan back.
 async fn build_frame<B>(
     pump: &Pump<B>,
     id: SurfaceId,
     bounds: Size,
-    plan: FramePlan,
+    plan: &FramePlan,
 ) -> Result<Option<Frame>, FrameError>
 where
     B: CaptureBackend + InputSink + Send + 'static,
@@ -1254,7 +1260,8 @@ where
             );
             continue;
         }
-        let encoded = match encode_tile(&buffer, pump.prefer) {
+        // The buffer is dropped right after: a RAW tile moves its pixels, never copies them.
+        let encoded = match encode_tile_owned(buffer, pump.prefer) {
             Ok(encoded) => encoded,
             Err(e) => {
                 tracing::debug!(surface = id.get(), error = %e, "encoder refused a tile; tile skipped");

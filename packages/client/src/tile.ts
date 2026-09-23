@@ -19,9 +19,9 @@
  * writing out of range.
  */
 
-import type { Rect, Tile } from './wire';
-import { ProtocolError } from './wire';
-import { CODEC, MAX_TILE_HEIGHT, MAX_TILE_WIDTH } from './limits';
+import type { Rect, Tile } from './wire.js';
+import { ProtocolError } from './wire.js';
+import { CODEC, MAX_TILE_HEIGHT, MAX_TILE_WIDTH } from './limits.js';
 
 /** One decoded tile: where it sits in the surface, and its pixels. */
 export interface DecodedTile {

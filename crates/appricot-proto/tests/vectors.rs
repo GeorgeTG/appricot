@@ -359,9 +359,9 @@ fn input_vectors() -> Vec<Vector> {
         },
         Vector {
             name: "key-altgr-greek",
-            note: "Greek alpha (keysym 0x03b1) through AltGr (modifier bit 32)",
+            note: "Greek alpha (Unicode keysym 0x010003b1) through AltGr (modifier bit 32)",
             envelope: envelope(Body::Key(Key {
-                keysym: 0x03b1,
+                keysym: 0x0100_03b1,
                 code: "KeyA".into(),
                 pressed: true,
                 modifiers: 32,

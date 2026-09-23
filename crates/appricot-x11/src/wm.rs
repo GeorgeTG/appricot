@@ -21,22 +21,14 @@
 
 use std::collections::HashMap;
 
+// The widest and tallest surface the wire carries: the limits table's rows, which core
+// re-exports, so this crate needs no `appricot-proto` dependency and no mirror.
+pub(crate) use appricot_core::{MAX_SURFACE_HEIGHT, MAX_SURFACE_WIDTH};
 use appricot_core::{Rect, Role, Size, SurfaceId};
 
 /// Pixels left between neighbouring toplevels when the root has room for them, so popups at
 /// window edges do not fight each other.
 pub(crate) const GAP: i32 = 16;
-
-/// The widest surface the wire carries.
-///
-/// This crate may not depend on `appricot-proto`, and `appricot-core` does not re-export the
-/// row, so the value is mirrored here.
-// mirrors appricot_proto::limits::MAX_SURFACE_WIDTH
-pub(crate) const MAX_SURFACE_WIDTH: u32 = 1920;
-
-/// The tallest surface the wire carries; mirrored like [`MAX_SURFACE_WIDTH`].
-// mirrors appricot_proto::limits::MAX_SURFACE_HEIGHT
-pub(crate) const MAX_SURFACE_HEIGHT: u32 = 1200;
 
 /// How many live toplevels one placement looks at. It bounds the work per map; a session
 /// past the core's surface cap has windows the host never sees anyway.

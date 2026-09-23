@@ -28,22 +28,22 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { Envelope, HelloReply } from '../protocol';
+import type { Envelope, HelloReply } from '../protocol.js';
 import {
   MAX_SURFACES,
   PROTOCOL_VERSION,
   ProtocolError,
   decodeEnvelope,
   encodeEnvelope,
-} from '../protocol';
-import type { ConnectionEvents, Transport } from '../connection';
-import { AppricotConnection } from '../connection';
-import { Emitter } from '../events';
-import { SurfaceRegistry, clampPopup, placePopup } from '../registry';
-import { SurfaceRenderer } from '../render';
-import { setTextOnly } from '../text-only';
-import { attachInput } from '../input';
-import { cursorToImageData, drawCursor } from '../cursor';
+} from '../protocol.js';
+import type { ConnectionEvents, Transport } from '../connection.js';
+import { AppricotConnection } from '../connection.js';
+import { Emitter } from '../events.js';
+import { SurfaceRegistry, clampPopup, placePopup } from '../registry.js';
+import { SurfaceRenderer } from '../render.js';
+import { setTextOnly } from '../text-only.js';
+import { attachInput } from '../input.js';
+import { cursorToImageData, drawCursor } from '../cursor.js';
 import {
   FOCUS_FLOOD_COUNT,
   PWNED_PROPERTY,
@@ -64,7 +64,7 @@ import {
   screenSizedPopupBytes,
   sequenceAbuseFrames,
   surfaceFlood,
-} from './cases';
+} from './cases.js';
 
 // ---------------------------------------------------------------------------
 // Stubs: a recording canvas, an ImageData, a scripted transport, a fake connection
@@ -561,11 +561,11 @@ describe('M2 hostile row (d): focus requests cannot take focus', () => {
 
     // A user gesture on the surface sends the pointer event, never a focus grant.
     element.dispatchEvent(new MouseEvent('pointerdown', { button: 0, clientX: 4, clientY: 4 }));
-    expect(sent.map((e) => e.kind)).toEqual(['pointerButton']);
+    expect(sent.map((e) => e.kind)).toEqual(['pointerMove', 'pointerButton']);
 
     // The host's own click handler is what says the surface is focused (the demo pattern).
     sent.push({ kind: 'focusNotify', focusNotify: { surfaceId: 7 } });
-    expect(sent.map((e) => e.kind)).toEqual(['pointerButton', 'focusNotify']);
+    expect(sent.map((e) => e.kind)).toEqual(['pointerMove', 'pointerButton', 'focusNotify']);
     // DOM focus followed the user's own click, so the keys typed next reach the surface
     // (v0 §8). That is the user's gesture, not the server's: no FocusNotify came from the SDK.
     expect(document.activeElement).toBe(element);

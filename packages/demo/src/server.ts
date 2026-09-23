@@ -202,9 +202,10 @@ const DIST_PRIVATE = new Set(['server.js', 'server.js.map', 'server.d.ts']);
  * Maps a pathname to a file under the roots, or null when it maps nowhere. Two behaviours a
  * browser needs and a bundler normally provides:
  *
- * - The TS-ESM extension probe: `tsc`'s ESNext output imports './protocol' with no extension,
- *   and a browser 404s that. A path with no extension that misses on disk is retried once
- *   with '.js'.
+ * - The TS-ESM extension probe: the demo's own modules are built with bundler resolution, so
+ *   `tsc` emits './wm/popups' with no extension, and a browser 404s that. (The client's and
+ *   the React bindings' dist name every `.js` file, NodeNext-built, and hit on disk directly.)
+ *   A path with no extension that misses on disk is retried once with '.js'.
  * - Existence is part of resolution: a mapped but missing file is a 404, not a 500.
  */
 export function resolveStatic(roots: StaticRoots, pathname: string): ResolvedStatic | null {

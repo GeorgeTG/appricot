@@ -5,19 +5,19 @@
  * canvas component per surface and a text-only title component. The host renders its own
  * chrome around each window; these bindings render none (ADR-0003 §5).
  */
-export { AppricotProvider, useAppricot } from './provider';
-export type { AppricotContextValue, AppricotProviderProps } from './provider';
+export { AppricotProvider, useAppricot } from './provider.js';
+export type { AppricotContextValue, AppricotProviderProps } from './provider.js';
 export {
   useConnectionStatus,
   useSessionEvents,
   useSurfaceMeta,
   useWindows,
-} from './hooks';
-export type { SessionEvent } from './hooks';
-export { AppricotSurface } from './surface';
-export type { AppricotResizeAsk, AppricotSurfaceProps } from './surface';
-export { AppricotTitle } from './title';
-export type { AppricotTitleElement, AppricotTitleProps } from './title';
+} from './hooks.js';
+export type { SessionEvent } from './hooks.js';
+export { AppricotSurface } from './surface.js';
+export type { AppricotResizeAsk, AppricotSurfaceProps } from './surface.js';
+export { AppricotTitle } from './title.js';
+export type { AppricotTitleElement, AppricotTitleProps } from './title.js';
 // The client types the hooks expose, re-exported so a host needs no direct
 // @appricot/client import to consume them.
 export type {
@@ -25,4 +25,4 @@ export type {
   Envelope,
   RegistryEvents,
   SurfaceRecord,
-} from './client';
+} from './client.js';

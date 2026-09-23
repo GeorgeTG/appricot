@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 
-import { setTextOnly } from './text-only';
+import { setTextOnly } from './text-only.js';
 
 describe('setTextOnly', () => {
   it('shows markup as literal text and creates no element', () => {

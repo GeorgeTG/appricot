@@ -6,10 +6,10 @@ import {
   RESUME_GRACE_MS,
   decodeEnvelope,
   encodeEnvelope,
-} from './protocol';
-import type { ByeReason, Envelope, HelloReply } from './protocol';
-import { AppricotConnection, connectAppricot } from './connection';
-import type { CloseReason, Transport } from './connection';
+} from './protocol.js';
+import type { ByeReason, Envelope, HelloReply } from './protocol.js';
+import { AppricotConnection, connectAppricot } from './connection.js';
+import type { CloseReason, Transport } from './connection.js';
 
 /** A scripted transport: the test drives open, bytes and closes by hand. */
 class FakeTransport implements Transport {

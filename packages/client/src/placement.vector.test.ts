@@ -5,8 +5,8 @@ import { readFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
 
-import type { Anchor, Positioner, Rect } from './protocol';
-import { placePopup } from './registry';
+import type { Anchor, Positioner, Rect } from './protocol.js';
+import { placePopup } from './registry.js';
 
 /**
  * The shared popup placement vectors (contract C10): appricot-core's `Positioner::place`

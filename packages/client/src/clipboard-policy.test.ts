@@ -39,13 +39,13 @@ import {
   ProtocolError,
   decodeEnvelope,
   encodeEnvelope,
-} from './protocol';
-import type { Envelope, HelloReply } from './protocol';
-import { AppricotConnection } from './connection';
-import type { Transport } from './connection';
-import { SurfaceRegistry } from './registry';
-import { setTextOnly } from './text-only';
-import { MARKUP_STRINGS, PWNED_PROPERTY } from './hostile/cases';
+} from './protocol.js';
+import type { Envelope, HelloReply } from './protocol.js';
+import { AppricotConnection } from './connection.js';
+import type { Transport } from './connection.js';
+import { SurfaceRegistry } from './registry.js';
+import { setTextOnly } from './text-only.js';
+import { MARKUP_STRINGS, PWNED_PROPERTY } from './hostile/cases.js';
 
 // ---------------------------------------------------------------------------
 // Stubs: a scripted transport, a poisoned system clipboard, a host paste action

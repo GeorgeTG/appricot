@@ -11,8 +11,8 @@
  * Nothing here uses the asynchronous Clipboard API, and nothing here runs without a user
  * gesture.
  */
-import { MAX_CLIPBOARD_BYTES } from './protocol';
-import type { Envelope } from './protocol';
+import { MAX_CLIPBOARD_BYTES } from './protocol.js';
+import type { Envelope } from './protocol.js';
 
 /**
  * The host's clipboard policy for one keyboard paste. It sees the text the user pasted and

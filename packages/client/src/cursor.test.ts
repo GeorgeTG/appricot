@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { ProtocolError } from './protocol';
-import type { CursorImage } from './protocol';
-import { cursorOrigin, cursorToImageData, drawCursor } from './cursor';
+import { ProtocolError } from './protocol.js';
+import type { CursorImage } from './protocol.js';
+import { cursorOrigin, cursorToImageData, drawCursor } from './cursor.js';
 
 /** 2x1 cursor: one opaque white pixel, one fully transparent pixel. */
 const image: CursorImage = {

@@ -12,12 +12,12 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { attachInput } from './input';
-import type { DetachInput } from './input';
-import { isPasteChord, pastedText, sendPaste } from './paste';
-import type { ChordKey } from './paste';
-import { MAX_CLIPBOARD_BYTES } from './protocol';
-import type { Envelope } from './protocol';
+import { attachInput } from './input.js';
+import type { DetachInput } from './input.js';
+import { isPasteChord, pastedText, sendPaste } from './paste.js';
+import type { ChordKey } from './paste.js';
+import { MAX_CLIPBOARD_BYTES } from './protocol.js';
+import type { Envelope } from './protocol.js';
 
 let clipboardReads = 0;
 const attached: DetachInput[] = [];

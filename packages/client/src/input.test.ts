@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { Envelope, Size } from './protocol';
-import { attachInput, keysymFor, modifiersFor } from './input';
-import type { DetachInput } from './input';
+import type { Envelope, Size } from './protocol.js';
+import { attachInput, keysymFor, modifiersFor } from './input.js';
+import type { DetachInput } from './input.js';
 
 /** Every surface a test attached; detached after each test so no window listener leaks. */
 const attached: DetachInput[] = [];
@@ -92,18 +92,37 @@ describe('attachInput pointer', () => {
 
     element.dispatchEvent(new MouseEvent('pointerdown', { button: 0, clientX: 110, clientY: 60 }));
     element.dispatchEvent(new MouseEvent('pointerup', { button: 0 }));
-    element.dispatchEvent(new MouseEvent('pointerdown', { button: 1 }));
+    element.dispatchEvent(new MouseEvent('pointerdown', { button: 1, clientX: 110, clientY: 60 }));
     element.dispatchEvent(new MouseEvent('pointerup', { button: 1 }));
-    element.dispatchEvent(new MouseEvent('pointerdown', { button: 2 }));
+    element.dispatchEvent(new MouseEvent('pointerdown', { button: 2, clientX: 110, clientY: 60 }));
     element.dispatchEvent(new MouseEvent('pointerup', { button: 2 }));
 
+    const at = { kind: 'pointerMove', pointerMove: { surfaceId: 7, x: 10, y: 10 } };
     expect(sent).toEqual([
+      at,
       { kind: 'pointerButton', pointerButton: { surfaceId: 7, button: 1, pressed: true } },
       { kind: 'pointerButton', pointerButton: { surfaceId: 7, button: 1, pressed: false } },
+      at,
       { kind: 'pointerButton', pointerButton: { surfaceId: 7, button: 2, pressed: true } },
       { kind: 'pointerButton', pointerButton: { surfaceId: 7, button: 2, pressed: false } },
+      at,
       { kind: 'pointerButton', pointerButton: { surfaceId: 7, button: 3, pressed: true } },
       { kind: 'pointerButton', pointerButton: { surfaceId: 7, button: 3, pressed: false } },
+    ]);
+  });
+
+  it('sends the position before the press, so a tap with no move before it lands there', () => {
+    // A touch tap: pointerdown is the first event the element sees, with no pointermove.
+    const { element, sent } = makeAttached({ size: { width: 160, height: 80 } });
+
+    element.dispatchEvent(new MouseEvent('pointerdown', { button: 0, clientX: 150, clientY: 80 }));
+    element.dispatchEvent(new MouseEvent('pointerup', { button: 0, clientX: 150, clientY: 80 }));
+
+    // Scaled like any move: the 80x40 CSS box shows a 160x80 surface.
+    expect(sent).toEqual([
+      { kind: 'pointerMove', pointerMove: { surfaceId: 7, x: 100, y: 60 } },
+      { kind: 'pointerButton', pointerButton: { surfaceId: 7, button: 1, pressed: true } },
+      { kind: 'pointerButton', pointerButton: { surfaceId: 7, button: 1, pressed: false } },
     ]);
   });
 
@@ -369,6 +388,7 @@ describe('attachInput focus', () => {
       new KeyboardEvent('keydown', { key: 'a', code: 'KeyA', bubbles: true, cancelable: true }),
     );
     expect(sent).toEqual([
+      { kind: 'pointerMove', pointerMove: { surfaceId: 7, x: 0, y: 0 } },
       { kind: 'pointerButton', pointerButton: { surfaceId: 7, button: 1, pressed: true } },
       { kind: 'key', key: { keysym: 0x61, code: 'KeyA', pressed: true, modifiers: 0 } },
     ]);
@@ -419,6 +439,7 @@ describe('attachInput blur and detach', () => {
     element.dispatchEvent(new MouseEvent('pointerup', { button: 0 }));
 
     expect(sent).toEqual([
+      { kind: 'pointerMove', pointerMove: { surfaceId: 7, x: 0, y: 0 } },
       { kind: 'pointerButton', pointerButton: { surfaceId: 7, button: 1, pressed: true } },
       { kind: 'pointerButton', pointerButton: { surfaceId: 7, button: 1, pressed: false } },
     ]);
@@ -445,7 +466,7 @@ describe('attachInput blur and detach', () => {
     element.dispatchEvent(new MouseEvent('pointerup', { button: 0 }));
     element.dispatchEvent(new KeyboardEvent('keyup', { key: 'a', code: 'KeyA' }));
 
-    expect(sent.map((e) => e.kind)).toEqual(['pointerButton', 'key', 'blurRelease']);
+    expect(sent.map((e) => e.kind)).toEqual(['pointerMove', 'pointerButton', 'key', 'blurRelease']);
   });
 
   it('stops listening for the window blur once every surface of the connection detached', () => {
@@ -531,7 +552,12 @@ describe('keysymFor', () => {
     expect(keysymFor({ key: 'Shift', code: 'ShiftLeft' })).toBe(0xffe1);
     expect(keysymFor({ key: 'Control', code: 'ControlLeft' })).toBe(0xffe3);
     expect(keysymFor({ key: 'Alt', code: 'AltLeft' })).toBe(0xffe9);
-    expect(keysymFor({ key: 'Meta', code: 'MetaLeft' })).toBe(0xffe7);
+  });
+
+  it("sends the browser's Meta key as X's Super_L and Super_R, not Meta_L and Meta_R", () => {
+    // Meta is the Windows or Command key, which X calls Super; X's Meta_L (0xffe7) is another.
+    expect(keysymFor({ key: 'Meta', code: 'MetaLeft' })).toBe(0xffeb);
+    expect(keysymFor({ key: 'Meta', code: 'MetaRight' })).toBe(0xffec);
   });
 
   it('returns null for a dead key, so it is never sent', () => {

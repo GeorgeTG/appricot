@@ -5,11 +5,11 @@ import { existsSync, readFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
 
-import { markupEnvelopeBytes, oversizedBytes, rawTile, screenSizedPopupBytes } from './hostile/cases';
-import { CODEC, MAX_MESSAGE_BYTES } from './limits';
-import { decodeTile } from './tile';
-import type { Envelope, Tile } from './wire';
-import { ProtocolError, decodeEnvelope, encodeEnvelope } from './wire';
+import { markupEnvelopeBytes, oversizedBytes, rawTile, screenSizedPopupBytes } from './hostile/cases.js';
+import { CODEC, MAX_MESSAGE_BYTES } from './limits.js';
+import { decodeTile } from './tile.js';
+import type { Envelope, Tile } from './wire.js';
+import { ProtocolError, decodeEnvelope, encodeEnvelope } from './wire.js';
 
 /**
  * The bounded decoder fuzzer (docs/protocol/README.md rule 10, "Both decoders are fuzzed";
@@ -286,7 +286,7 @@ function handBuiltCorpus(): CorpusMember[] {
     }),
     member('hand: altgr greek alpha key', {
       kind: 'key',
-      key: { keysym: 0x03b1, code: 'KeyA', pressed: true, modifiers: 32 },
+      key: { keysym: 0x010003b1, code: 'KeyA', pressed: true, modifiers: 32 },
     }),
     member('hand: frame with a full small RAW tile', {
       kind: 'frame',

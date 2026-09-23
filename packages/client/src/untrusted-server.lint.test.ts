@@ -183,7 +183,7 @@ const SAFE: readonly Probe[] = [
   ts("el.style.width = '10px';"),
   ts('const parent = node.parentElement; parent?.focus({ preventScroll: true });'),
   ts("const url = new URL('/', document.baseURI);"),
-  ts("void import('./lazy');"),
+  ts("void import('./lazy.js');"),
   ts("new Worker(new URL('./decode.worker.ts', import.meta.url), { type: 'module' });"),
   ts('setTimeout(() => run(), 0);'),
   tsx('export const x = <span>{s}</span>;'),

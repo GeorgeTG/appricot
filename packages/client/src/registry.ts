@@ -15,7 +15,7 @@
  * a SurfaceNew removes every record still stale. A HelloReply without `resumed` starts a fresh
  * session: every record of the old one is removed.
  */
-import { MAX_FRAME_CREDITS, MAX_POPUPS_PER_PARENT, MAX_SURFACES } from './protocol';
+import { MAX_FRAME_CREDITS, MAX_POPUPS_PER_PARENT, MAX_SURFACES } from './protocol.js';
 import type {
   Anchor,
   CursorImage,
@@ -29,8 +29,8 @@ import type {
   Size,
   SurfaceGoneReason,
   SurfaceNew,
-} from './protocol';
-import { Emitter } from './events';
+} from './protocol.js';
+import { Emitter } from './events.js';
 
 /** One tracked surface. `title` and `appId` are untrusted text (ADR-0003 §1). */
 export interface SurfaceRecord {

@@ -5,10 +5,10 @@ import { existsSync, readFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
 
-import type { Tile } from './wire';
-import { ProtocolError } from './wire';
-import { CODEC } from './limits';
-import { decodeTile } from './tile';
+import type { Tile } from './wire.js';
+import { ProtocolError } from './wire.js';
+import { CODEC } from './limits.js';
+import { decodeTile } from './tile.js';
 
 /**
  * The node environment has no ImageData global, so the test provides the constructor a browser

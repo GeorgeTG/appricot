@@ -15,11 +15,11 @@ import {
   type AppricotConnection,
   type ConnectionStatus,
   type Envelope,
-} from './client';
+} from './client.js';
 
 /** What the provider shares with the components below it. */
 export interface AppricotContextValue {
-  /** The connection's current state: idle, connecting, open, closed. */
+  /** The connection's current state: idle, connecting, open, reconnecting, closed. */
   readonly status: ConnectionStatus;
   /**
    * The window registry. One per connection: it survives the SDK's own reconnect, since the

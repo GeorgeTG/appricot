@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
 
-import { PROTOCOL_VERSION } from './protocol';
+import { PROTOCOL_VERSION } from './protocol.js';
 
 describe('PROTOCOL_VERSION', () => {
   it('equals the Rust constant in appricot-proto', () => {

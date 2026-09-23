@@ -11,10 +11,10 @@
  * presses a pointer button on it, so the keys typed next reach its listeners. That is the
  * user's own gesture; nothing the server sends moves DOM focus.
  */
-import { isPasteChord, pastedText, sendPaste } from './paste';
-import type { PastePolicy } from './paste';
-import { MAX_KEY_CODE_BYTES } from './protocol';
-import type { Envelope, Size } from './protocol';
+import { isPasteChord, pastedText, sendPaste } from './paste.js';
+import type { PastePolicy } from './paste.js';
+import { MAX_KEY_CODE_BYTES, MAX_POINTER_AXIS_STEPS } from './protocol.js';
+import type { Envelope, Size } from './protocol.js';
 
 export interface InputDeps {
   /** Where envelopes go. `AppricotConnection` satisfies this structurally. */
@@ -24,10 +24,11 @@ export interface InputDeps {
   /**
    * The logical surface size, in surface pixels. Pointer positions are scaled from the
    * element's CSS box to this size and clamped inside it, so the host may draw the surface at
-   * any CSS size. Pass the registry's size for the surface. Without it the CSS box is the
-   * logical size, which is right only at one CSS pixel per logical pixel.
+   * any CSS size. Pass the registry's size for the surface:
+   * `() => registry.get(surfaceId)?.size`. Without it, or while it returns undefined, the CSS
+   * box is the logical size, which is right only at one CSS pixel per logical pixel.
    */
-  size?: () => Size;
+  size?: () => Size | undefined;
   /**
    * The host's clipboard policy for keyboard paste (ADR-0003 §7). Opt-in: without it the SDK
    * reads no clipboard at all. With it, the platform paste chord is held back from the app
@@ -39,12 +40,6 @@ export interface InputDeps {
 
 /** The cleanup function `attachInput` returns. */
 export type DetachInput = () => void;
-
-/**
- * Mirrors the `MAX_POINTER_AXIS_STEPS` row of the limits table (appricot_proto::limits): the
- * most steps one `PointerAxis` carries on either axis.
- */
-const MAX_POINTER_AXIS_STEPS = 64;
 
 /** CSS pixels of wheel travel per discrete step: one notch of a common mouse wheel. */
 const WHEEL_STEP_PX = 100;
@@ -244,8 +239,10 @@ export function attachInput(
       element.setPointerCapture?.(e.pointerId); // the up arrives even off the element
     }
     pressed.set(e.pointerId, button);
-    // PointerButton carries no coordinates (wire.proto): the pointermove before it placed
-    // the pointer, and the server keeps the two together.
+    // PointerButton carries no coordinates (wire.proto): the press lands wherever the last
+    // PointerMove put the pointer. A touch or pen tap has no pointermove before its down, so
+    // the position goes out first, and the press lands where it was tapped.
+    onPointerMove(e);
     deps.conn.send({ kind: 'pointerButton', pointerButton: { surfaceId, button, pressed: true } });
   };
 
@@ -394,7 +391,9 @@ export function attachInput(
  * Named-key keysyms from `KeyboardEvent.code`, literal table (wire.proto, KEYBOARD comment:
  * Key.keysym is an X11 keysym number). Arrows are 0xff51-0xff54; Home/Prior/Next/End are
  * 0xff50/0xff55/0xff56/0xff57; F1-F12 run 0xffbe-0xffc9; modifiers are the _L keysyms
- * (Shift 0xffe1, Control 0xffe3, Alt 0xffe9, Meta 0xffe7) plus their _R partners.
+ * (Shift 0xffe1, Control 0xffe3, Alt 0xffe9) plus their _R partners. The browser's Meta key
+ * (the Windows or Command key) is X's Super (Super_L 0xffeb, Super_R 0xffec): X's Meta_L and
+ * Meta_R are another key (docs/protocol/v0.md §8).
  */
 const NAMED_KEYSYMS: Readonly<Record<string, number>> = {
   Enter: 0xff0d,
@@ -431,8 +430,8 @@ const NAMED_KEYSYMS: Readonly<Record<string, number>> = {
   CapsLock: 0xffe5,
   AltLeft: 0xffe9,
   AltRight: 0xffea,
-  MetaLeft: 0xffe7,
-  MetaRight: 0xffe8,
+  MetaLeft: 0xffeb,
+  MetaRight: 0xffec,
 };
 
 /** X11's Unicode keysyms: codepoint + 0x01000000 (docs/protocol/v0.md §8). */

@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { MAX_POPUPS_PER_PARENT, MAX_SURFACES } from './protocol';
-import type { CursorImage, Envelope, Positioner, Size, SurfaceNew } from './protocol';
-import { SurfaceRegistry } from './registry';
-import type { RegistryEvents } from './registry';
+import { MAX_POPUPS_PER_PARENT, MAX_SURFACES } from './protocol.js';
+import type { CursorImage, Envelope, Positioner, Size, SurfaceNew } from './protocol.js';
+import { SurfaceRegistry } from './registry.js';
+import type { RegistryEvents } from './registry.js';
 
 /**
  * The registry's session rules: resume reconciliation (v0 §7, contract C4), a fresh session

@@ -68,7 +68,11 @@ array after the `--`), it stops and asks for a quoted `'--'`, which always passe
 
 `web-build` runs before `web-typecheck`/`web-test` inside `web-check` on purpose:
 `@appricot/react` resolves `@appricot/client` through its exports map, which points at `dist/`,
-so the client must be built before anything can typecheck against it.
+so the client must be built before anything can typecheck against it. The web tests also load
+each package's own `dist/index.js` under Node's ESM loader (`src/dist-esm.test.ts` in both
+packages), so a package is built before its tests run. Both compile under `NodeNext`, which
+makes tsc refuse a relative import without its `.js` extension: Node, and a strict bundler,
+resolve a specifier exactly as written.
 
 **Read the exit code, never the tail of the log.** Chain commands with `&&`; a `| tail -N`
 throws the status away and turns a red gate green.
@@ -146,14 +150,17 @@ recipe, commit both files together.
 The demo is a whole host product in miniature: `@appricot/demo` draws the streamed windows as
 its own floating windows (title bars, minimise, focus, popups clamped to their parent), served
 by a zero-dependency static server under the strict CSP of ADR-0003 — no `'unsafe-inline'`, no
-`'unsafe-eval'` in `script-src`, and Trusted Types required for every script sink. From the host:
+`'unsafe-eval'` in `script-src`, and Trusted Types required for every script sink. Keyboard paste
+is opt-in: a toolbar checkbox, off by default, sends the text of a paste into a streamed window
+to the app (ADR-0003 §7); unchecked, pasted text stays in the page. From the host:
 
 ```sh
 docker compose run --rm -p "127.0.0.1:${APPRICOT_DEMO_HOST_PORT:-8390}:8390" dev just demo
 ```
 
-then open `http://127.0.0.1:8390` and paste the token (printed by the recipe, or set
-`APPRICOT_DEMO_TOKEN`). Ctrl-C stops both processes. The recipe builds the streamer before it
+then open `http://127.0.0.1:8390` and paste the token the recipe prints once at its start. It is
+random, 24 bytes from `/dev/urandom` as hex, and fresh for every run; set `APPRICOT_DEMO_TOKEN`
+to choose it instead. Ctrl-C stops both processes. The recipe builds the streamer before it
 starts anything, so a compile error fails it at once. It serves the page only after the
 streamer's `/readyz` answers 200, and when either process exits it stops the other and exits
 with that status. A streamer that cannot start, for example with no display, fails the recipe

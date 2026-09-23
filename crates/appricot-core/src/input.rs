@@ -4,6 +4,8 @@
 //! X11; `appricot-streamer` drives it. Signatures may not change without every implementor
 //! and every caller changing in the same change.
 
+pub use appricot_proto::limits::MAX_POINTER_AXIS_STEPS;
+
 use crate::geometry::{Point, Size};
 use crate::surface::SurfaceId;
 
@@ -93,7 +95,8 @@ pub trait InputSink {
     ) -> Result<(), Self::Error>;
 
     /// Scrolls by whole steps inside surface `id`. `steps` is `(horizontal, vertical)`;
-    /// negative is left and up, positive is right and down.
+    /// negative is left and up, positive is right and down. The wire carries at most
+    /// [`MAX_POINTER_AXIS_STEPS`] either way, and a backend sends no more than that.
     fn pointer_axis(&mut self, id: SurfaceId, steps: Point) -> Result<(), Self::Error>;
 
     /// Presses or releases a key in the focused surface.

@@ -38,11 +38,13 @@ pub use capture::{CaptureBackend, SurfaceEvent};
 pub use damage::{Damage, MAX_DAMAGE_RECTS};
 pub use frame::FrameCredits;
 pub use geometry::{Point, Rect, Size};
-pub use input::{InputSink, KeyCode, KeyEvent, Keysym, PointerButton, PressState};
+pub use input::{
+    InputSink, KeyCode, KeyEvent, Keysym, MAX_POINTER_AXIS_STEPS, PointerButton, PressState,
+};
 pub use pixels::{CursorImage, PixelBuffer, PixelFormat};
 pub use role::{Anchor, Positioner, Role};
 pub use session::{
-    FramePlan, GoneReason, MAX_FRAME_CREDITS, MAX_POPUPS_PER_PARENT, MAX_SURFACES, Session,
-    SessionEvent,
+    FramePlan, GoneReason, MAX_FRAME_CREDITS, MAX_POPUPS_PER_PARENT, MAX_SURFACE_HEIGHT,
+    MAX_SURFACE_WIDTH, MAX_SURFACES, Session, SessionEvent,
 };
 pub use surface::{ConfigureSerial, MAX_PENDING_CONFIGURES, Scale, Surface, SurfaceId};

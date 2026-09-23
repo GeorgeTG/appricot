@@ -5,8 +5,8 @@
  * every DOM element. The overlay is positioned by the host (`cursorOrigin` gives the spot);
  * `drawCursor` only offsets by the hotspot so the hotspot lands where the host put the pointer.
  */
-import { ProtocolError } from './protocol';
-import type { CursorImage } from './protocol';
+import { ProtocolError } from './protocol.js';
+import type { CursorImage } from './protocol.js';
 
 /** Un-premultiplies one channel: 0 stays 0, otherwise round(p * 255 / a), capped at 255. */
 function unpremultiplyChannel(premultiplied: number, alpha: number): number {

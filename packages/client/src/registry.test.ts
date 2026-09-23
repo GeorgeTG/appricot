@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { MAX_SURFACES } from './protocol';
+import { MAX_SURFACES } from './protocol.js';
 import type {
   CursorImage,
   Envelope,
@@ -10,9 +10,9 @@ import type {
   Size,
   SurfaceGone,
   SurfaceNew,
-} from './protocol';
-import { SurfaceRegistry, clampPopup, placePopup } from './registry';
-import type { SurfaceRecord } from './registry';
+} from './protocol.js';
+import { SurfaceRegistry, clampPopup, placePopup } from './registry.js';
+import type { SurfaceRecord } from './registry.js';
 
 /** A toplevel SurfaceNew envelope with overridable pieces. */
 function surfaceNew(

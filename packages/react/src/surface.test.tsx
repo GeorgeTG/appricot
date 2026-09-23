@@ -3,12 +3,12 @@ import type { ReactElement } from 'react';
 import { act, cleanup, render } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { clientMock, fakeSurfaceRecord } from './client-mock';
-import { AppricotProvider } from './provider';
-import { AppricotSurface } from './surface';
+import { clientMock, fakeSurfaceRecord } from './client-mock.js';
+import { AppricotProvider } from './provider.js';
+import { AppricotSurface } from './surface.js';
 
 vi.mock('@appricot/client', async (importOriginal) => {
-  const { mockClientModule } = await import('./client-mock');
+  const { mockClientModule } = await import('./client-mock.js');
   return {
     ...(await importOriginal<Record<string, unknown>>()),
     ...mockClientModule(),

@@ -9,13 +9,15 @@ resolver = "3"
 # Dependencies point one way: proto <- core <- x11, and the streamer may depend on all of them
 # (docs/architecture.md §2.1). Nothing points back: neither proto nor core knows a backend or an
 # encoder. The edges that exist today: core -> proto, x11 -> core, encode -> core and
-# streamer -> proto/core/x11/encode.
+# streamer -> proto/core/x11/encode. appricot-spike is the M1 spike's measuring tool
+# (docs/spike/README.md): it may depend on every crate, and nothing depends on it.
 members = [
     "crates/appricot-proto",
     "crates/appricot-core",
     "crates/appricot-x11",
     "crates/appricot-encode",
     "crates/appricot-streamer",
+    "crates/appricot-spike",
 ]
 
 [workspace.package]

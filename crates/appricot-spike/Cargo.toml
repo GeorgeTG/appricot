@@ -1,0 +1,30 @@
+[package]
+name = "appricot-spike"
+description = "Measurement tools for the M1 X11 capture spike: window inventory, damage log, wire recorder, codec bench, memory sampler. Dev-only; never shipped."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# A measuring tool, not part of the product: nothing depends on it, and it may depend on every
+# crate here. It talks to the streamer the way a host does (the wire codec over a WebSocket)
+# and to the X server the way any other client does, so it measures the product from outside.
+[dependencies]
+appricot-core.workspace = true
+appricot-encode.workspace = true
+appricot-proto.workspace = true
+futures-util.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+x11rb.workspace = true
+
+# The integration tests run the real streamer, with the real X11 backend, in process.
+[dev-dependencies]
+appricot-streamer = { path = "../appricot-streamer" }
+appricot-x11.workspace = true
+axum.workspace = true
+
+[lints]
+workspace = true

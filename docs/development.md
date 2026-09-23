@@ -298,3 +298,22 @@ projects, customers and vendors, and paths into other checkouts on the developme
 
 A list only catches the spellings it holds. Add a new name or spelling to the list the day it
 becomes relevant, and still read the diff before a commit.
+
+## 12. The capture spike
+
+The M1 spike ([spike/README.md](spike/README.md)) has its own compose service, `spike`, behind
+the profile of the same name, so `docker compose build` and `run dev` never touch it. It
+`extends` the dev service — the same user, volumes and entrypoint — and its image is the dev
+image plus the shared libraries a Qt 6 application on the xcb platform plugin loads. The pilot
+application is mounted read-only at `/pilot` from `APPRICOT_PILOT_DIR`, which lives in the
+gitignored `.env` with `APPRICOT_PILOT_CMD`; without them `/pilot` is an empty placeholder.
+
+```sh
+docker compose --profile spike build spike
+docker compose --profile spike run --rm spike just spike-selftest   # the harness, on xclock
+docker compose --profile spike run --rm spike just spike --help
+```
+
+It publishes no port. Its demo mode reuses the demo page's one port on the command line, as
+`just demo` does. A run writes only under `artifacts/spike/`, which is gitignored, and the
+application runs in a scratch directory of its own, so nothing it writes lands in the tree.

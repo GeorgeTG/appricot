@@ -35,6 +35,20 @@ docker compose run --rm dev bash            # a shell, with Xvfb already up on :
 docker compose run --rm -p "127.0.0.1:${APPRICOT_DEMO_HOST_PORT:-8390}:8390" dev just demo
 ```
 
+The M1 capture spike runs in a second service, `spike`, behind the compose profile of the same
+name: the dev image plus the pilot application's run-time libraries, with the pilot mounted
+read-only from `APPRICOT_PILOT_DIR` in the gitignored `.env`
+([docs/spike/README.md](docs/spike/README.md)). It is manual and never part of `check`:
+
+```sh
+docker compose --profile spike build spike
+docker compose --profile spike run --rm spike just spike-selftest
+docker compose --profile spike run --rm spike just spike --help
+```
+
+A spike run writes under `artifacts/`, which is gitignored. Its logs hold the pilot
+application's own strings; a finding copied into `docs/spike/` follows the naming rule below.
+
 `scripts/dev.sh <cmd...>` (Git Bash) and `scripts/dev.ps1 <cmd...>` (PowerShell) are thin wrappers
 around `docker compose run --rm dev <cmd...>`. They do not build the image, and they return the
 command's own exit code. With no arguments they list the recipes.
@@ -158,10 +172,13 @@ plain Xvfb; that is a measurement, not a preference.
 | `packages/client` (`@appricot/client`) | Framework-agnostic TS: connection, codec mirror, window registry with events, tile decode, input and key mapping. Draws into canvases the host provides. | Touching the DOM outside those canvases. Turning a server string into markup. |
 | `packages/react` (`@appricot/react`) | Provider, hooks, a window-canvas component. | Rendering chrome — the host draws that. |
 | `packages/demo` (`@appricot/demo`) | The demo host page and its static server with the WebSocket proxy. Dev-only. | Shipping in anyone's dependency graph. |
+| `crates/appricot-spike` | The M1 spike's measuring tools: window observer, wire recorder, memory sampler, codec bench, a stand-in X app. Dev-only. | Being depended on by any other crate, or shipping. |
+| `docker/spike`, `scripts/spike` | The spike image, its knob files, the run script and the input scripts. | The pilot application itself, its name, or a script naming its widgets' coordinates (those stay under `artifacts/`). |
 
 Dependency direction points one way and is enforced by review: `proto ← core ← x11`,
 `encode → core`, and `streamer` may depend on all of them. `proto` depends on no sibling; `core`
-depends on `proto` only.
+depends on `proto` only. `spike` measures the product from outside and may depend on every crate;
+nothing depends on it.
 
 ## The first host application
 

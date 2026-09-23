@@ -7,6 +7,11 @@ place says so. L2 and L3 remain described here only, so that L1 does not paint t
 corner. Anything marked "open" is decided in the task named next to it (see
 [roadmap.md](roadmap.md)).
 
+**Update 2026-09-23.** The spike's harness has landed and its first runs are written up in
+[spike/findings-2026-09-23.md](spike/findings-2026-09-23.md): the pilot application before it
+connects to a device, and one run connected to one. The places below that those runs answer point
+to it; the rest stay open.
+
 The three layers, the Wayland-shaped window model and the backend order come from
 [ADR-0004](adr/0004-layers-window-model-and-first-backend.md); the client's rules for server
 data come from [ADR-0003](adr/0003-untrusted-server-client.md). Both are still Proposed, not
@@ -299,9 +304,12 @@ decision is documented at the top of `crates/appricot-x11/src/wm.rs`).
 For the pilot application the choice matters less than it might. Its menus and its settings panel
 are drawn **inside** its main window, not as extra X windows (internal benchmark), so there are
 few override-redirect popups to place against screen edges. Its toplevels are the main window and
-each window it opens as a separate process. Not seen yet: combo lists and tooltips (they were
-never logged), and the windows it opens once it connects to a back end (the bench had nothing for
-it to connect to). The spike logs all three.
+each window it opens as a separate process. The spike's first runs (2026-09-23) logged the combo
+lists, a tooltip and the settings menu of its login screen: all drawn inside the main window,
+none an X window ([spike findings §1](spike/findings-2026-09-23.md#1-the-window-inventory)).
+Connected to a device, the same holds: the session reuses the login window, everything it opens
+is drawn inside it, and only its "new window" button maps another X window, from a new process
+([spike findings §8](spike/findings-2026-09-23.md#8-connected-to-a-device)).
 
 ## 5. Trust boundaries
 
@@ -453,12 +461,13 @@ attacks:
 
 | Question | Decided in |
 |---|---|
-| Codec for motion (the lossless pair, RAW and in-house QOI, is decided for v0, [protocol/v0.md §11](protocol/v0.md#11-tile-codecs)) | l1-spike-x11-capture (encode time and bytes on real rectangles) |
+| Codec for motion (the lossless pair, RAW and in-house QOI, is decided for v0, [protocol/v0.md §11](protocol/v0.md#11-tile-codecs)) | l1-spike-x11-capture. On the login screen QOI is 2 % of RAW at 90 µs per tile; the cost is that an OpenGL app damages its whole window on every repaint ([spike findings §2, §4](spike/findings-2026-09-23.md#2-the-scene-graph-and-what-it-damages)) |
 | X root equals the viewport, or toplevels spread over the root | landed as least-overlap placement in the root (§4.2); l1-spike-x11-capture revisits it against real popups |
 | Who supervises Xvfb and the app inside the container | l1-spike-x11-capture |
 | Does the streamer run under a different uid from the app | l1-spike-x11-capture (and L2's egress design) |
-| The pilot application's full window inventory once it connects to a back end | l1-spike-x11-capture (needs a back end to connect to) |
+| The pilot application's full window inventory once it connects to a back end | logged in one connected run: no X window besides the main windows, each from its own process ([spike findings §8](spike/findings-2026-09-23.md#8-connected-to-a-device)) |
 | S1 versus S3 | l1-spike-x11-capture |
-| The streamer's own memory and CPU cost, next to the reference figures of §6 | l1-spike-x11-capture (unmeasured until then) |
+| The streamer's own memory and CPU cost, next to the reference figures of §6 | measured on the login screen: about 6 MiB RSS, 2 MiB anon, 0.4-1.4 % of a core idle ([spike findings §3](spike/findings-2026-09-23.md#3-memory-and-cpu-with-the-streamer-in-the-session)); the connected UI is still to measure |
+| Keysyms beyond the keymap's first group and two levels (Greek next to US, AltGr, dead-key accents) | the X11 backend, before M2; measured failing in [spike findings §5](spike/findings-2026-09-23.md#5-the-keyboard-check) |
 | IME composition input: the client has no composition listener, so text composed in an IME does not reach the app | not scheduled; needed before a host serves CJK input |
 | Copy from the app to the host: v0 has no server-to-client message that carries clipboard text | a new message under [ADR-0003](adr/0003-untrusted-server-client.md) §7, before v0 is accepted; not scheduled |

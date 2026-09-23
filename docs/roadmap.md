@@ -93,8 +93,18 @@ Decision point: S1 or S3 for M2. If neither lands within the estimates, stop and
 Where it stands (2026-09-21): the code side of `l1-wire-spec-v0` has landed — `appricot-proto`
 encodes and decodes all 24 v0 messages, refuses any input that breaks a limit before it
 allocates, generates the test vectors, and the TypeScript mirror in `@appricot/client` passes
-them; both decoders are fuzzed. `l1-spike-x11-capture` has not run: every measurement it owns
-is still open, and v0 stays a draft until it does.
+them; both decoders are fuzzed.
+
+`l1-spike-x11-capture` (2026-09-23): the harness has landed ([spike/README.md](spike/README.md))
+and its first runs cover the pilot application before and after it connects
+([spike/findings-2026-09-23.md](spike/findings-2026-09-23.md)): the start-up inventory, the
+scene graph and its damage with and without the software scene graph (which fails its visual
+check), memory and CPU with the streamer in the session, the codec, the keyboard check (it
+fails beyond one layout's first two levels), capture under a covering window, and one run
+connected to a device (every window of the connected UI is drawn inside its main window; each
+extra window is a new process of about 110 MiB). Still open: wire figures of the connected UI,
+a click on a covered window, S3, and the fixes the keyboard check calls for. v0 stays a draft
+until the spike is done.
 
 ## M2: Client MVP
 

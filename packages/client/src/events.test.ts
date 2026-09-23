@@ -82,6 +82,24 @@ describe('Emitter', () => {
     expect(late).toHaveBeenCalledWith(2);
   });
 
+  it('isolates a throwing listener: the others still hear the emit, nothing is rethrown', () => {
+    const emitter = new Emitter<TestEvents>();
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const after = vi.fn();
+    emitter.on('ping', () => {
+      throw new Error('a host bug');
+    });
+    emitter.on('ping', after);
+
+    try {
+      expect(() => emitter.emit('ping', 4)).not.toThrow();
+      expect(after).toHaveBeenCalledWith(4);
+      expect(errors).toHaveBeenCalledTimes(1);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   it('carries an undefined payload without confusing it for a missing one', () => {
     const emitter = new Emitter<TestEvents>();
     const heard: undefined[] = [];

@@ -15,6 +15,7 @@ export type { Listener } from './events';
 
 export { AppricotConnection, WebSocketTransport, connectAppricot } from './connection';
 export type {
+  CloseReason,
   ConnectionEvents,
   ConnectionOptions,
   ConnectionStatus,
@@ -32,4 +33,4 @@ export type { DetachInput, InputDeps } from './input';
 export { isPasteChord } from './paste';
 export type { ChordKey, PastePolicy } from './paste';
 
-export { cursorToImageData, drawCursor } from './cursor';
+export { cursorOrigin, cursorToImageData, drawCursor } from './cursor';

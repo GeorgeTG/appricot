@@ -252,15 +252,30 @@ describe('SurfaceRegistry', () => {
 describe('placePopup', () => {
   const anchorRect: Rect = { x: 100, y: 50, width: 40, height: 20 };
 
+  // Gravity is the direction the popup grows from the anchor point (xdg_positioner, v0 §10),
+  // as appricot-core's Positioner::place has it; placement.vector.test.ts pins every pair.
+
   it('hangs a bottom-right-anchored popup below and right of the anchor rect', () => {
     const placed = placePopup({
       anchorRect,
-      anchor: 8, // ANCHOR_BOTTOM_RIGHT of the parent rect: (140, 70)
-      gravity: 6, // ANCHOR_BOTTOM_LEFT of the popup: its bottom-left corner goes there
+      anchor: 8, // ANCHOR_BOTTOM_RIGHT of the anchor rect: (140, 70)
+      gravity: 8, // grows right and down: its top-left corner sits on the anchor point
       offset: { x: 2, y: 3 },
       size: { width: 10, height: 6 },
     });
-    expect(placed).toEqual({ x: 142, y: 67, width: 10, height: 6 });
+    expect(placed).toEqual({ x: 142, y: 73, width: 10, height: 6 });
+  });
+
+  it('puts an X11 menu exactly where the app put it (Positioner::at)', () => {
+    // An override-redirect menu at (5, 5) in its parent, 80x40: anchor TOP_LEFT of a zero
+    // rect at its position, gravity BOTTOM_RIGHT. Core places it at (5, 5, 80, 40).
+    const placed = placePopup({
+      anchorRect: { x: 5, y: 5, width: 0, height: 0 },
+      anchor: 5,
+      gravity: 8,
+      size: { width: 80, height: 40 },
+    });
+    expect(placed).toEqual({ x: 5, y: 5, width: 80, height: 40 });
   });
 
   it('centers a popup on the anchor center by default', () => {
@@ -274,27 +289,24 @@ describe('placePopup', () => {
     expect(placed).toEqual({ x: 110, y: 50, width: 20, height: 20 });
   });
 
-  it('grows upward when gravity is the popup top', () => {
-    const placed = placePopup({
-      anchorRect: { x: 0, y: 100, width: 50, height: 10 },
-      anchor: 1, // ANCHOR_TOP of the anchor rect: (25, 100)
-      gravity: 1, // the popup's top-center sits there... its own top point is at its top edge
-      offset: { x: 0, y: 0 },
-      size: { width: 10, height: 4 },
-    });
-    // anchor point (25, 100); the popup's TOP-center is (5, 0) of a 10x4 popup, so the
-    // popup hangs below. To hang above, gravity ANCHOR_BOTTOM (2) puts its bottom-center
-    // at the anchor point; both directions are covered by this pair of assertions.
-    expect(placed).toEqual({ x: 20, y: 100, width: 10, height: 4 });
-
+  it('grows upward with gravity TOP and downward with gravity BOTTOM', () => {
     const above = placePopup({
       anchorRect: { x: 0, y: 100, width: 50, height: 10 },
-      anchor: 1,
-      gravity: 2, // popup bottom-center at (25, 100): the popup grows upward
+      anchor: 1, // ANCHOR_TOP of the anchor rect: (25, 100)
+      gravity: 1, // grows up, centred horizontally: its bottom edge sits on the point
       offset: { x: 0, y: 0 },
       size: { width: 10, height: 4 },
     });
     expect(above).toEqual({ x: 20, y: 96, width: 10, height: 4 });
+
+    const below = placePopup({
+      anchorRect: { x: 0, y: 100, width: 50, height: 10 },
+      anchor: 1,
+      gravity: 2, // grows down: its top edge sits on the point
+      offset: { x: 0, y: 0 },
+      size: { width: 10, height: 4 },
+    });
+    expect(below).toEqual({ x: 20, y: 100, width: 10, height: 4 });
   });
 });
 

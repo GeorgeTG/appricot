@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { ProtocolError } from './protocol';
 import type { CursorImage } from './protocol';
-import { cursorToImageData, drawCursor } from './cursor';
+import { cursorOrigin, cursorToImageData, drawCursor } from './cursor';
 
 /** 2x1 cursor: one opaque white pixel, one fully transparent pixel. */
 const image: CursorImage = {
@@ -61,27 +61,66 @@ describe('cursorToImageData', () => {
     expect(() => cursorToImageData(broken)).toThrow(ProtocolError);
   });
 
-  it('rejects a non-positive size', () => {
+  it('rejects a negative size, and a zero size that still carries bytes', () => {
     expect(() => cursorToImageData({ ...image, width: 0 })).toThrow(ProtocolError);
     expect(() => cursorToImageData({ ...image, height: -2 })).toThrow(ProtocolError);
   });
+
+  it('turns an empty cursor, which the decoder accepts, into one transparent pixel', () => {
+    const empty: CursorImage = {
+      ...image,
+      width: 0,
+      height: 0,
+      argbPremultiplied: new Uint8Array(0),
+    };
+
+    const out = cursorToImageData(empty);
+
+    expect(out.width).toBe(1);
+    expect(out.height).toBe(1);
+    expect([...out.data]).toEqual([0, 0, 0, 0]);
+  });
 });
+
+function recordingContext(): {
+  ctx: CanvasRenderingContext2D;
+  calls: { dx: number; dy: number; width: number }[];
+} {
+  const calls: { dx: number; dy: number; width: number }[] = [];
+  const ctx = {
+    putImageData: (imgData: ImageData, dx: number, dy: number): void => {
+      calls.push({ dx, dy, width: imgData.width });
+    },
+  } as unknown as CanvasRenderingContext2D;
+  return { ctx, calls };
+}
 
 describe('drawCursor', () => {
   it('offsets by the hotspot so the hotspot lands on the given point', () => {
-    const calls: { dx: number; dy: number; width: number }[] = [];
-    const ctx = {
-      putImageData: (imgData: ImageData, dx: number, dy: number): void => {
-        calls.push({ dx, dy, width: imgData.width });
-      },
-    } as unknown as CanvasRenderingContext2D;
+    const { ctx, calls } = recordingContext();
 
-    drawCursor(ctx, image); // default (0, 0)
     drawCursor(ctx, image, 100, 50);
 
-    expect(calls).toEqual([
-      { dx: -1, dy: 0, width: 2 },
-      { dx: 99, dy: 50, width: 2 },
-    ]);
+    expect(calls).toEqual([{ dx: 99, dy: 50, width: 2 }]);
+  });
+
+  it('draws at the canvas origin by default, so an image-sized overlay crops nothing', () => {
+    // A 16x16 I-beam with its hotspot in the middle: the documented overlay pattern puts the
+    // overlay at cursorOrigin() and calls drawCursor(ctx, image). Nothing may land at a
+    // negative offset, where putImageData would clip it.
+    const ibeam: CursorImage = {
+      serial: 4,
+      width: 16,
+      height: 16,
+      hotspotX: 8,
+      hotspotY: 8,
+      argbPremultiplied: new Uint8Array(16 * 16 * 4),
+    };
+    const { ctx, calls } = recordingContext();
+
+    drawCursor(ctx, ibeam);
+
+    expect(calls).toEqual([{ dx: 0, dy: 0, width: 16 }]);
+    expect(cursorOrigin(ibeam, 200, 120)).toEqual({ x: 192, y: 112 });
   });
 });

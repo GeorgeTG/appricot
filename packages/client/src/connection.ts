@@ -2,18 +2,21 @@
  * The connection: a transport, the Hello handshake, and opt-in auto-reconnect with resume.
  *
  * Nothing here paces frames (rule 5, docs/protocol/README.md): `setTimeout` only spaces
- * reconnect attempts. Every envelope that decodes cleanly reaches the host through
- * `events`; nothing the server sends ever becomes markup or navigation (ADR-0003).
+ * reconnect attempts. Every server-to-client envelope that decodes cleanly and arrives in an
+ * order v0 allows reaches the host through `events`; nothing the server sends ever becomes
+ * markup or navigation (ADR-0003).
  */
 import { Emitter } from './events';
 import {
   CODEC,
   MAX_CLIPBOARD_BYTES,
   PROTOCOL_VERSION,
+  ProtocolError,
+  RESUME_GRACE_MS,
   decodeEnvelope,
   encodeEnvelope,
 } from './protocol';
-import type { Bye, Envelope, Hello, HelloReply } from './protocol';
+import type { Bye, ByeReason, Envelope, Hello, HelloReply } from './protocol';
 
 const utf8Encoder = new TextEncoder();
 
@@ -75,23 +78,55 @@ export type ConnectionStatus =
   | 'idle' // constructed, `connect()` not called yet
   | 'connecting' // opening the transport or waiting for the HelloReply
   | 'open' // the session is live
-  | 'closed'; // terminal: by the user, by the peer, or after a local failure
+  | 'reconnecting' // the socket dropped and a retry is scheduled; the session may resume
+  | 'closed'; // terminal: nothing more happens until the host calls `connect()` again
+
+/** Why the connection reached 'closed'. Every string inside is untrusted server text. */
+export interface CloseReason {
+  /**
+   * - `user`: the host called `close()`.
+   * - `bye`: the server said Bye (see `bye`); no Bye is retried, whatever the close code.
+   * - `refused`: this client refused what the server sent (see `error`): bytes that do not
+   *   decode, a message in an order v0 forbids, or a version it did not ask for.
+   * - `dropped`: the socket closed and nothing retries it (reconnect is off, or the close
+   *   was normal).
+   * - `grace-expired`: reconnecting gave up; the resume grace (`resume_grace_ms`) since the
+   *   socket died has run out, so the session is gone.
+   * - `transport-error`: the transport could not even be created (see `error`).
+   */
+  cause: 'user' | 'bye' | 'refused' | 'dropped' | 'grace-expired' | 'transport-error';
+  /** The last WebSocket close code, when a socket closed. */
+  code?: number | undefined;
+  /** The server's goodbye, when one arrived. Its text is untrusted. */
+  bye?: Bye | undefined;
+  /** The local error behind `refused` or `transport-error`. */
+  error?: unknown;
+}
 
 export interface ConnectionEvents {
-  /** Every envelope that decoded cleanly, in arrival order — including the hostile ones. */
+  /**
+   * Every server-to-client envelope that decoded cleanly and arrived in an order v0 allows,
+   * in arrival order — including the hostile ones. The connection has already acted on it
+   * (the HelloReply opened the session) when listeners hear it.
+   */
   message: Envelope;
-  /** The transport closed; the value is the WebSocket close code (1006 when abnormal). */
+  /** A transport closed; the value is the WebSocket close code (1006 when abnormal). */
   close: number;
   status: ConnectionStatus;
   /** A reconnect's resume was honoured; the window set and one full frame follow. */
   resumed: void;
+  /** The connection reached 'closed', and why. It follows the 'closed' status. */
+  ended: CloseReason;
 }
 
 export interface ConnectionOptions {
   /** The per-session stream token from Hello; opaque bytes that must match or the server
    * closes with BYE_AUTH_FAILED. Never travels in a URL (rule 8). */
   token: Uint8Array;
-  /** Reconnect with resume after an abnormal close. Default false. */
+  /**
+   * Reconnect with resume after an abnormal close. Default false. Retries back off from
+   * 500 ms to 8 s and stop once the session's resume grace, counted from the drop, is over.
+   */
   reconnect?: boolean;
 }
 
@@ -99,11 +134,34 @@ export interface ConnectionOptions {
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 8000;
 
-/** Bye reasons after which this client never reconnects (wire.proto ByeReason values). */
-const FATAL_BYE_REASONS = new Set([0x100, 0x102, 0x104]); // VERSION, AUTH_FAILED, SESSION_GONE
-
 /** The normal WebSocket close code; anything else counts as abnormal and may be retried. */
 const NORMAL_CLOSE = 1000;
+
+/** ByeReason values this client sends when it refuses the server (wire.proto ByeReason). */
+const BYE_PROTOCOL_VERSION: ByeReason = 0x100;
+const BYE_PROTOCOL_VIOLATION: ByeReason = 0x103;
+
+/** Envelope kinds only a client sends (v0 §4); one arriving here is a wrong-direction message. */
+const CLIENT_TO_SERVER: ReadonlySet<Envelope['kind']> = new Set<Envelope['kind']>([
+  'hello',
+  'configure',
+  'frameAck',
+  'pointerMove',
+  'pointerButton',
+  'pointerAxis',
+  'key',
+  'focusNotify',
+  'blurRelease',
+  'clipboardSet',
+  'closeRequest',
+]);
+
+/** What may arrive before the HelloReply (v0 §5): the answer itself, or a goodbye. */
+const BEFORE_REPLY: ReadonlySet<Envelope['kind']> = new Set<Envelope['kind']>([
+  'helloReply',
+  'bye',
+  'serverError',
+]);
 
 export class AppricotConnection {
   readonly events = new Emitter<ConnectionEvents>();
@@ -112,13 +170,20 @@ export class AppricotConnection {
   readonly #reconnectEnabled: boolean;
 
   #status: ConnectionStatus = 'idle';
+  /** The live transport. Callbacks from any other transport are stale and ignored. */
   #transport: Transport | undefined;
+  /** True once the live transport has carried an accepted HelloReply. */
+  #handshaken = false;
+  /** The Bye the live transport carried, if any. */
+  #bye: Bye | undefined;
   #resumeSerial: number | undefined;
+  #graceMs = RESUME_GRACE_MS;
+  /** When reconnecting stops: the drop plus the resume grace. Unset while no retry runs. */
+  #retryDeadline: number | undefined;
   #backoffMs = 0;
   #reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-  #userClosed = false;
-  #noReconnect = false;
   #expectingResume = false;
+  #closeReason: CloseReason | undefined;
 
   /** Untrusted text from HelloReply, for display only. */
   sessionId: string | undefined;
@@ -135,12 +200,26 @@ export class AppricotConnection {
     return this.#status;
   }
 
-  /** Opens the transport and sends Hello when it is up. Calling while live is a no-op. */
+  /** Why the connection last reached 'closed'; undefined until it has. */
+  get closeReason(): CloseReason | undefined {
+    return this.#closeReason;
+  }
+
+  /**
+   * Opens the transport and sends Hello when it is up. Calling while connecting or open is a
+   * no-op. Calling while a reconnect is scheduled cancels the wait and tries now; calling after
+   * 'closed' starts over, offering the stored resume serial if there is one.
+   */
   connect(): void {
     if (this.#status === 'connecting' || this.#status === 'open') {
       return;
     }
-    this.#userClosed = false;
+    this.#clearReconnectTimer();
+    if (this.#status !== 'reconnecting') {
+      this.#retryDeadline = undefined;
+      this.#backoffMs = 0;
+    }
+    this.#closeReason = undefined;
     this.#setStatus('connecting');
     this.#openTransport();
   }
@@ -179,17 +258,16 @@ export class AppricotConnection {
     return true;
   }
 
-  /** Closes. Sends nothing extra — the transport close is the whole goodbye. */
+  /**
+   * Closes, at once: the status is 'closed' when this returns, no retry follows, and the
+   * transport's own close event, whenever it comes, changes nothing. Sends nothing extra —
+   * the transport close is the whole goodbye.
+   */
   close(): void {
-    this.#userClosed = true;
-    this.#clearReconnectTimer();
-    const transport = this.#transport;
-    this.#transport = undefined;
-    if (transport === undefined) {
-      this.#setStatus('closed');
+    if (this.#status === 'closed') {
       return;
     }
-    transport.close(); // the close callback finishes the transition and emits 'close'
+    this.#end({ cause: 'user' });
   }
 
   #setStatus(status: ConnectionStatus): void {
@@ -204,18 +282,34 @@ export class AppricotConnection {
     let transport: Transport;
     try {
       transport = this.#makeTransport();
-    } catch {
-      // The factory itself failed; treat it as an abnormal close and let the backoff decide.
-      this.#handleClose(1006);
+    } catch (error) {
+      // A factory that throws (a malformed URL, say) will throw again: no retry.
+      this.#end({ cause: 'transport-error', error });
       return;
     }
     this.#transport = transport;
-    transport.onOpen(() => this.#handleOpen());
-    transport.onMessage((data) => this.#handleMessage(data));
-    transport.onClose((code) => this.#handleClose(code));
+    this.#handshaken = false;
+    this.#bye = undefined;
+    // Each callback carries its transport: one from a transport that is no longer the live
+    // one (closed by the host, or replaced by a newer attempt) changes nothing.
+    transport.onOpen(() => {
+      if (this.#transport === transport) {
+        this.#handleOpen(transport);
+      }
+    });
+    transport.onMessage((data) => {
+      if (this.#transport === transport) {
+        this.#handleMessage(data);
+      }
+    });
+    transport.onClose((code) => {
+      if (this.#transport === transport) {
+        this.#handleClose(code);
+      }
+    });
   }
 
-  #handleOpen(): void {
+  #handleOpen(transport: Transport): void {
     const hello: Hello = {
       protocolVersion: PROTOCOL_VERSION,
       clientName: '@appricot/client',
@@ -226,87 +320,139 @@ export class AppricotConnection {
       hello.resumeSerial = this.#resumeSerial;
       this.#expectingResume = true;
     }
-    this.#transport?.send(encodeEnvelope({ kind: 'hello', hello }));
+    transport.send(encodeEnvelope({ kind: 'hello', hello }));
   }
 
   #handleMessage(data: Uint8Array): void {
     let envelope: Envelope;
     try {
       envelope = decodeEnvelope(data);
-    } catch {
+    } catch (error) {
       // Bytes that do not decode close the connection locally and never retry (ADR-0003 §4:
       // a violation closes; it also never throws into the host).
-      this.#noReconnect = true;
-      this.close();
+      this.#refuse(error, BYE_PROTOCOL_VIOLATION);
       return;
+    }
+    // v0 §5 order and direction: before the HelloReply only the reply or a goodbye; after it
+    // no second reply; and never a message only a client sends.
+    if (CLIENT_TO_SERVER.has(envelope.kind)) {
+      this.#refuse(
+        new ProtocolError(`${envelope.kind} is a client-to-server message`),
+        BYE_PROTOCOL_VIOLATION,
+      );
+      return;
+    }
+    if (this.#handshaken ? envelope.kind === 'helloReply' : !BEFORE_REPLY.has(envelope.kind)) {
+      this.#refuse(
+        new ProtocolError(`${envelope.kind} is out of order`),
+        BYE_PROTOCOL_VIOLATION,
+      );
+      return;
+    }
+    // The connection's own state moves first; the host hears the envelope after (events-1).
+    if (envelope.kind === 'helloReply' && !this.#acceptReply(envelope.helloReply)) {
+      return;
+    }
+    if (envelope.kind === 'bye') {
+      this.#bye = envelope.bye; // the socket close that follows ends the connection
     }
     this.events.emit('message', envelope);
-    if (envelope.kind === 'helloReply') {
-      this.#handleReply(envelope.helloReply);
-    } else if (envelope.kind === 'bye') {
-      this.#handleBye(envelope.bye);
-    }
   }
 
-  #handleReply(reply: HelloReply): void {
+  /** Takes a HelloReply; false when it was refused and the connection is closed. */
+  #acceptReply(reply: HelloReply): boolean {
     if (reply.protocolVersion !== PROTOCOL_VERSION) {
       // The server may not guess a version and neither do we (rule 1); fail without retry.
-      this.#noReconnect = true;
-      this.close();
-      return;
+      this.#refuse(
+        new ProtocolError(`HelloReply names version ${String(reply.protocolVersion)}`),
+        BYE_PROTOCOL_VERSION,
+      );
+      return false;
     }
+    this.#handshaken = true;
     this.sessionId = reply.sessionId;
     this.maxFrameCredits = reply.maxFrameCredits;
     if (reply.resumeSerial !== undefined) {
       this.#resumeSerial = reply.resumeSerial;
     }
+    this.#graceMs = reply.resumeGraceMs ?? RESUME_GRACE_MS;
     this.#backoffMs = 0; // a live session resets the backoff
+    this.#retryDeadline = undefined; // and the retry window
     this.#setStatus('open');
-    if (this.#expectingResume && reply.resumed) {
-      this.#expectingResume = false;
+    const resumed = this.#expectingResume && reply.resumed;
+    this.#expectingResume = false;
+    if (resumed) {
       this.events.emit('resumed', undefined);
     }
-    if (!reply.resumed) {
-      this.#expectingResume = false;
-    }
+    return true;
   }
 
-  #handleBye(bye: Bye): void {
-    if (FATAL_BYE_REASONS.has(bye.reason)) {
-      // AUTH_FAILED / SESSION_GONE / PROTOCOL_VERSION: retrying cannot change the answer.
-      this.#noReconnect = true;
+  /**
+   * Refuses the server: a Bye naming the violation (v0 §3, §5), then a local close without
+   * retry. The Bye is best effort; the close is not.
+   */
+  #refuse(error: unknown, reason: ByeReason): void {
+    try {
+      this.#transport?.send(encodeEnvelope({ kind: 'bye', bye: { reason, text: '' } }));
+    } catch {
+      // a transport that cannot send any more still gets closed below
     }
-    // The socket close that follows drives the rest; the host saw the Bye via 'message'.
+    this.#end({ cause: 'refused', error });
   }
 
   #handleClose(code: number): void {
     this.#transport = undefined;
-    if (this.#status === 'closed') {
-      return; // already terminal; the close event was emitted for the first one
-    }
     this.events.emit('close', code);
-    this.#setStatus('closed');
-    if (
-      this.#reconnectEnabled &&
-      !this.#userClosed &&
-      !this.#noReconnect &&
-      code !== NORMAL_CLOSE
-    ) {
-      this.#scheduleReconnect();
+    // Any Bye settles it, whatever the close code: the server said why, and a retry would
+    // meet the same answer (or a violation loop).
+    const bye = this.#bye;
+    if (bye !== undefined) {
+      this.#end({ cause: 'bye', code, bye });
+      return;
     }
+    if (!this.#reconnectEnabled || code === NORMAL_CLOSE) {
+      this.#end({ cause: 'dropped', code });
+      return;
+    }
+    this.#scheduleReconnect(code);
   }
 
-  #scheduleReconnect(): void {
-    const delay = this.#backoffMs === 0 ? RECONNECT_BASE_MS : this.#backoffMs;
-    this.#backoffMs = Math.min(delay * 2, RECONNECT_MAX_MS);
+  /**
+   * Schedules the next attempt, backing off, but never past the resume grace counted from the
+   * drop (v0 §7): after it the session is gone and the streamer refuses the upgrade, so
+   * retrying longer would only knock on a closed door.
+   */
+  #scheduleReconnect(code: number): void {
+    const now = Date.now();
+    this.#retryDeadline ??= now + this.#graceMs;
+    const remaining = this.#retryDeadline - now;
+    if (remaining <= 0) {
+      this.#end({ cause: 'grace-expired', code });
+      return;
+    }
+    const backoff = this.#backoffMs === 0 ? RECONNECT_BASE_MS : this.#backoffMs;
+    this.#backoffMs = Math.min(backoff * 2, RECONNECT_MAX_MS);
+    this.#setStatus('reconnecting');
     this.#reconnectTimer = setTimeout(() => {
       this.#reconnectTimer = undefined;
-      if (this.#userClosed || this.#noReconnect) {
-        return;
-      }
       this.#setStatus('connecting');
       this.#openTransport();
-    }, delay);
+    }, Math.min(backoff, remaining));
+  }
+
+  /** The one way to 'closed': drops the live transport and any retry, then reports why. */
+  #end(reason: CloseReason): void {
+    this.#clearReconnectTimer();
+    this.#expectingResume = false;
+    const transport = this.#transport;
+    this.#transport = undefined; // its callbacks are stale from here on
+    this.#closeReason = reason;
+    if (transport !== undefined) {
+      transport.close();
+      this.events.emit('close', NORMAL_CLOSE);
+    }
+    this.#setStatus('closed');
+    this.events.emit('ended', reason);
   }
 
   #clearReconnectTimer(): void {

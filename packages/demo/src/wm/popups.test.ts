@@ -8,7 +8,9 @@ import { POPUP_MARGIN_PX, popupLocalRect } from './popups';
 const DROPDOWN: Positioner = {
   anchorRect: { x: 8, y: 8, width: 120, height: 24 },
   anchor: 6, // ANCHOR_BOTTOM_LEFT: the anchor point is the rect's bottom-left corner
-  gravity: 5, // ANCHOR_TOP_LEFT: the popup's top-left corner lands on the anchor point
+  // ANCHOR_BOTTOM_RIGHT as a gravity: the popup grows right and down from the anchor point,
+  // so its top-left corner lands there (xdg_positioner, v0 §10).
+  gravity: 8,
   offset: { x: 0, y: 4 },
   size: { width: 160, height: 200 },
 };
@@ -19,6 +21,18 @@ describe('popupLocalRect', () => {
   it('places a dropdown under its anchor', () => {
     const rect = popupLocalRect(DROPDOWN, PARENT);
     expect(rect).toEqual({ x: 8, y: 36, width: 160, height: 200 });
+  });
+
+  it('puts an X11 menu where the app put it, not pinned to the corner', () => {
+    // What the streamer sends for an override-redirect menu at (5, 5), 80x40: anchor
+    // TOP_LEFT of a zero rect at its position, gravity BOTTOM_RIGHT.
+    const menu: Positioner = {
+      anchorRect: { x: 5, y: 5, width: 0, height: 0 },
+      anchor: 5,
+      gravity: 8,
+      size: { width: 80, height: 40 },
+    };
+    expect(popupLocalRect(menu, PARENT)).toEqual({ x: 5, y: 5, width: 80, height: 40 });
   });
 
   it('clamps a hostile popup the size of the screen into the parent neighbourhood', () => {

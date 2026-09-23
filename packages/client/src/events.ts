@@ -33,6 +33,11 @@ export class Emitter<Events extends object> {
    * Emits to the listeners subscribed at the moment of the call. A listener that unsubscribes
    * itself mid-emit is still safe; a listener that subscribes mid-emit hears the next emit,
    * not this one.
+   *
+   * A listener that throws is isolated: the error is reported through `console.error`, the
+   * remaining listeners still hear this emit, and nothing is rethrown into the caller — so a
+   * host's own bug in one handler cannot skip the SDK's bookkeeping in another, or escape into
+   * the WebSocket handler (ADR-0003 §4).
    */
   emit<K extends keyof Events>(event: K, value: Events[K]): void {
     const listeners = this.#byEvent.get(event);
@@ -40,7 +45,11 @@ export class Emitter<Events extends object> {
       return;
     }
     for (const listener of [...listeners]) {
-      listener(value as never);
+      try {
+        listener(value as never);
+      } catch (error) {
+        console.error(`@appricot/client: a '${String(event)}' listener threw`, error);
+      }
     }
   }
 }

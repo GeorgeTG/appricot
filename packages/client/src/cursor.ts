@@ -2,8 +2,8 @@
  * Cursor pixels: the wire's premultiplied ARGB turned into an `ImageData`.
  *
  * The server is untrusted (ADR-0003 §5): we hand the host pixels and math, and the host owns
- * every DOM element. The overlay is positioned by the host; `drawCursor` only offsets by the
- * hotspot so the hotspot lands where the host put the pointer.
+ * every DOM element. The overlay is positioned by the host (`cursorOrigin` gives the spot);
+ * `drawCursor` only offsets by the hotspot so the hotspot lands where the host put the pointer.
  */
 import { ProtocolError } from './protocol';
 import type { CursorImage } from './protocol';
@@ -39,17 +39,24 @@ function makeImageData(
  * pixels become zeroed RGBA, which is what a transparent cursor row should be. The byte
  * length is checked against `width * height * 4` before anything is allocated, and a
  * mismatch is a `ProtocolError`, never a short read (ADR-0003 §4).
+ *
+ * An empty cursor (a zero width or height, with no bytes) is a legal message, and the
+ * decoder accepts it: it means "no visible cursor". It becomes one fully transparent pixel,
+ * since an `ImageData` cannot be empty, so drawing it shows nothing and never throws.
  */
 export function cursorToImageData(image: CursorImage): ImageData {
   const { width, height, argbPremultiplied } = image;
-  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
-    throw new ProtocolError('CursorImage width/height must be positive integers');
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 0 || height < 0) {
+    throw new ProtocolError('CursorImage width/height must be non-negative integers');
   }
   const bytes = width * height * 4;
   if (argbPremultiplied.length !== bytes) {
     throw new ProtocolError(
       `CursorImage.argb_premultiplied must be exactly ${bytes} bytes for ${width}x${height}`,
     );
+  }
+  if (bytes === 0) {
+    return makeImageData(new Uint8ClampedArray(new ArrayBuffer(4)), 1, 1);
   }
   // An explicit ArrayBuffer keeps the TS 5.7+ buffer-generic types happy for ImageData.
   const rgba = new Uint8ClampedArray(new ArrayBuffer(bytes));
@@ -64,16 +71,37 @@ export function cursorToImageData(image: CursorImage): ImageData {
 }
 
 /**
- * Draws the cursor onto `ctx` so that its hotspot sits at `(x, y)`. The host positions the
- * overlay canvas (usually its origin at the pointer) and calls this with `x = y = 0`;
- * passing the pointer position directly works too. `putImageData` ignores transforms, so the
- * placement is exact whatever else the host drew.
+ * Where an overlay canvas the size of the cursor image goes so that the image's hotspot sits
+ * on the pointer: the pointer position minus the hotspot, in the same coordinates as the
+ * pointer.
+ */
+export function cursorOrigin(
+  image: CursorImage,
+  pointerX: number,
+  pointerY: number,
+): { x: number; y: number } {
+  return { x: pointerX - image.hotspotX, y: pointerY - image.hotspotY };
+}
+
+/**
+ * Draws the cursor onto `ctx` so that its hotspot sits at `(x, y)` of the canvas.
+ *
+ * Two ways to use it:
+ *   - an overlay canvas sized `image.width` x `image.height`, placed at `cursorOrigin(image,
+ *     pointerX, pointerY)`: call `drawCursor(ctx, image)`. The defaults put the hotspot at
+ *     `(hotspotX, hotspotY)`, so the image lands at the canvas origin, uncropped;
+ *   - an overlay canvas covering the whole surface: call `drawCursor(ctx, image, pointerX,
+ *     pointerY)`.
+ *
+ * Placing an image-sized overlay at the pointer itself and drawing at `(0, 0)` crops every
+ * cursor whose hotspot is not its top-left corner: `putImageData` clips negative offsets.
+ * `putImageData` ignores transforms, so the placement is exact whatever else the host drew.
  */
 export function drawCursor(
   ctx: CanvasRenderingContext2D,
   image: CursorImage,
-  x = 0,
-  y = 0,
+  x = image.hotspotX,
+  y = image.hotspotY,
 ): void {
   ctx.putImageData(cursorToImageData(image), x - image.hotspotX, y - image.hotspotY);
 }

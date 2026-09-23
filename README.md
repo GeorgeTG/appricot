@@ -195,8 +195,6 @@ fuzz tests on both sides of the wire.
 - L2 and L3 are written down
   ([architecture](docs/architecture.md), [roadmap](docs/roadmap.md)) and deliberately not
   scaffolded: write them down first.
-- The npm licence gate covers the production graph only. Whether devDependencies are gated too
-  is open; ADR-0002 would need an amendment first.
 
 ## Licence
 

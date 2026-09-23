@@ -21,7 +21,7 @@ its **Consequences**, and the **Alternatives considered**.
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-separate-repository.md) | A separate repository from day one | **Accepted** 2026-09-19 (the user) |
-| [0002](0002-licence.md) | Licence of APPricot, and a permissive-only core graph | **Accepted** 2026-09-20 (the user) |
+| [0002](0002-licence.md) | Licence of APPricot, and a permissive-only core graph | **Accepted** 2026-09-20 (the user); Amendment 1, the npm development graph, 2026-09-23 (the user) |
 | [0003](0003-untrusted-server-client.md) | The client treats the server as untrusted | Proposed 2026-09-19 |
 | [0004](0004-layers-window-model-and-first-backend.md) | Three layers, a Wayland-shaped window model, and X11 first | Proposed 2026-09-19 (the per-window streamer itself: Accepted by the user) |
 | [0005](0005-wire-encoding-protobuf.md) | Wire encoding: Protocol Buffers (proto3) | Proposed 2026-09-20 |

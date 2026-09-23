@@ -10,9 +10,12 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import {
+  DEV_ALLOWED,
+  DEV_EXTRA,
   OWN_LICENCE,
   TIER_A,
   ownViolations,
+  packageNames,
   parseReport,
   parseSpdx,
   satisfies,
@@ -29,6 +32,17 @@ test('Tier A equals the allow list in deny.toml, so both graphs obey one policy'
     .filter(Boolean)
     .map((line) => /^"([^"]+)",?$/.exec(line)?.[1]);
   assert.deepEqual(allow, [...TIER_A]);
+});
+
+test('the development list is Tier A plus the extras ADR-0002 Amendment 1 names', () => {
+  const adr = readFileSync(new URL('../docs/adr/0002-licence.md', import.meta.url), 'utf8');
+  const amendment = /^## Amendment 1:[\s\S]*?(?=^## |(?![\s\S]))/m.exec(adr);
+  assert.ok(amendment, 'ADR-0002 has an Amendment 1 section');
+  const line = /^\*\*Tier A, plus (.+)\.\*\*$/m.exec(amendment[0]);
+  assert.ok(line, 'Amendment 1 states its list on one line: "**Tier A, plus A, B and C.**"');
+  const named = line[1].split(/, | and /).map((entry) => entry.trim());
+  assert.deepEqual(named, [...DEV_EXTRA]);
+  assert.deepEqual(DEV_ALLOWED, [...TIER_A, ...DEV_EXTRA]);
 });
 
 test('every Tier A licence passes on its own', () => {
@@ -69,7 +83,7 @@ test('WITH passes only as the exact pair on the list', () => {
   assert.equal(satisfies('GPL-2.0-only WITH LLVM-exception'), false);
 });
 
-test('licences outside Tier A fail, the dev graph ones included', () => {
+test('licences outside Tier A fail Tier A, the development list ones included', () => {
   for (const licence of [
     'MPL-2.0',
     'GPL-3.0-only',
@@ -85,6 +99,31 @@ test('licences outside Tier A fail, the dev graph ones included', () => {
     'LicenseRef-Proprietary',
   ]) {
     assert.equal(satisfies(licence), false, licence);
+  }
+});
+
+test('the development list admits its extras and still denies copyleft and unknown licences', () => {
+  for (const licence of DEV_EXTRA) {
+    assert.equal(satisfies(licence, DEV_ALLOWED), true, licence);
+  }
+  assert.equal(satisfies('MIT', DEV_ALLOWED), true);
+  assert.equal(satisfies('(MIT OR Apache-2.0) AND BlueOak-1.0.0', DEV_ALLOWED), true);
+  for (const licence of [
+    'GPL-2.0-only',
+    'GPL-3.0-or-later',
+    'LGPL-2.1-only',
+    'AGPL-3.0-only',
+    'EPL-2.0',
+    'CDDL-1.0',
+    'BUSL-1.1',
+    'CC-BY-4.0',
+    'MIT AND GPL-3.0-only',
+    'Unknown',
+    'UNLICENSED',
+    '',
+    undefined,
+  ]) {
+    assert.equal(satisfies(licence, DEV_ALLOWED), false, JSON.stringify(licence));
   }
 });
 
@@ -134,6 +173,36 @@ test('violations reads a pnpm report and lists every package that fails', () => 
     { name: 'mystery', versions: ['0.1.0'], license: 'Unknown' },
   ]);
   assert.deepEqual(violations({ MIT: report.MIT }), []);
+});
+
+test('MPL-2.0 passes the development list and is still denied in the production graph', () => {
+  const report = {
+    MIT: [{ name: 'react', versions: ['19.3.0'], license: 'MIT' }],
+    'MPL-2.0': [{ name: 'lightningcss', versions: ['1.33.0'], license: 'MPL-2.0' }],
+    'GPL-3.0-only': [{ name: 'copyleft-tool', versions: ['1.0.0'], license: 'GPL-3.0-only' }],
+  };
+  assert.deepEqual(
+    violations(report).map((pkg) => pkg.name),
+    ['copyleft-tool', 'lightningcss'],
+  );
+  assert.deepEqual(
+    violations(report, DEV_ALLOWED).map((pkg) => pkg.name),
+    ['copyleft-tool'],
+  );
+});
+
+test('packageNames lists every package of a report once', () => {
+  assert.deepEqual(
+    packageNames({
+      MIT: [
+        { name: 'a', versions: ['1.0.0'] },
+        { name: 'b', versions: ['2.0.0'] },
+      ],
+      ISC: [{ name: 'a', versions: ['1.1.0'] }],
+    }),
+    new Set(['a', 'b']),
+  );
+  assert.deepEqual(packageNames({}), new Set());
 });
 
 test('parseReport reads JSON and the sentence pnpm prints for an empty graph', () => {

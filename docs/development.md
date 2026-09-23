@@ -190,7 +190,8 @@ list is denied, including unknown licences — and `exceptions = []`. Concretely
    the version, its licence, where that was checked, and the date.
 2. `just lock`, then `just deny` (needs network). A denial is the answer, not an obstacle.
 3. Anything under GPL, LGPL, AGPL, MPL-2.0, EPL or a source-available licence needs an
-   **amendment to ADR-0002 first** — not a `deny.toml` edit.
+   **amendment to ADR-0002 first** — not a `deny.toml` edit. (Amendment 1 admits MPL-2.0 in
+   the npm development graph only; see below.)
 
 The npm side has its own gate, `just web-licences` (part of `web-check`), in
 [scripts/web-licences.mjs](../scripts/web-licences.mjs):
@@ -200,9 +201,13 @@ The npm side has its own gate, `just web-licences` (part of `web-check`), in
   needs both, and an unknown, missing or unparseable licence fails.
 - Every workspace package must declare exactly `MIT OR Apache-2.0` (ADR-0002 §1).
 - Its Tier A list must equal `deny.toml`'s `allow` list. Its own tests fail when the two drift.
-- devDependencies are not gated. ADR-0002 governs the linked graph, and they are never bundled
-  or conveyed. The gate still prints those outside Tier A, so the gap stays visible. Gating them
-  too would need an amendment to ADR-0002.
+- Every package only in the development graph (the devDependencies: compiler, linter, test
+  runner) must pass the development list: Tier A plus MIT-0, CC0-1.0, BlueOak-1.0.0 and MPL-2.0
+  ([ADR-0002, Amendment 1](adr/0002-licence.md#amendment-1-the-npm-development-graph-2026-09-23)).
+  These packages are never bundled, because the packages are built with `tsc` alone. GPL, LGPL,
+  AGPL, EPL and unknown licences still fail. The gate prints the development packages outside
+  Tier A, so what the extras let in stays visible. Its tests fail when the list drifts from the
+  amendment.
 
 It reads the installed `node_modules` and needs no network, so run it after `web-install`.
 

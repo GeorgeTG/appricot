@@ -134,8 +134,9 @@ web-lock:
 web-install:
     pnpm install --frozen-lockfile
 
-# Every package in the production graph must be Tier A, and every workspace package must
-# declare MIT OR Apache-2.0. The gate's own tests run first.
+# Every package in the production graph must be Tier A, every development-only package must be
+# on the development list (ADR-0002, Amendment 1), and every workspace package must declare
+# MIT OR Apache-2.0. The gate's own tests run first.
 # The npm licence gate (ADR-0002 §2).
 web-licences:
     node --test scripts/web-licences.test.mjs

@@ -10,20 +10,24 @@
  * - a package in the PRODUCTION graph of the npm workspace (`pnpm licenses list --prod`) has a
  *   licence expression that Tier A does not satisfy. That graph is what a host inherits when it
  *   bundles @appricot/client or @appricot/react.
+ * - a package only in the DEVELOPMENT graph (the devDependencies) has a licence expression that
+ *   the development list does not satisfy: Tier A plus DEV_EXTRA (ADR-0002, Amendment 1).
  * - a workspace package does not declare exactly "MIT OR Apache-2.0" (ADR-0002 §1). This is the
  *   npm twin of deny.toml's `[licenses.private] ignore = false`.
  *
- * Tier A is the list in ADR-0002 §2, and TIER_A below must equal deny.toml's `allow` list;
- * web-licences.test.mjs fails when they drift apart. As in cargo-deny:
+ * Tier A is the list in ADR-0002 §2, and TIER_A below must equal deny.toml's `allow` list.
+ * DEV_EXTRA must equal the list in the ADR's Amendment 1. web-licences.test.mjs fails when either
+ * drifts. As in cargo-deny:
  *
  * - an expression passes when it is satisfiable with Tier A licences alone: an `OR` needs one
  *   side, an `AND` needs both, and `X WITH Y` needs that exact pair on the list;
  * - anything else fails, including an unknown, missing or unparseable licence.
  *
- * devDependencies are not gated. ADR-0002 §2 governs the linked graph, the code a consumer
- * inherits, and devDependencies are never bundled or conveyed: they are tools, like the ones in
- * the dev image. This script still prints the dev-only packages outside Tier A, so the gap stays
- * visible. Gating them too would need an amendment to ADR-0002 first.
+ * The development graph has its own list because it is never bundled or conveyed: the packages
+ * are built with tsc alone, and the tools run in the dev container. Its extras are permissive,
+ * plus MPL-2.0, whose duties attach to distribution. Everything else fails there too, GPL and
+ * unknown licences included. The script prints the development packages outside Tier A, so what
+ * the extras let in stays visible.
  *
  * Offline: pnpm reads the installed packages and makes no network request. No dependency: plain
  * node, the pnpm the image already carries, and nothing else.
@@ -46,6 +50,15 @@ export const TIER_A = Object.freeze([
   'Zlib',
   '0BSD',
 ]);
+
+/**
+ * ADR-0002, Amendment 1: the licences the development graph may carry beyond Tier A. MPL-2.0 is
+ * here only; the production graph still denies it.
+ */
+export const DEV_EXTRA = Object.freeze(['MIT-0', 'CC0-1.0', 'BlueOak-1.0.0', 'MPL-2.0']);
+
+/** The development graph's list: Tier A plus DEV_EXTRA. */
+export const DEV_ALLOWED = Object.freeze([...TIER_A, ...DEV_EXTRA]);
 
 /** What every workspace package declares (ADR-0002 §1). */
 export const OWN_LICENCE = 'MIT OR Apache-2.0';
@@ -142,8 +155,8 @@ export function satisfies(expression, allowed = TIER_A) {
 }
 
 /**
- * The packages of a `pnpm licenses list --json` report whose licence Tier A does not satisfy,
- * as `{ name, versions, license }`, sorted by name.
+ * The packages of a `pnpm licenses list --json` report whose licence `allowed` (Tier A unless
+ * given) does not satisfy, as `{ name, versions, license }`, sorted by name.
  */
 export function violations(report, allowed = TIER_A) {
   const found = [];
@@ -168,6 +181,11 @@ export function parseReport(stdout) {
     return {};
   }
   return JSON.parse(text);
+}
+
+/** The names of the packages in a `pnpm licenses list --json` report. */
+export function packageNames(report) {
+  return new Set(Object.values(report).flatMap((packages) => packages.map((pkg) => pkg.name)));
 }
 
 /** The workspace packages whose own `license` field is not exactly OWN_LICENCE. */
@@ -204,29 +222,39 @@ function main() {
     failed = true;
   }
 
+  // The full report holds both graphs; a package in the production graph was judged above.
   const all = parseReport(pnpm(['licenses', 'list', '--json']));
-  const deniedNames = new Set(denied.map((pkg) => pkg.name));
-  const devOnly = violations(all).filter((pkg) => !deniedNames.has(pkg.name));
-  if (devOnly.length > 0) {
+  const prodNames = packageNames(prod);
+  const devCount = [...packageNames(all)].filter((name) => !prodNames.has(name)).length;
+  const devDenied = violations(all, DEV_ALLOWED).filter((pkg) => !prodNames.has(pkg.name));
+  for (const pkg of devDenied) {
+    console.error(`web-licences: denied in the development graph: ${describe(pkg)}`);
+    failed = true;
+  }
+  const devExtra = violations(all)
+    .filter((pkg) => !prodNames.has(pkg.name))
+    .filter((pkg) => satisfies(pkg.license, DEV_ALLOWED));
+  if (devExtra.length > 0) {
     console.log(
-      `web-licences: note: ${devOnly.length} dev-only packages are outside Tier A and not ` +
-        'gated (ADR-0002 governs the linked graph):',
+      `web-licences: note: ${devExtra.length} development packages are outside Tier A, on the ` +
+        'development list (ADR-0002, Amendment 1):',
     );
-    for (const pkg of devOnly) {
+    for (const pkg of devExtra) {
       console.log(`  ${describe(pkg)}`);
     }
   }
 
   if (failed) {
     console.error(
-      'web-licences: FAILED. Tier A is ADR-0002 §2; a licence outside it needs an amendment ' +
-        'to that ADR first.',
+      'web-licences: FAILED. Tier A is ADR-0002 §2 and the development list its Amendment 1; a ' +
+        'licence outside them needs an amendment to that ADR first.',
     );
     process.exit(1);
   }
   console.log(
     `web-licences: ok. ${manifests.length} workspace packages declare "${OWN_LICENCE}"; ` +
-      `${prodCount} production packages, all Tier A.`,
+      `${prodCount} production packages, all Tier A; ${devCount} development packages, all on ` +
+      'the development list.',
   );
 }
 

@@ -126,8 +126,9 @@ anything not on the allow list is denied, including unknown licences — and `ex
 Adding a dependency under GPL, LGPL, AGPL, MPL-2.0, EPL or a source-available licence needs an
 **amendment to ADR-0002 first**, not a `deny.toml` edit. `just deny` is the gate for the Rust
 graph. `just web-licences` is the gate for the npm graph: every package in the production graph
-must be Tier A, and every workspace package must declare `MIT OR Apache-2.0`. devDependencies are
-not gated, because they are never bundled; the gate lists the ones outside Tier A.
+must be Tier A, and every workspace package must declare `MIT OR Apache-2.0`. The development
+graph (devDependencies, never bundled) is gated against Tier A plus MIT-0, CC0-1.0, BlueOak-1.0.0
+and MPL-2.0 (ADR-0002, Amendment 1); anything else fails there too.
 
 ## The window model
 

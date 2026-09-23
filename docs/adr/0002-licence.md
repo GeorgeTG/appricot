@@ -2,7 +2,8 @@
 
 **Status**: Accepted (2026-09-20, by the user). This ADR was Proposed on 2026-09-19; the user
 decided on 2026-09-20 and the decision below is the accepted one. The "Alternatives considered"
-section is kept as the history of that decision.
+section is kept as the history of that decision. Amended on 2026-09-23 by the user: see
+[Amendment 1](#amendment-1-the-npm-development-graph-2026-09-23), the npm development graph.
 
 ## Context
 
@@ -120,3 +121,55 @@ The second decision (a permissive-only core graph) had one alternative worth nam
 plus file-level copyleft by named exception**. It is rejected because every exception APPricot
 takes becomes an exception every consumer must take too. It can be revisited per package by
 amendment.
+
+## Amendment 1: the npm development graph (2026-09-23)
+
+**Decided by the user on 2026-09-23.** §2 checks `pnpm-lock.yaml` "by a licence check in CI",
+which reads as the whole lockfile. The lockfile holds two graphs, and §2's reason applies to one
+of them:
+
+- **The production graph** is what a host inherits: the `dependencies` of the workspace packages
+  and everything under them (`pnpm licenses list --prod`). §2 governs it unchanged: Tier A only,
+  and no exception process.
+- **The development graph** is the `devDependencies`: the compiler, the linter, the test runner
+  and its DOM. The packages are built with `tsc` alone, so no development package is bundled into
+  what ships, and none is conveyed to a consumer.
+
+The development graph is gated too, against its own list:
+
+**Tier A, plus MIT-0, CC0-1.0, BlueOak-1.0.0 and MPL-2.0.**
+
+- MIT-0 is MIT without the attribution paragraph
+  ([SPDX](https://spdx.org/licenses/MIT-0.html)). CC0-1.0 is a public-domain dedication
+  ([SPDX](https://spdx.org/licenses/CC0-1.0.html)). BlueOak-1.0.0 is permissive, with a notice
+  duty and no copyleft ([Blue Oak Council](https://blueoakcouncil.org/license/1.0.0)). All three
+  were checked on 2026-09-23.
+- MPL-2.0 is file-level copyleft, and its duties attach to distribution: §3.1 and §3.2 bind
+  whoever distributes Covered Software ([MPL-2.0](https://www.mozilla.org/en-US/MPL/2.0/),
+  checked 2026-09-23). A tool that runs in the dev container and is never distributed takes on
+  none of them. It is admitted in the development graph only. In the production graph it stays
+  denied, as §2 says.
+- Everything else fails the development gate as well: GPL, LGPL, AGPL, EPL, source-available,
+  and an unknown, missing or unparseable licence. A tool's code can still reach what ships (a
+  bundler's runtime, a compiler's helpers, a fixture copied into a package), so a new
+  strong-copyleft or unknown licence among the tools is a decision to take here, not a line in a
+  log.
+- Adding a licence to either list needs a further amendment. `scripts/web-licences.mjs` holds
+  both lists, and its tests fail when they drift from `deny.toml` or from this amendment.
+
+On 2026-09-23 the development graph held seven packages outside Tier A, as `just web-licences`
+read them from the installed manifests:
+
+- `lightningcss` and `lightningcss-linux-x64-gnu`, MPL-2.0, a dependency of vite, which vitest
+  runs (`lightningcss` 1.33.0 on [npm](https://registry.npmjs.org/lightningcss/1.33.0), checked
+  2026-09-23);
+- `@csstools/color-helpers` and `@csstools/css-syntax-patches-for-csstree` (MIT-0), `mdn-data`
+  (CC0-1.0) and `lru-cache` (BlueOak-1.0.0), all under jsdom;
+- `minimatch` (BlueOak-1.0.0), under eslint.
+
+All seven pass the new list.
+
+Alternatives considered:
+- Gating the development graph at Tier A. It fails today, and passing it would mean replacing
+  vitest, jsdom and eslint.
+- Leaving the development graph ungated. That lets a GPL tool in without anyone deciding it.

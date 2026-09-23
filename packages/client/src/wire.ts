@@ -14,15 +14,19 @@
  *     property is present, even when the value equals the default.
  *   - v0 enums are closed: an unknown enum value is a protocol violation in both codecs and
  *     closes the connection (wire.proto header, decided 2026-09-20); new values ship only with
- *     a new protocol version.
+ *     a new protocol version. Both codecs check the sets themselves; prost does not.
  *   - Repeated scalars (`codecs`) are packed; repeated messages (`tiles`) are not packable and
  *     are written one key per entry.
  *   - sint32 fields travel zigzag-encoded.
  *
  * The server is untrusted (docs/adr/0003-untrusted-server-client.md): decodeEnvelope checks the
- * message cap first, then every per-field cap BEFORE a copy is allocated, rejects unknown field
- * numbers (there is no skip-by-length in v0), an envelope that names no known oneof field, and
- * bytes that are not valid UTF-8. Nothing here does I/O; the connection lives elsewhere
+ * message cap first, then every per-field cap BEFORE a copy is allocated. It rejects an envelope
+ * that is not exactly one known body, a singular field that appears twice, a varint over 32 bits
+ * on a known field, a field number 0, a group or an undefined wire type, and bytes that are not
+ * valid UTF-8. An unknown field inside a known message is skipped by its wire type, bounded by
+ * the message (docs/protocol/v0.md section 13: a new field is an additive change); it is never
+ * looked into. These are the rules the Rust codec's pre-scan enforces, and the shared vectors
+ * hold both codecs to them. Nothing here does I/O; the connection lives elsewhere
  * (docs/protocol/README.md rule 9).
  */
 
@@ -38,6 +42,7 @@ import {
   MAX_ERROR_TEXT_BYTES,
   MAX_KEY_CODE_BYTES,
   MAX_MESSAGE_BYTES,
+  MAX_POINTER_AXIS_STEPS,
   MAX_SESSION_ID_BYTES,
   MAX_SURFACE_HEIGHT,
   MAX_SURFACE_WIDTH,
@@ -348,7 +353,9 @@ export type Envelope =
 // ---------------------------------------------------------------------------
 
 const WT_VARINT = 0;
+const WT_I64 = 1;
 const WT_LEN = 2;
+const WT_I32 = 5;
 
 const EMPTY_BYTES = new Uint8Array(0);
 
@@ -368,9 +375,9 @@ function checkInt32(value: number, field: string): void {
 }
 
 // v0 enums are closed: an unknown value is a protocol violation and closes the connection
-// (wire.proto header, decided 2026-09-20 when the Rust codec landed: prost rejects unknown
-// values, and both codecs follow the strictest common rule). New values ship only with a new
-// protocol version.
+// (wire.proto header, decided 2026-09-20). prost accepts any int32 in an enum field, so the Rust
+// codec checks the same sets itself, after decoding; the `invalid` vectors hold both codecs to
+// it. New values ship only with a new protocol version.
 const ROLE_VALUES: readonly number[] = [0, 1];
 const ANCHOR_VALUES: readonly number[] = [0, 1, 2, 3, 4, 5, 6, 7, 8];
 const BYE_REASON_VALUES: readonly number[] = [0, 0x100, 0x101, 0x102, 0x103, 0x104, 0x105];
@@ -483,6 +490,51 @@ class Reader {
     }
   }
 
+  /**
+   * Skips one field this decoder does not know, by its wire type and inside this message. The
+   * bytes are never looked into. A group (wire type 3 or 4) is refused, not skipped: v0 has
+   * none, and skipping one would mean walking into it.
+   */
+  skip(wireType: number, name: string): void {
+    switch (wireType) {
+      case WT_VARINT:
+        this.skipVarint(name);
+        return;
+      case WT_I64:
+        this.skipBytes(8, name);
+        return;
+      case WT_LEN:
+        this.skipBytes(this.u32(`${name} unknown field length`), name);
+        return;
+      case WT_I32:
+        this.skipBytes(4, name);
+        return;
+      default:
+        throw new ProtocolError(`${name} has a field of wire type ${wireType}, which v0 never skips`, name);
+    }
+  }
+
+  /** Skips one varint of up to 10 bytes; the tenth may only carry the top bit of 64. */
+  private skipVarint(name: string): void {
+    for (let count = 0; count < 10; count += 1) {
+      const b = this.byte(name);
+      if (count === 9 && b > 1) {
+        break;
+      }
+      if (b < 0x80) {
+        return;
+      }
+    }
+    throw new ProtocolError(`${name}: varint longer than 64 bits`, name);
+  }
+
+  private skipBytes(length: number, name: string): void {
+    if (length > this.end - this.pos) {
+      throw new ProtocolError(`${name} runs past the message`, name);
+    }
+    this.pos += length;
+  }
+
   /** Bounds-checks a length-delimited range and returns a sub-reader over it (a view, no copy). */
   span(length: number, name: string): Reader {
     if (length > this.end - this.pos) {
@@ -527,7 +579,46 @@ class Reader {
 
 function fieldKey(r: Reader, name: string): [field: number, wireType: number] {
   const key = r.u32(name);
-  return [key >>> 3, key & 7];
+  const field = key >>> 3;
+  const wireType = key & 7;
+  if (field === 0) {
+    throw new ProtocolError(`${name} names field 0, which protobuf never uses`, name);
+  }
+  if (wireType > WT_I32) {
+    throw new ProtocolError(`${name} has wire type ${wireType}, which protobuf does not define`, name);
+  }
+  return [field, wireType];
+}
+
+/**
+ * The singular fields one message has read so far. The known fields of every v0 message are
+ * numbered 1 to `known`; any of them not in `repeated` may appear at most once. protobuf would
+ * merge a second copy of a sub-message and keep the last scalar, and two decoders can differ on
+ * that, so both v0 codecs refuse the second copy instead (wire.proto, ENCODING).
+ */
+class SingularFields {
+  private readonly kind: string;
+  private readonly known: number;
+  private readonly repeated: readonly number[];
+  private seen = 0;
+
+  constructor(kind: string, known: number, repeated: readonly number[] = []) {
+    this.kind = kind;
+    this.known = known;
+    this.repeated = repeated;
+  }
+
+  /** Records `field`, and throws when a singular known field comes back. */
+  mark(field: number): void {
+    if (field > this.known || this.repeated.includes(field)) {
+      return;
+    }
+    const bit = 1 << field;
+    if ((this.seen & bit) !== 0) {
+      throw new ProtocolError(`${this.kind} field ${field} appears more than once`, this.kind);
+    }
+    this.seen |= bit;
+  }
 }
 
 function wantWireType(actual: number, expected: number, name: string): void {
@@ -559,12 +650,30 @@ function checkScale(scale: number | undefined, field: string): void {
 }
 
 function checkKeyCode(code: string): void {
-  // Key.code is a physical key name: ASCII (the .proto cites KeyboardEvent.code).
+  // Key.code is a physical key name: ASCII and never empty (the .proto cites
+  // KeyboardEvent.code). A key the browser cannot name is sent as "Unidentified".
+  if (code === '') {
+    throw new ProtocolError('Key.code is empty', 'Key.code');
+  }
   for (const char of code) {
     const point = char.codePointAt(0);
     if (point === undefined || point > 0x7f) {
       throw new ProtocolError('Key.code is not ASCII', 'Key.code');
     }
+  }
+}
+
+function checkConfigureSerial(serial: number): void {
+  // Serial 0 is never a host serial: it marks the server's ConfigureAck for a size change the
+  // host did not configure (docs/protocol/v0.md section 4.2).
+  if (serial === 0) {
+    throw new ProtocolError('Configure.serial is zero', 'Configure.serial');
+  }
+}
+
+function checkWheelSteps(steps: number, field: string): void {
+  if (Math.abs(steps) > MAX_POINTER_AXIS_STEPS) {
+    throw new ProtocolError(`${field} is over MAX_POINTER_AXIS_STEPS`, field);
   }
 }
 
@@ -841,6 +950,7 @@ function encodeResizeAsk(w: Writer, m: ResizeAsk): void {
 }
 
 function encodeConfigure(w: Writer, m: Configure): void {
+  checkConfigureSerial(m.serial);
   checkSurfaceSize(m.size, 'Configure.size');
   writeUint32(w, 1, m.surfaceId, 'Configure.surface_id');
   writeUint32(w, 2, m.serial, 'Configure.serial');
@@ -907,6 +1017,10 @@ function encodePointerButton(w: Writer, m: PointerButton): void {
 }
 
 function encodePointerAxis(w: Writer, m: PointerAxis): void {
+  checkInt32(m.stepsX, 'PointerAxis.steps_x');
+  checkInt32(m.stepsY, 'PointerAxis.steps_y');
+  checkWheelSteps(m.stepsX, 'PointerAxis.steps_x');
+  checkWheelSteps(m.stepsY, 'PointerAxis.steps_y');
   writeUint32(w, 1, m.surfaceId, 'PointerAxis.surface_id');
   writeSint32(w, 2, m.stepsX, 'PointerAxis.steps_x');
   writeSint32(w, 3, m.stepsY, 'PointerAxis.steps_y');
@@ -943,8 +1057,10 @@ function encodeCloseRequest(w: Writer, m: CloseRequest): void {
 
 function decodePoint(r: Reader): Point {
   const m: Point = { x: 0, y: 0 };
+  const seen = new SingularFields('Point', 2);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'Point field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, 'Point.x');
@@ -957,7 +1073,7 @@ function decodePoint(r: Reader): Point {
         break;
       }
       default:
-        throw new ProtocolError(`Point has unknown field ${field}`, 'Point');
+        r.skip(wireType, 'Point');
     }
   }
   return m;
@@ -965,8 +1081,10 @@ function decodePoint(r: Reader): Point {
 
 function decodeSize(r: Reader, field: string): Size {
   const m: Size = { width: 0, height: 0 };
+  const seen = new SingularFields(field, 2);
   while (!r.done()) {
     const [fieldNumber, wireType] = fieldKey(r, `${field} field key`);
+    seen.mark(fieldNumber);
     switch (fieldNumber) {
       case 1: {
         wantWireType(wireType, WT_VARINT, `${field}.width`);
@@ -979,7 +1097,7 @@ function decodeSize(r: Reader, field: string): Size {
         break;
       }
       default:
-        throw new ProtocolError(`${field} has unknown field ${fieldNumber}`, field);
+        r.skip(wireType, field);
     }
   }
   return m;
@@ -987,8 +1105,10 @@ function decodeSize(r: Reader, field: string): Size {
 
 function decodeRect(r: Reader): Rect {
   const m: Rect = { x: 0, y: 0, width: 0, height: 0 };
+  const seen = new SingularFields('Rect', 4);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'Rect field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, 'Rect.x');
@@ -1011,7 +1131,7 @@ function decodeRect(r: Reader): Rect {
         break;
       }
       default:
-        throw new ProtocolError(`Rect has unknown field ${field}`, 'Rect');
+        r.skip(wireType, 'Rect');
     }
   }
   return m;
@@ -1025,8 +1145,10 @@ function decodeSubMessage<T>(r: Reader, wireType: number, name: string, decode: 
 
 function decodePositioner(r: Reader): Positioner {
   const m: Positioner = { anchorRect: undefined, anchor: 0, gravity: 0, offset: undefined, size: undefined };
+  const seen = new SingularFields('Positioner', 5);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'Positioner field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         m.anchorRect = decodeSubMessage(r, wireType, 'Positioner.anchor_rect', decodeRect);
@@ -1055,7 +1177,7 @@ function decodePositioner(r: Reader): Positioner {
         break;
       }
       default:
-        throw new ProtocolError(`Positioner has unknown field ${field}`, 'Positioner');
+        r.skip(wireType, 'Positioner');
     }
   }
   checkSurfaceSize(m.size, 'Positioner.size');
@@ -1091,8 +1213,10 @@ function decodeHello(r: Reader): Hello {
     codecs: [],
     resumeSerial: undefined,
   };
+  const seen = new SingularFields('Hello', 5, [4]);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'Hello field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, 'Hello.protocol_version');
@@ -1121,7 +1245,7 @@ function decodeHello(r: Reader): Hello {
         break;
       }
       default:
-        throw new ProtocolError(`Hello has unknown field ${field}`, 'Hello');
+        r.skip(wireType, 'Hello');
     }
   }
   return m;
@@ -1137,8 +1261,10 @@ function decodeHelloReply(r: Reader): HelloReply {
     resumeSerial: undefined,
     resumeGraceMs: undefined,
   };
+  const seen = new SingularFields('HelloReply', 7, [4]);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'HelloReply field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, 'HelloReply.protocol_version');
@@ -1176,7 +1302,7 @@ function decodeHelloReply(r: Reader): HelloReply {
         break;
       }
       default:
-        throw new ProtocolError(`HelloReply has unknown field ${field}`, 'HelloReply');
+        r.skip(wireType, 'HelloReply');
     }
   }
   return m;
@@ -1184,8 +1310,10 @@ function decodeHelloReply(r: Reader): HelloReply {
 
 function decodeBye(r: Reader): Bye {
   const m: Bye = { reason: 0, text: '' };
+  const seen = new SingularFields('Bye', 2);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'Bye field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, 'Bye.reason');
@@ -1201,7 +1329,7 @@ function decodeBye(r: Reader): Bye {
         break;
       }
       default:
-        throw new ProtocolError(`Bye has unknown field ${field}`, 'Bye');
+        r.skip(wireType, 'Bye');
     }
   }
   return m;
@@ -1209,8 +1337,10 @@ function decodeBye(r: Reader): Bye {
 
 function decodeServerError(r: Reader): ServerError {
   const m: ServerError = { code: 0, text: '' };
+  const seen = new SingularFields('ServerError', 2);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'ServerError field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, 'ServerError.code');
@@ -1224,7 +1354,7 @@ function decodeServerError(r: Reader): ServerError {
         break;
       }
       default:
-        throw new ProtocolError(`ServerError has unknown field ${field}`, 'ServerError');
+        r.skip(wireType, 'ServerError');
     }
   }
   return m;
@@ -1241,8 +1371,10 @@ function decodeSurfaceNew(r: Reader): SurfaceNew {
     positioner: undefined,
     scale120ths: 0,
   };
+  const seen = new SingularFields('SurfaceNew', 8);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'SurfaceNew field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, 'SurfaceNew.surface_id');
@@ -1287,7 +1419,7 @@ function decodeSurfaceNew(r: Reader): SurfaceNew {
         break;
       }
       default:
-        throw new ProtocolError(`SurfaceNew has unknown field ${field}`, 'SurfaceNew');
+        r.skip(wireType, 'SurfaceNew');
     }
   }
   checkSurfaceSize(m.size, 'SurfaceNew.size');
@@ -1297,8 +1429,10 @@ function decodeSurfaceNew(r: Reader): SurfaceNew {
 
 function decodeSurfaceGone(r: Reader): SurfaceGone {
   const m: SurfaceGone = { surfaceId: 0, reason: 0 };
+  const seen = new SingularFields('SurfaceGone', 2);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'SurfaceGone field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, 'SurfaceGone.surface_id');
@@ -1313,7 +1447,7 @@ function decodeSurfaceGone(r: Reader): SurfaceGone {
         break;
       }
       default:
-        throw new ProtocolError(`SurfaceGone has unknown field ${field}`, 'SurfaceGone');
+        r.skip(wireType, 'SurfaceGone');
     }
   }
   return m;
@@ -1321,8 +1455,10 @@ function decodeSurfaceGone(r: Reader): SurfaceGone {
 
 function decodeFocusAsk(r: Reader): FocusAsk {
   const m: FocusAsk = { surfaceId: 0 };
+  const seen = new SingularFields('FocusAsk', 1);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'FocusAsk field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, 'FocusAsk.surface_id');
@@ -1330,7 +1466,7 @@ function decodeFocusAsk(r: Reader): FocusAsk {
         break;
       }
       default:
-        throw new ProtocolError(`FocusAsk has unknown field ${field}`, 'FocusAsk');
+        r.skip(wireType, 'FocusAsk');
     }
   }
   return m;
@@ -1338,8 +1474,10 @@ function decodeFocusAsk(r: Reader): FocusAsk {
 
 function decodeSurfaceMetadata(r: Reader): SurfaceMetadata {
   const m: SurfaceMetadata = { surfaceId: 0, title: undefined, appId: undefined, scale120ths: undefined };
+  const seen = new SingularFields('SurfaceMetadata', 4);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'SurfaceMetadata field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, 'SurfaceMetadata.surface_id');
@@ -1364,7 +1502,7 @@ function decodeSurfaceMetadata(r: Reader): SurfaceMetadata {
         break;
       }
       default:
-        throw new ProtocolError(`SurfaceMetadata has unknown field ${field}`, 'SurfaceMetadata');
+        r.skip(wireType, 'SurfaceMetadata');
     }
   }
   checkScale(m.scale120ths, 'SurfaceMetadata.scale_120ths');
@@ -1373,8 +1511,10 @@ function decodeSurfaceMetadata(r: Reader): SurfaceMetadata {
 
 function decodeResizeAsk(r: Reader): ResizeAsk {
   const m: ResizeAsk = { surfaceId: 0, size: undefined };
+  const seen = new SingularFields('ResizeAsk', 2);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'ResizeAsk field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, 'ResizeAsk.surface_id');
@@ -1386,7 +1526,7 @@ function decodeResizeAsk(r: Reader): ResizeAsk {
         break;
       }
       default:
-        throw new ProtocolError(`ResizeAsk has unknown field ${field}`, 'ResizeAsk');
+        r.skip(wireType, 'ResizeAsk');
     }
   }
   checkSurfaceSize(m.size, 'ResizeAsk.size');
@@ -1395,8 +1535,10 @@ function decodeResizeAsk(r: Reader): ResizeAsk {
 
 function decodeConfigure(r: Reader, kind: 'Configure' | 'ConfigureAck'): Configure {
   const m: Configure = { surfaceId: 0, serial: 0, size: undefined };
+  const seen = new SingularFields(kind, 3);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, `${kind} field key`);
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, `${kind}.surface_id`);
@@ -1413,8 +1555,11 @@ function decodeConfigure(r: Reader, kind: 'Configure' | 'ConfigureAck'): Configu
         break;
       }
       default:
-        throw new ProtocolError(`${kind} has unknown field ${field}`, kind);
+        r.skip(wireType, kind);
     }
+  }
+  if (kind === 'Configure') {
+    checkConfigureSerial(m.serial);
   }
   checkSurfaceSize(m.size, `${kind}.size`);
   return m;
@@ -1422,8 +1567,10 @@ function decodeConfigure(r: Reader, kind: 'Configure' | 'ConfigureAck'): Configu
 
 function decodeTileMessage(r: Reader): Tile {
   const m: Tile = { rect: undefined, codec: 0, data: EMPTY_BYTES };
+  const seen = new SingularFields('Tile', 3);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'Tile field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         m.rect = decodeSubMessage(r, wireType, 'Tile.rect', decodeRect);
@@ -1441,7 +1588,7 @@ function decodeTileMessage(r: Reader): Tile {
         break;
       }
       default:
-        throw new ProtocolError(`Tile has unknown field ${field}`, 'Tile');
+        r.skip(wireType, 'Tile');
     }
   }
   checkTile(m);
@@ -1450,8 +1597,10 @@ function decodeTileMessage(r: Reader): Tile {
 
 function decodeFrame(r: Reader): Frame {
   const m: Frame = { surfaceId: 0, sequence: 0, fullRedraw: false, tiles: [] };
+  const seen = new SingularFields('Frame', 4, [4]);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'Frame field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, 'Frame.surface_id');
@@ -1477,7 +1626,7 @@ function decodeFrame(r: Reader): Frame {
         break;
       }
       default:
-        throw new ProtocolError(`Frame has unknown field ${field}`, 'Frame');
+        r.skip(wireType, 'Frame');
     }
   }
   return m;
@@ -1485,8 +1634,10 @@ function decodeFrame(r: Reader): Frame {
 
 function decodeFrameAck(r: Reader): FrameAck {
   const m: FrameAck = { surfaceId: 0, sequence: 0 };
+  const seen = new SingularFields('FrameAck', 2);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'FrameAck field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, 'FrameAck.surface_id');
@@ -1499,7 +1650,7 @@ function decodeFrameAck(r: Reader): FrameAck {
         break;
       }
       default:
-        throw new ProtocolError(`FrameAck has unknown field ${field}`, 'FrameAck');
+        r.skip(wireType, 'FrameAck');
     }
   }
   return m;
@@ -1514,8 +1665,10 @@ function decodeCursorImage(r: Reader): CursorImage {
     hotspotY: 0,
     argbPremultiplied: EMPTY_BYTES,
   };
+  const seen = new SingularFields('CursorImage', 6);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'CursorImage field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, 'CursorImage.serial');
@@ -1553,7 +1706,7 @@ function decodeCursorImage(r: Reader): CursorImage {
         break;
       }
       default:
-        throw new ProtocolError(`CursorImage has unknown field ${field}`, 'CursorImage');
+        r.skip(wireType, 'CursorImage');
     }
   }
   checkCursorImage(m);
@@ -1562,8 +1715,10 @@ function decodeCursorImage(r: Reader): CursorImage {
 
 function decodePointerMove(r: Reader): PointerMove {
   const m: PointerMove = { surfaceId: 0, x: 0, y: 0 };
+  const seen = new SingularFields('PointerMove', 3);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'PointerMove field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, 'PointerMove.surface_id');
@@ -1581,7 +1736,7 @@ function decodePointerMove(r: Reader): PointerMove {
         break;
       }
       default:
-        throw new ProtocolError(`PointerMove has unknown field ${field}`, 'PointerMove');
+        r.skip(wireType, 'PointerMove');
     }
   }
   return m;
@@ -1589,8 +1744,10 @@ function decodePointerMove(r: Reader): PointerMove {
 
 function decodePointerButton(r: Reader): PointerButton {
   const m: PointerButton = { surfaceId: 0, button: 0, pressed: false };
+  const seen = new SingularFields('PointerButton', 3);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'PointerButton field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, 'PointerButton.surface_id');
@@ -1608,7 +1765,7 @@ function decodePointerButton(r: Reader): PointerButton {
         break;
       }
       default:
-        throw new ProtocolError(`PointerButton has unknown field ${field}`, 'PointerButton');
+        r.skip(wireType, 'PointerButton');
     }
   }
   return m;
@@ -1616,8 +1773,10 @@ function decodePointerButton(r: Reader): PointerButton {
 
 function decodePointerAxis(r: Reader): PointerAxis {
   const m: PointerAxis = { surfaceId: 0, stepsX: 0, stepsY: 0 };
+  const seen = new SingularFields('PointerAxis', 3);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'PointerAxis field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, 'PointerAxis.surface_id');
@@ -1635,16 +1794,20 @@ function decodePointerAxis(r: Reader): PointerAxis {
         break;
       }
       default:
-        throw new ProtocolError(`PointerAxis has unknown field ${field}`, 'PointerAxis');
+        r.skip(wireType, 'PointerAxis');
     }
   }
+  checkWheelSteps(m.stepsX, 'PointerAxis.steps_x');
+  checkWheelSteps(m.stepsY, 'PointerAxis.steps_y');
   return m;
 }
 
 function decodeKey(r: Reader): Key {
   const m: Key = { keysym: 0, code: '', pressed: false, modifiers: 0 };
+  const seen = new SingularFields('Key', 4);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'Key field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, 'Key.keysym');
@@ -1655,7 +1818,6 @@ function decodeKey(r: Reader): Key {
         wantWireType(wireType, WT_LEN, 'Key.code');
         const length = r.u32('Key.code length');
         m.code = r.takeString(length, MAX_KEY_CODE_BYTES, 'Key.code');
-        checkKeyCode(m.code);
         break;
       }
       case 3: {
@@ -1669,16 +1831,20 @@ function decodeKey(r: Reader): Key {
         break;
       }
       default:
-        throw new ProtocolError(`Key has unknown field ${field}`, 'Key');
+        r.skip(wireType, 'Key');
     }
   }
+  // After the loop, so an absent code is refused like an empty one.
+  checkKeyCode(m.code);
   return m;
 }
 
 function decodeSurfaceIdOnly(r: Reader, kind: string): number {
   let surfaceId = 0;
+  const seen = new SingularFields(kind, 1);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, `${kind} field key`);
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_VARINT, `${kind}.surface_id`);
@@ -1686,7 +1852,7 @@ function decodeSurfaceIdOnly(r: Reader, kind: string): number {
         break;
       }
       default:
-        throw new ProtocolError(`${kind} has unknown field ${field}`, kind);
+        r.skip(wireType, kind);
     }
   }
   return surfaceId;
@@ -1694,8 +1860,10 @@ function decodeSurfaceIdOnly(r: Reader, kind: string): number {
 
 function decodeClipboardSet(r: Reader): ClipboardSet {
   const m: ClipboardSet = { text: '' };
+  const seen = new SingularFields('ClipboardSet', 1);
   while (!r.done()) {
     const [field, wireType] = fieldKey(r, 'ClipboardSet field key');
+    seen.mark(field);
     switch (field) {
       case 1: {
         wantWireType(wireType, WT_LEN, 'ClipboardSet.text');
@@ -1704,16 +1872,17 @@ function decodeClipboardSet(r: Reader): ClipboardSet {
         break;
       }
       default:
-        throw new ProtocolError(`ClipboardSet has unknown field ${field}`, 'ClipboardSet');
+        r.skip(wireType, 'ClipboardSet');
     }
   }
   return m;
 }
 
+/** CursorGone, BlurRelease and ClipboardAsk know no field: whatever they carry is skipped. */
 function decodeEmpty(r: Reader, kind: string): void {
   while (!r.done()) {
-    const [field] = fieldKey(r, `${kind} field key`);
-    throw new ProtocolError(`${kind} has unknown field ${field}`, kind);
+    const [, wireType] = fieldKey(r, `${kind} field key`);
+    r.skip(wireType, kind);
   }
 }
 
@@ -1866,9 +2035,11 @@ function decodeBody(field: number, r: Reader): Envelope {
  * Decodes one Envelope from the bytes of a single WebSocket binary message.
  *
  * The input cap is checked first, then every per-field cap is checked before a copy is
- * allocated (docs/protocol/README.md rule 3). An envelope that names no known oneof field, a
- * field number no v0 message defines, or bytes that are not valid UTF-8 are all protocol
- * violations and throw ProtocolError; the caller closes the connection (BYE_PROTOCOL_VIOLATION).
+ * allocated (docs/protocol/README.md rule 3). An envelope that is not exactly one known body, a
+ * singular field that appears twice, a varint over 32 bits on a known field, a group, or bytes
+ * that are not valid UTF-8 are all protocol violations and throw ProtocolError; the caller
+ * closes the connection (BYE_PROTOCOL_VIOLATION). An unknown field inside a known message is
+ * skipped (docs/protocol/v0.md section 13).
  */
 export function decodeEnvelope(bytes: Uint8Array): Envelope {
   if (bytes.length > MAX_MESSAGE_BYTES) {

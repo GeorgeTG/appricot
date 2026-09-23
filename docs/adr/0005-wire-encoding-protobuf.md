@@ -49,14 +49,18 @@ checked 2026-09-20), one `.proto` file as the single source of truth:
 - **Unknown-message handling is the envelope oneof.** Every message rides in an `Envelope` whose
   oneof names exactly one body. An envelope naming no known field is a violation and the peer
   closes — rule 1's skip-or-close question is answered "close", trivially, because the oneof
-  makes the case unambiguous. There is no skip-by-length in v0.
+  makes the case unambiguous. There is no skip-by-length at the envelope level. Inside a known
+  message an unknown field is skipped by its wire type, so a new field stays additive
+  ([protocol/v0.md](../protocol/v0.md) §1 and §13).
 - **Unknown enum values are a violation, decided when the Rust codec landed.** Protobuf
   implementations disagree on unrecognized enum values — proto3 says they "will be preserved in
   the message" ([proto3 guide](https://protobuf.dev/programming-guides/proto3/), checked
-  2026-09-20), but prost rejects them on decode. Rather than let the Rust and TypeScript codecs
-  diverge silently, v0 takes the strictest common rule: an unknown enum value inside a known
-  message closes the connection, and both codecs enforce the closed sets in both directions.
-  New enum values ship only with a new protocol version.
+  2026-09-20), and prost stores an enum field as a plain `int32` that takes any value (prost
+  0.14.4, checked in its source on 2026-09-23). Rather than let the Rust and TypeScript codecs
+  diverge silently, v0 takes the strictest rule: an unknown enum value inside a known message
+  closes the connection, and both codecs enforce the closed sets in both directions. The Rust
+  codec checks them itself after prost decodes. New enum values ship only with a new protocol
+  version.
 
 Where the other ADRs shaped the fields: the text-only, capped-string rules of
 [ADR-0003](0003-untrusted-server-client.md) produced `string` fields that are untrusted text

@@ -13,6 +13,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .join("v0")
         .join("wire.proto");
     println!("cargo:rerun-if-changed={}", proto_file.display());
+    // prost-build reads these to find the compiler and its includes, and says nothing to Cargo
+    // about them: without these lines a new protoc under a cached target dir keeps the code
+    // the old one generated.
+    println!("cargo:rerun-if-env-changed=PROTOC");
+    println!("cargo:rerun-if-env-changed=PROTOC_INCLUDE");
     prost_build::Config::new().compile_protos(&[&proto_file], &[Path::new("proto")])?;
     Ok(())
 }

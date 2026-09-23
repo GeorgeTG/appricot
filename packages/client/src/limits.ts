@@ -79,6 +79,9 @@ export const MAX_CURSOR_HEIGHT = 128;
 /** Bytes of CursorImage.argb_premultiplied. */
 export const MAX_CURSOR_BYTES = 65_536;
 
+/** Discrete wheel steps in one PointerAxis, each way: |steps_x| and |steps_y|. */
+export const MAX_POINTER_AXIS_STEPS = 64;
+
 /** How long a session outlives its socket, in milliseconds. */
 export const RESUME_GRACE_MS = 10_000;
 

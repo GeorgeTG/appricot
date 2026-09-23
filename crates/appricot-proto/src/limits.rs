@@ -2,10 +2,12 @@
 //!
 //! The normative source is the header of `proto/appricot/v0/wire.proto`; those numbers win,
 //! and this module mirrors them so a decoder can check them without reading the `.proto`.
-//! The codec in [`crate::wire`] enforces every row on both encode and decode, before
-//! anything is allocated or looped over. Session-level rows ([`MAX_SURFACES`],
-//! [`MAX_POPUPS_PER_PARENT`], [`MAX_FRAME_CREDITS`]) bound living state, not one message,
-//! so the streamer checks them; they live here so the table has one home.
+//! The codec in [`crate::wire`] enforces every row one message can break on both encode and
+//! decode. On decode, every length and every repeated count is compared with its row on the
+//! raw bytes, before anything is allocated for it or looped over past its cap; the rows on
+//! decoded values (dimensions, wheel steps) are checked right after. Session-level rows
+//! ([`MAX_SURFACES`], [`MAX_POPUPS_PER_PARENT`], [`MAX_FRAME_CREDITS`]) bound living state, not
+//! one message, so the streamer checks them; they live here so the table has one home.
 //!
 //! Every string bound by this table is untrusted text: the client renders it as text only,
 //! never as markup (docs/adr/0003).
@@ -81,6 +83,11 @@ pub const MAX_CURSOR_HEIGHT: u32 = 128;
 
 /// Bytes of `CursorImage.argb_premultiplied`. 128 * 128 * 4 bytes.
 pub const MAX_CURSOR_BYTES: usize = 65_536;
+
+/// Wheel steps in one `PointerAxis`, either way: `|steps_x|` and `|steps_y|` are each at most
+/// this. A backend turns every step into input events, so an unbounded count would let one
+/// message stall the session.
+pub const MAX_POINTER_AXIS_STEPS: u32 = 64;
 
 /// How long a session outlives its socket, in milliseconds.
 pub const RESUME_GRACE_MS: u32 = 10_000;

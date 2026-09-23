@@ -13,16 +13,18 @@ import { ProtocolError, decodeEnvelope, encodeEnvelope } from './wire';
 
 /**
  * The bounded decoder fuzzer (docs/protocol/README.md rule 10, "Both decoders are fuzzed";
- * docs/protocol/v0.md section 12). The Rust twin is the 10,000-mutation loop in
- * crates/appricot-proto/src/wire.rs (`mutated_encodings_never_panic`); this is its TypeScript
- * mirror against `decodeEnvelope` and `decodeTile`, hand-rolled and deterministic:
+ * docs/protocol/v0.md section 12). The Rust twins are the 10,000-mutation loop in
+ * crates/appricot-proto/src/wire.rs (`mutated_encodings_never_panic`) and the structure-aware,
+ * seeded fuzzer in crates/appricot-proto/tests/fuzz.rs; this is their TypeScript mirror against
+ * `decodeEnvelope` and `decodeTile`, hand-rolled and deterministic:
  *
  *   - PRNG: xorshift32 with the fixed seed `FUZZ_SEED` below, no Math.random anywhere. Every
  *     draw is specified 32-bit integer arithmetic, so the run is identical on every machine and
  *     every repetition; the seed and both iteration counts are constants, not options.
- *   - Corpus: the 30 committed vectors, a handful of hand-built valid envelopes (popup with
- *     negative coordinates, Greek title, AltGr key, full tiles in both codecs, a tile at every
- *     cap), and the hostile factories of src/hostile/cases.ts used as data.
+ *   - Corpus: every committed vector, lenient entry and invalid entry of vectors.json, a
+ *     handful of hand-built valid envelopes (popup with negative coordinates, Greek title, AltGr
+ *     key, full tiles in both codecs, a tile at every cap), and the hostile factories of
+ *     src/hostile/cases.ts used as data.
  *   - Mutations: bit flips, byte splices between corpus members, truncation (a systematic sweep
  *     at every boundary plus random cuts), value-preserving varint extension, 2-byte
  *     length-field inflation, and duplicated chunks appended.
@@ -198,6 +200,10 @@ interface VectorFile {
   format: number;
   protocol_version: number;
   vectors: VectorEntry[];
+  /** Bytes no encoder writes that both decoders accept (format 2). */
+  lenient?: VectorEntry[];
+  /** Bytes both decoders refuse (format 2). */
+  invalid?: VectorEntry[];
 }
 
 function loadVectors(): VectorFile {
@@ -332,6 +338,12 @@ function buildCorpus(vectorFile: VectorFile): CorpusMember[] {
     name: `vector: ${vector.name}`,
     bytes: hexToBytes(vector.hex),
   }));
+  for (const entry of vectorFile.lenient ?? []) {
+    corpus.push({ name: `lenient: ${entry.name}`, bytes: hexToBytes(entry.hex) });
+  }
+  for (const entry of vectorFile.invalid ?? []) {
+    corpus.push({ name: `invalid: ${entry.name}`, bytes: hexToBytes(entry.hex) });
+  }
   corpus.push(...handBuiltCorpus());
   corpus.push(...hostileCorpus());
   return corpus;
@@ -351,8 +363,9 @@ interface Buckets {
 
 /**
  * A cap rejection names a limit from the limits table (or an "N-byte cap" in the message text);
- * every other refusal - unknown fields, wrong wire types, truncation, spans running past the
- * message, invalid UTF-8, closed enums, zero scale, more than one body - is a grammar rejection.
+ * every other refusal - a singular field twice, wrong wire types, truncation, spans running past
+ * the message, invalid UTF-8, closed enums, zero scale, more than one body - is a grammar
+ * rejection. An unknown field is not a refusal: it is skipped.
  */
 const CAP_RE = /over MAX_|over the \d+-byte cap|more than MAX_/;
 

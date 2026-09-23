@@ -4,8 +4,11 @@
 //!
 //! - The types of every v0 message, and their encoding and decoding (see [`wire`]).
 //! - The limits table: a cap for every length and count on the wire (see [`limits`]).
-//! - Bounded decoding. A length read from the wire is checked against its cap before anything
-//!   is allocated or sliced, so a hostile peer cannot make the decoder read or reserve more.
+//! - Bounded decoding. [`wire::decode_envelope`] refuses input over the message cap before it
+//!   parses a byte, then walks the raw bytes once without allocating and compares every length
+//!   and every repeated count with its cap before prost builds anything. A hostile peer can
+//!   therefore not make the decoder reserve more than the limits table allows for one message.
+//!   (`BoundedString`'s own decoders are a string helper; the wire path does not use them.)
 //!
 //! # Not its responsibility
 //!
@@ -20,6 +23,7 @@
 
 mod bounded;
 pub mod limits;
+mod prescan;
 pub mod wire;
 
 pub use bounded::{BoundError, BoundedString};

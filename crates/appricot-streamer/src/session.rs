@@ -774,10 +774,12 @@ async fn internal_fault(sink: &mut WsSink) -> Flow {
 /// `ServerError` code and the `Bye` reason.
 fn refusal_for(e: &DecodeError) -> Option<(u32, ByeReason)> {
     match e {
-        // An envelope whose oneof names no body this server knows (the codec refuses it as
-        // field "body"): a protocol violation that closes without a reply (v0.md §1).
-        DecodeError::LimitViolation { field: "body" } => None,
-        DecodeError::Decode(_) => Some((ERR_DECODE, ByeReason::ByeProtocolViolation)),
+        // An envelope whose oneof names no body this server knows: a protocol violation that
+        // closes without a reply (v0.md §1).
+        DecodeError::UnknownMessage => None,
+        DecodeError::Decode(_) | DecodeError::ProtocolViolation { .. } => {
+            Some((ERR_DECODE, ByeReason::ByeProtocolViolation))
+        }
         _ => Some((ERR_LIMIT, ByeReason::ByeLimitViolation)),
     }
 }

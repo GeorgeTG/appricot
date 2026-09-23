@@ -277,22 +277,27 @@ describe('M2 clipboard row (a): the ask surfaces as data, never as markup', () =
     expect(document.body.children).toHaveLength(0); // the registry touched no DOM at all
   });
 
-  it('a hostile server cannot smuggle a string onto the ask: an unknown field is refused', () => {
+  it('a hostile server cannot smuggle a string onto the ask: an unknown field is dropped unread', () => {
     // Envelope.clipboard_ask is field 23; a real ClipboardAsk has no fields, so any field is
-    // hostile - here field 1 carrying markup, hand-encoded because encodeEnvelope refuses it.
+    // one this client does not know - here field 1 carrying markup, hand-encoded because
+    // encodeEnvelope cannot write it. v0 skips an unknown field by its length without reading
+    // it (docs/protocol/v0.md section 13; the `clipboard-ask-unknown-field` lenient vector), so
+    // the ask decodes empty and the markup never becomes a value the host could render.
     const hostile = bytesField(
       23,
       bytesField(1, new TextEncoder().encode(firstMarkup())),
     );
+    const registry = new SurfaceRegistry();
+    const asks = vi.fn();
+    registry.events.on('clipboard-ask', asks);
 
-    let caught: unknown;
-    try {
-      decodeEnvelope(hostile);
-    } catch (error) {
-      caught = error;
-    }
-    expect(caught).toBeInstanceOf(ProtocolError);
-    expect((caught as ProtocolError).field).toBe('ClipboardAsk');
+    const envelope = decodeEnvelope(hostile);
+    expect(envelope).toEqual({ kind: 'clipboardAsk', clipboardAsk: {} });
+    registry.apply(envelope);
+
+    expect(asks).toHaveBeenCalledTimes(1);
+    expect(asks).toHaveBeenCalledWith(undefined);
+    expect(document.body.children).toHaveLength(0);
     expect(canary()).toBeUndefined();
   });
 

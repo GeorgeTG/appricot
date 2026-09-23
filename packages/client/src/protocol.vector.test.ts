@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import type { Envelope, Positioner } from './wire';
-import { decodeEnvelope, encodeEnvelope } from './wire';
+import { ProtocolError, decodeEnvelope, encodeEnvelope } from './wire';
 import { CODEC } from './limits';
 import { decodeTile } from './tile';
 
@@ -37,9 +37,11 @@ class ImageDataStub {
 /**
  * The shared test vectors: the Rust codec (crates/appricot-proto) writes
  * testdata/vectors.json and this file proves the TypeScript mirror decodes every vector and
- * re-encodes it byte-for-byte identically (docs/protocol/README.md rule 10). The format is
- * pinned: { format: 1, protocol_version: 0, vectors: [{ name, note, hex }] } where each hex
- * string is one full Envelope-encoded message.
+ * re-encodes it byte-for-byte identically (docs/protocol/README.md rule 10), accepts every
+ * lenient entry as the canonical message it names, and refuses every invalid entry. The format
+ * is pinned: { format: 2, protocol_version: 0, vectors: [{ name, note, hex }], lenient: [{ name,
+ * note, hex, canonical }], invalid: [{ name, note, hex, error, field }] } where each hex string
+ * is one full Envelope-encoded message (docs/protocol/v0.md section 12).
  */
 
 interface VectorEntry {
@@ -48,10 +50,23 @@ interface VectorEntry {
   hex: string;
 }
 
+/** Bytes no encoder writes that both decoders accept, as the message `canonical` encodes. */
+interface LenientEntry extends VectorEntry {
+  canonical: string;
+}
+
+/** Bytes both decoders refuse; `error` and `field` are what the Rust decoder answers. */
+interface InvalidEntry extends VectorEntry {
+  error: 'LimitViolation' | 'ProtocolViolation' | 'UnknownMessage';
+  field: string;
+}
+
 interface VectorFile {
   format: number;
   protocol_version: number;
   vectors: VectorEntry[];
+  lenient: LenientEntry[];
+  invalid: InvalidEntry[];
 }
 
 const vectorsUrl = new URL('../../../crates/appricot-proto/testdata/vectors.json', import.meta.url);
@@ -65,7 +80,9 @@ function loadVectors(): VectorFile {
     typeof parsed.format !== 'number' ||
     typeof parsed.protocol_version !== 'number' ||
     !Array.isArray(parsed.vectors) ||
-    parsed.vectors.length === 0
+    parsed.vectors.length === 0 ||
+    !Array.isArray(parsed.lenient) ||
+    !Array.isArray(parsed.invalid)
   ) {
     throw new Error('vectors.json has an unexpected shape');
   }
@@ -76,7 +93,8 @@ const file = loadVectors();
 
 function hexToBytes(hex: string): Uint8Array {
   const clean = hex.trim();
-  if (clean.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(clean)) {
+  // Empty is allowed: the `empty-envelope` invalid entry is zero bytes.
+  if (clean.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(clean)) {
     throw new Error(`vector hex is malformed: ${clean.slice(0, 40)}`);
   }
   const out = new Uint8Array(clean.length / 2);
@@ -145,8 +163,8 @@ function hasNegativeCoordinate(positioner: Positioner): boolean {
 }
 
 describe('the shared vector file', () => {
-  it('declares format 1 and protocol version 0', () => {
-    expect(file.format).toBe(1);
+  it('declares format 2 and protocol version 0', () => {
+    expect(file.format).toBe(2);
     expect(file.protocol_version).toBe(0);
   });
 
@@ -161,6 +179,29 @@ describe('every vector round-trips byte-identically', () => {
     const decoded = decodeEnvelope(bytes);
     const reencoded = bytesToHex(encodeEnvelope(decoded));
     expect(reencoded).toBe(hex.trim().toLowerCase());
+  });
+});
+
+describe('every lenient entry decodes to its canonical message', () => {
+  it.each(file.lenient)('$name', ({ hex, canonical }) => {
+    expect(hex).not.toBe(canonical);
+    const decoded = decodeEnvelope(hexToBytes(hex));
+    expect(decoded).toEqual(decodeEnvelope(hexToBytes(canonical)));
+    expect(bytesToHex(encodeEnvelope(decoded))).toBe(canonical);
+  });
+});
+
+describe('every invalid entry is refused', () => {
+  it('covers the caps, the value rules, the enums, the grammar and unknown bodies', () => {
+    const errors = new Set(file.invalid.map((entry) => entry.error));
+    expect([...errors].sort()).toEqual(['LimitViolation', 'ProtocolViolation', 'UnknownMessage']);
+    for (const entry of file.invalid) {
+      expect(entry.field === '', entry.name).toBe(entry.error === 'UnknownMessage');
+    }
+  });
+
+  it.each(file.invalid)('$name ($error $field)', ({ hex }) => {
+    expect(() => decodeEnvelope(hexToBytes(hex))).toThrow(ProtocolError);
   });
 });
 

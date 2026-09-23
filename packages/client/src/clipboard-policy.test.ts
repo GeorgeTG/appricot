@@ -11,13 +11,18 @@
  *                  fields), and hostile strings in the same stream stay text.
  *   (b) POLICY   - a host that ignores the ask sends nothing and touches no system
  *                  clipboard; the SDK never answers on its own.
- *   (c) GESTURE  - a ClipboardSet leaves only from the host's own explicit action; the SDK
- *                  has no paste path and never touches navigator.clipboard (proved
- *                  behaviourally and by scanning the shipped sources).
+ *   (c) GESTURE  - a ClipboardSet leaves only from a user gesture the host allowed. The
+ *                  SDK's one paste path is keyboard paste in `attachInput`: opt-in through
+ *                  its `paste` policy, it reads text only from the browser's `paste` event
+ *                  (paste.ts), and attachInput never cancels the paste chord's keydown, so
+ *                  that event can fire. Nothing touches navigator.clipboard (proved
+ *                  behaviourally and by scanning the shipped sources). paste.test.ts proves
+ *                  the keyboard path itself.
  *   (d) CAP      - a 64 KiB + 1 paste is refused client-side before any bytes reach a
- *                  transport. The refusal's current shape is a ProtocolError thrown by the
- *                  codec inside `AppricotConnection.send` — see the TODO at (d): the SDK
- *                  ships no paste helper with a quiet cap of its own.
+ *                  transport. Through the raw `send` the refusal is a ProtocolError thrown by
+ *                  the codec. Through `AppricotConnection.sendClipboardText`, the capped paste
+ *                  helper a host calls from its own gesture, and through the keyboard paste
+ *                  path, it is quiet: nothing is sent and nothing throws.
  *
  * The DOM is asserted structurally (querySelectorAll, text nodes), never through an HTML
  * sink, as in hostile/hostile.test.ts.
@@ -169,8 +174,8 @@ function armPoisonClipboard(): void {
 
 /**
  * The host's own paste action, written the way a host page writes it: an explicit user
- * gesture (a menu item, Ctrl+V handled by the host chrome) calls it with text the host
- * already holds. The SDK itself has no such function; clause (c) is exactly that fact.
+ * gesture (a menu item in the host chrome) calls it with text the host already holds. It
+ * uses the raw `send`, the loud path; `sendClipboardText` is the quiet one.
  */
 function hostPaste(conn: AppricotConnection, text: string): void {
   conn.send({ kind: 'clipboardSet', clipboardSet: { text } });
@@ -399,12 +404,18 @@ describe('M2 clipboard row (c): a paste is sent only from the host own action', 
     walk(srcDir);
     expect(files.length).toBeGreaterThan(10); // the scan saw the package, not nothing
 
-    const forbidden = /navigator\s*\.\s*clipboard|clipboardData|execCommand\s*\(/;
+    const forbidden = /navigator\s*\.\s*clipboard|execCommand\s*\(/;
+    // A paste event's clipboardData is the one sanctioned read (ADR-0003 §7), and only the
+    // keyboard paste module may make it.
+    const pasteEventRead = /clipboardData/;
+    const pasteModule = join(srcDir, 'paste.ts');
+    expect(files).toContain(pasteModule);
     for (const file of files) {
-      expect(
-        forbidden.test(readFileSync(file, 'utf8')),
-        `${file} touches the system clipboard`,
-      ).toBe(false);
+      const source = readFileSync(file, 'utf8');
+      expect(forbidden.test(source), `${file} touches the system clipboard`).toBe(false);
+      if (file !== pasteModule) {
+        expect(pasteEventRead.test(source), `${file} reads a paste event`).toBe(false);
+      }
     }
   });
 });

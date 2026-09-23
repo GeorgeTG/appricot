@@ -170,11 +170,19 @@ never a timer; input flows the other way.*
 
 ### 3.2 Input: host canvas to app
 
-1. The host attaches a canvas; the client listens for pointer, wheel, key, composition, paste and
-   blur events on it (or on a focus proxy it owns inside it).
-2. Pointer coordinates become **surface-local**. Keys become a keysym plus the physical `code`:
-   keysym first, with the code used for keys that carry no character and for shortcuts.
-3. The client sends input only for the surface the host says is focused.
+1. The host attaches a canvas; the client listens for pointer, wheel, key, paste and focus
+   events on it. The browser sends key events only to the focused element, so the client makes
+   the canvas focusable (`tabIndex` 0, unless the host set its own) and focuses it, without
+   scrolling, when the user presses a pointer button on it. There is no separate focus proxy.
+2. Pointer coordinates become **surface-local**: scaled from the canvas's CSS box to the logical
+   surface size the host passes, and clamped inside the surface. The wheel's deltas are summed
+   in CSS pixels, whatever their mode, and sent as whole steps, one per 100 px, at most 64 a
+   message. Keys become a keysym plus the physical `code`: keysym first, with the code used for
+   keys that carry no character and for shortcuts. A key's release reuses the keysym its press
+   sent ([v0 §8](protocol/v0.md#8-keyboard-mapping-client-side)).
+3. The client sends input only for the surface the host says is focused. Keyboard paste is the
+   one path from the user's clipboard: opt-in through a host paste policy, the text comes only
+   from the browser's `paste` event and goes out before the paste chord reaches the app.
 4. The streamer maps it to X. Two facts measured in the benchmark shape this: XTEST keys reach a
    covered window only after the streamer sets X focus on it, and an XTEST click lands on
    whichever window is on top at that point. So the streamer, as window manager, sets focus and
@@ -182,7 +190,9 @@ never a timer; input flows the other way.*
    overlap as little as the root allows ([§4.2](#42-how-x11-maps-into-the-model)), but on the
    configured root they do overlap from the second realistic window on, so clicks reach the right
    window because of the raise, not because of the layout.
-5. On blur, the client releases every held key and button.
+5. When the browser window loses focus, the client sends one `BlurRelease` per connection and
+   the streamer releases every held key and button. When focus only moves inside the page and
+   leaves a canvas, the client releases the keys it pressed there, one by one.
 
 ### 3.3 Window lifecycle
 

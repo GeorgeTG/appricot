@@ -78,13 +78,13 @@
 //           a 3-channel tile decodes to opaque pixels.
 //
 // KEYBOARD (rule: keysym first, physical code alongside)
-//   Key.keysym is a keysym number under THIS protocol's convention: a printable character
-//   is sent as its Unicode codepoint (which equals the X11 keysym for the Latin-1 range);
-//   non-printing keys use their X11 keysym numbers (Enter 0xff0d, arrows 0xff50.., F-keys
-//   0xffbe.., modifiers 0xffe1..). APPricot, not X11, defines this mapping, and the
-//   streamer resolves a codepoint to the display server's own keysym when they differ
-//   (the Greek block 0x0370-0x03ff is X11 keysyms 0x07xx there). docs/protocol/v0.md §8
-//   is the normative table. Key.code is the browser's physical key name
+//   Key.keysym is an X11 keysym number: a printable Latin-1 character (U+0020-U+007E,
+//   U+00A0-U+00FF) is sent as its codepoint, which is its X11 keysym; every other character,
+//   Greek included, is sent as X11's Unicode keysym, codepoint + 0x01000000 (a bare
+//   codepoint there would collide with X11's legacy keysyms); non-printing keys use their
+//   X11 keysym numbers (Enter 0xff0d, arrows 0xff50.., F-keys 0xffbe.., modifiers
+//   0xffe1..). The streamer resolves a keysym against the display server's keymap.
+//   docs/protocol/v0.md §8 is the normative table. Key.code is the browser's physical key name
 //   (KeyboardEvent.code, https://www.w3.org/TR/uievents-code), ASCII, non-empty.
 //   Key.modifiers is a bitmask: 1 shift, 2 lock (caps), 4 control, 8 alt, 16 meta, 32 altgr.
 //

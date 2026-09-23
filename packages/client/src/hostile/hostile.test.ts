@@ -566,7 +566,9 @@ describe('M2 hostile row (d): focus requests cannot take focus', () => {
     // The host's own click handler is what says the surface is focused (the demo pattern).
     sent.push({ kind: 'focusNotify', focusNotify: { surfaceId: 7 } });
     expect(sent.map((e) => e.kind)).toEqual(['pointerButton', 'focusNotify']);
-    expect(document.activeElement).toBe(document.body);
+    // DOM focus followed the user's own click, so the keys typed next reach the surface
+    // (v0 §8). That is the user's gesture, not the server's: no FocusNotify came from the SDK.
+    expect(document.activeElement).toBe(element);
   });
 
   it('a cursor with a misleading hotspot is pixels, not focus', () => {

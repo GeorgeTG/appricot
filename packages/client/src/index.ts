@@ -29,5 +29,7 @@ export type { AttachedSurface, SurfaceRendererDeps } from './render';
 
 export { attachInput, keysymFor, modifiersFor } from './input';
 export type { DetachInput, InputDeps } from './input';
+export { isPasteChord } from './paste';
+export type { ChordKey, PastePolicy } from './paste';
 
 export { cursorToImageData, drawCursor } from './cursor';

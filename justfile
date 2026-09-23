@@ -217,3 +217,35 @@ demo:
     wait -n "${streamer}" "${server}" || status=$?
     echo "demo: a process exited (status ${status}); stopping the other" >&2
     exit "${status}"
+
+# --- the M1 capture spike (manual; docs/spike/README.md) -------------------------------------
+# These run in the spike container, the dev image plus the pilot application's libraries, with
+# the pilot mounted at /pilot from the gitignored .env:
+#
+#   docker compose --profile spike build spike
+#   docker compose --profile spike run --rm spike just spike-selftest
+#   docker compose --profile spike run --rm spike just spike --script scripts/spike/scenarios/startup.spike
+#
+# Nothing here is part of `check`: a run needs the spike image, and its results are
+# measurements, not a pass or a fail.
+# One spike run: observer, streamer, sampler, host, application (`just spike --help`).
+[positional-arguments]
+spike *args:
+    bash scripts/spike/run.sh "$@"
+
+# Prove the harness end to end on xclock, and check that the report holds what a run must.
+spike-selftest:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bash scripts/spike/run.sh --label selftest --for 60 \
+        --script scripts/spike/scenarios/selftest.spike -- xclock -update 1
+    run="$(cat artifacts/spike/CURRENT)"
+    fail() { echo "spike-selftest: $* (in ${run})" >&2; exit 1; }
+    grep -q 'xclock\.XClock' "${run}/inventory.md" || fail "the inventory has no xclock window"
+    grep -q '"ev":"surface_new"' "${run}/wire.jsonl" || fail "no surface reached the recorder"
+    grep -q '^| idle | [1-9]' "${run}/wire.md" || fail "no frame while the clock ticked"
+    ls "${run}"/snapshots/idle-s*.png >/dev/null 2>&1 || fail "no idle snapshot"
+    ls "${run}"/snapshots/final-s*.png >/dev/null 2>&1 || fail "no final snapshot"
+    grep -q '^| [^|]* | streamer |' "${run}/mem.md" || fail "the sampler did not see the streamer"
+    grep -q '^| all |' "${run}/bench.md" || fail "the bench has no total row"
+    echo "spike-selftest: ok (${run}/report.md)"

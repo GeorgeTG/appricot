@@ -86,6 +86,31 @@ services:
       - node_modules_demo:/work/packages/demo/node_modules
     # No ports. See the port scheme above.
 
+  # The M1 capture spike (docs/spike/README.md). The dev service, plus the pilot application's
+  # run-time libraries, plus the pilot itself mounted read-only at /pilot. Only with the profile:
+  #
+  #   docker compose --profile spike build spike
+  #   docker compose --profile spike run --rm spike just spike-selftest
+  #
+  # Where the pilot lives is machine-local and never committed: APPRICOT_PILOT_DIR (the
+  # directory) and APPRICOT_PILOT_CMD (the executable inside /pilot) come from the gitignored
+  # .env. Without them /pilot is an empty placeholder and the harness runs any other program.
+  # No ports, as for dev; the demo mode publishes the demo page's one port on the command line
+  # (docs/spike/README.md).
+  spike:
+    extends: dev
+    profiles: [spike]
+    build:
+      context: docker/spike
+      # `FROM dev` in docker/spike/Dockerfile is the dev service's image, built first.
+      additional_contexts:
+        dev: service:dev
+    image: appricot-spike:local
+    environment:
+      APPRICOT_PILOT_CMD: ${APPRICOT_PILOT_CMD:-}
+    volumes:
+      - ${APPRICOT_PILOT_DIR:-./docker/spike/no-pilot}:/pilot:ro
+
 volumes:
   cargo_home:
   target:

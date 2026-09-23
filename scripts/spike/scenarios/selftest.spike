@@ -1,0 +1,17 @@
+# The harness proving itself on xclock (x11-apps, in the dev and spike images):
+#
+#   just spike --label selftest --script scripts/spike/scenarios/selftest.spike -- xclock -update 1
+#
+# A window arrives, repaints once a second (damage, frames, tiles), takes focus and keys, and is
+# snapped. `just spike-selftest` runs this and checks the report.
+wait-for toplevel 1 15000
+mark idle
+wait 3000
+snap idle
+focus 1
+mark typing
+type ab
+key Return
+wait 500
+snap typed
+stop

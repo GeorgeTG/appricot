@@ -1,0 +1,11 @@
+# The application's start-up, untouched: the inventory of every window it maps before anyone
+# acts, its damage while idle, and its memory at rest. Snapshots after start-up and after a
+# minute of idling.
+wait-for toplevel 1 60000
+mark startup
+wait 5000
+snap startup
+mark idle
+wait 60000
+snap idle
+stop

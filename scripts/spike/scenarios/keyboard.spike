@@ -1,0 +1,72 @@
+# The keyboard check (docs/roadmap.md, M1): text typed through the streamer's XTEST input, the
+# way a browser client sends it (docs/protocol/v0.md §8), into the application's focused text
+# field. Each group is marked and snapped, so the snapshot shows what arrived. Run it once per
+# keyboard layout on the X server:
+#
+#   just spike --label kbd-us   --xkb us    --script scripts/spike/scenarios/keyboard.spike
+#   just spike --label kbd-gr   --xkb gr    --script scripts/spike/scenarios/keyboard.spike
+#   just spike --label kbd-usgr --xkb us,gr --script scripts/spike/scenarios/keyboard.spike
+#
+# A character the X keymap cannot produce is refused by the streamer with a named error
+# (KeysymUnavailable in streamer.log), never typed as another key. The field keeps what did
+# arrive; BackSpace clears it between groups.
+wait-for toplevel 1 60000
+wait 3000
+focus 1
+wait 500
+
+mark latin
+type abc ABC 123
+wait 500
+snap latin
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+
+mark greek
+type αβγ ΑΒΓ ωσς
+wait 500
+snap greek
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+
+# A browser sends a dead-key accent as the composed character: `;` then `α` on a Greek
+# keyboard arrives as `ά`.
+mark tonos
+type άέήίόύώ ϊΐ
+wait 500
+snap tonos
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+key BackSpace
+
+# AltGr text: the browser reports the character; Control and Alt are lifted around it.
+mark altgr
+type €@
+wait 500
+snap altgr
+stop

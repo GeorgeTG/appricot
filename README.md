@@ -47,10 +47,10 @@ whose own windows carry the content. What is built and gated today, on the L1 st
   client may have missed.
 - **An embeddable browser client.** `@appricot/client` is framework-agnostic TypeScript —
   connection, the codec mirror, a window registry with events, tile decode, input and key mapping,
-  text clipboard in both directions as the host's policy allows — drawing into canvases the host
-  provides. `@appricot/react` adds a provider, hooks and a window canvas. The client never turns a
-  server string into markup: that rule is enforced by lint rules that fail the build and proven in
-  CI against a hostile test server.
+  text paste from the host into the app as the host's policy allows — drawing into canvases the
+  host provides. `@appricot/react` adds a provider, hooks and a window canvas. The client never
+  turns a server string into markup: that rule is enforced by lint rules that fail the build and
+  proven in CI against a hostile test server.
 - **A demo host page.** Floating windows with drag, resize, minimise, close and focus; popups
   placed and clamped to their parent; the streamed cursor — served under a strict CSP with no
   `'unsafe-inline'` and no `'unsafe-eval'` in `script-src`.
@@ -71,7 +71,8 @@ docker compose run --rm dev just check      # THE gate: everything, in order
 docker compose run --rm -p "127.0.0.1:${APPRICOT_DEMO_HOST_PORT:-8390}:8390" dev just demo
 ```
 
-`just check` runs `fmt-check clippy test doc deny` for the Rust workspace, then
+`just check` runs `names-check` (no private name, no absolute path into another checkout), then
+`fmt-check clippy test doc deny` for the Rust workspace, then
 `web-install web-build web-typecheck web-lint web-test` for the TypeScript packages — inside the
 container. `just deny` clones the RustSec advisory database, so the gate needs network access.
 
@@ -177,8 +178,9 @@ LICENSE-APACHE     the Apache-2.0 licence
 `docker compose run --rm dev just check`. The M2 rows that CI proves: token auth and a readiness
 endpoint on the streamer; ack-based flow control with idle windows sending nothing; resume after a
 dropped transport; popups placed and clamped to their parent; titles as text; cursor, resize,
-minimise, close and focus; the clipboard in both directions as the host's policy allows; the demo
-page under a strict CSP; the hostile-server fixture; decoder fuzz tests on both sides of the wire.
+minimise, close and focus; text paste from the host into the app, and the app's paste request, as
+the host's policy allows; the demo page under a strict CSP; the hostile-server fixture; decoder
+fuzz tests on both sides of the wire.
 
 **Still open.**
 
@@ -188,6 +190,8 @@ page under a strict CSP; the hostile-server fixture; decoder fuzz tests on both 
   [ADR-0004](docs/adr/0004-layers-window-model-and-first-backend.md)).
 - The on-device browser matrix: input on desktop Chrome, Firefox and Safari, with US and Greek
   layouts, AltGr and dead keys.
+- Copy from the app to the host: v0 has no message that carries the app's selection to the
+  browser, so the clipboard works in one direction only. IME composition input is open too.
 - L2 and L3 are written down
   ([architecture](docs/architecture.md), [roadmap](docs/roadmap.md)) and deliberately not
   scaffolded: write them down first.

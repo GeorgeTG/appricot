@@ -48,7 +48,7 @@ All three live in [diagrams/](diagrams/) and are embedded where they belong in
 |---|---|
 | [diagrams/shape.svg](diagrams/shape.svg) | The shape in one picture: host app backend, browser host page, node (edge router and proxy, planned) and the sandboxed app container — Xvfb, the streamed application and `appricot-streamer` behind a loopback or unix socket with a per-session stream token. |
 | [diagrams/data-path.svg](diagrams/data-path.svg) | The data path: app draws, Composite off-screen pixmap, DamageNotify, per-surface damage, the credit check, capture, 256-grid tiles in RAW or in-house QOI, the Frame on the wire, bounded decode into the host canvas, and the FrameAck after the draw; input flows the other way. |
-| [diagrams/code-map.svg](diagrams/code-map.svg) | The code map: the five Rust crates and four TypeScript packages, what each owns, and the one-way dependency edges between them. |
+| [diagrams/code-map.svg](diagrams/code-map.svg) | The code map: the five Rust crates and three TypeScript packages, what each owns, and the one-way dependency edges between them. |
 
 ## Rules these pages follow
 

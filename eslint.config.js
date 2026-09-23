@@ -7,9 +7,10 @@ import tseslint from 'typescript-eslint';
  *
  * Its main job is the untrusted-server rule (docs/adr/0003-untrusted-server-client.md): the
  * server is hostile, so the client never turns a server string into markup, script, a URL or
- * a navigation. The rules below forbid the sinks by name, in every package, and
- * packages/client/src/untrusted-server.lint.test.ts proves that each one fires. Weakening a
- * rule here turns that test red.
+ * a navigation. The rules below forbid the sinks by name, in every package.
+ * packages/client/src/untrusted-server.lint.test.ts pins every entry of `untrustedServerRules`
+ * and lints each entry alone against probes, one per name a selector's pattern lists. Dropping
+ * or narrowing an entry here turns that test red; a new entry needs its probes there.
  *
  * Type-aware linting is not on: `pnpm typecheck` already runs the compiler, and these rules
  * are syntactic on purpose, so they also hold in files the compiler never sees.
@@ -22,11 +23,23 @@ const NAVIGATION =
   'The client never navigates (ADR-0003 §2). The protocol has no message that carries a URL.';
 const SCRIPT = 'No code from strings (ADR-0003 §2): the page must run without unsafe-eval.';
 
+// The attribute and property names that take a URL, a handler or a style.
+const URL_ATTRIBUTE = '/^(on.*|href|src|srcdoc|action|formaction|style|xlink:href)$/i';
+const URL_PROPERTY = '/^(href|src|srcset|action|formAction|style|cssText)$/';
+
 const untrustedServerRules = {
   'no-eval': 'error',
   'no-implied-eval': 'error',
   'no-new-func': 'error',
   'no-script-url': 'error',
+  // The browser globals that navigate or reach another browsing context. A local variable of
+  // the same name is not a global and stays allowed.
+  'no-restricted-globals': [
+    'error',
+    ...['location', 'history', 'navigation', 'open', 'opener', 'top', 'parent', 'frames'].map(
+      (name) => ({ name, message: NAVIGATION }),
+    ),
+  ],
   'no-restricted-properties': [
     'error',
     { property: 'innerHTML', message: SINK },
@@ -37,10 +50,18 @@ const untrustedServerRules = {
     { property: 'srcdoc', message: SINK },
     { object: 'document', property: 'write', message: SINK },
     { object: 'document', property: 'writeln', message: SINK },
+    { object: 'document', property: 'open', message: SINK },
     { object: 'document', property: 'location', message: NAVIGATION },
     { object: 'window', property: 'location', message: NAVIGATION },
     { object: 'window', property: 'open', message: NAVIGATION },
     { object: 'window', property: 'history', message: NAVIGATION },
+    { object: 'window', property: 'navigation', message: NAVIGATION },
+    { object: 'globalThis', property: 'open', message: NAVIGATION },
+    { object: 'globalThis', property: 'history', message: NAVIGATION },
+    { object: 'globalThis', property: 'navigation', message: NAVIGATION },
+    { object: 'self', property: 'open', message: NAVIGATION },
+    { object: 'self', property: 'history', message: NAVIGATION },
+    { object: 'self', property: 'navigation', message: NAVIGATION },
     { object: 'location', property: 'href', message: NAVIGATION },
     { object: 'location', property: 'assign', message: NAVIGATION },
     { object: 'location', property: 'replace', message: NAVIGATION },
@@ -53,13 +74,36 @@ const untrustedServerRules = {
     { selector: "Property[key.name='dangerouslySetInnerHTML']", message: SINK },
     { selector: 'JSXAttribute[name.name=/^srcdoc$/i]', message: SINK },
     {
-      selector:
-        "CallExpression[callee.property.name='setAttribute'][arguments.0.value=/^(on.*|href|src|srcdoc|action|formaction|style|xlink:href)$/i]",
+      selector: `CallExpression[callee.property.name='setAttribute'][arguments.0.value=${URL_ATTRIBUTE}]`,
       message: `${SINK} An event handler, URL or style attribute is a sink too.`,
     },
     {
       selector: "CallExpression[callee.property.name='setAttribute'][arguments.0.type!='Literal']",
       message: `${SINK} A computed attribute name may be a handler or a URL; name it literally.`,
+    },
+    {
+      selector: `CallExpression[callee.property.name='setAttributeNS'][arguments.1.value=${URL_ATTRIBUTE}]`,
+      message: `${SINK} An event handler, URL or style attribute is a sink too.`,
+    },
+    {
+      selector: "CallExpression[callee.property.name='setAttributeNS'][arguments.1.type!='Literal']",
+      message: `${SINK} A computed attribute name may be a handler or a URL; name it literally.`,
+    },
+    {
+      selector: `AssignmentExpression[left.property.name=${URL_PROPERTY}]`,
+      message: `${SINK} A URL or style property is a sink too.`,
+    },
+    {
+      selector: `AssignmentExpression[left.property.value=${URL_PROPERTY}]`,
+      message: `${SINK} A URL or style property is a sink too.`,
+    },
+    {
+      selector: "MemberExpression[property.name='location']",
+      message: `${NAVIGATION} Any .location is navigation state, whatever object holds it.`,
+    },
+    {
+      selector: "MemberExpression[property.value='location']",
+      message: `${NAVIGATION} Any .location is navigation state, whatever object holds it.`,
     },
     {
       selector: "ImportExpression[source.type!='Literal']",

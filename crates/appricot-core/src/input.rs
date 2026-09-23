@@ -8,8 +8,7 @@ use crate::geometry::{Point, Size};
 use crate::surface::SurfaceId;
 
 /// A key, as an X11 keysym number. The client computes it from the browser's key event;
-/// the mapping is fixed by the wire spec, which the task l1-wire-spec-v0 writes into
-/// `docs/protocol/`. Until then the mapping here is provisional.
+/// the mapping is fixed by the wire spec, `docs/protocol/v0.md` §8 (Keyboard mapping).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Keysym(pub u32);
 

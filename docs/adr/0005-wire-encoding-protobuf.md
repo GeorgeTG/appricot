@@ -37,8 +37,8 @@ checked 2026-09-20), one `.proto` file as the single source of truth:
   the permissive list of [ADR-0002](0002-licence.md) §2, so the codec dependency passes the
   licence gate.
 - **TypeScript side**: a hand-written, zero-dependency codec in
-  `packages/client/src/protocol.ts`, mirroring the `.proto` field by field. No protobuf runtime
-  is bundled into host pages.
+  `packages/client/src/wire.ts` (re-exported through `protocol.ts`), mirroring the `.proto`
+  field by field. No protobuf runtime is bundled into host pages.
 - **The two codecs are gated together** by shared byte-exact test vectors
   ([protocol/v0.md §12](../protocol/v0.md)): the Rust side generates them, the TypeScript side
   must decode and re-encode every one to the same bytes.

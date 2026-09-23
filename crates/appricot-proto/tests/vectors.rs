@@ -318,7 +318,7 @@ fn input_vectors() -> Vec<Vector> {
         },
         Vector {
             name: "pointer-axis",
-            note: "Two discrete wheel steps down, none sideways",
+            note: "Two discrete wheel steps up (steps_y negative is up), none sideways",
             envelope: envelope(Body::PointerAxis(PointerAxis {
                 surface_id: 1,
                 steps_x: 0,

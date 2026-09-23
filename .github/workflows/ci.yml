@@ -71,10 +71,14 @@ jobs:
           test "$(id -u)" = "${container_uid}"
 
       - name: just check
-        # pins, fmt-check, clippy, test (the X11 integration test included, on the image's
-        # Xvfb), display-levers (that test must fail without a display), doc, deny, then the
-        # TypeScript gates, the npm licence gate included.
-        run: docker compose run --rm dev just check
+        # names-check, pins, fmt-check, clippy, test (the X11 integration test included, on the
+        # image's Xvfb), display-levers (that test must fail without a display), doc, deny, then
+        # the TypeScript gates, the npm licence gate included.
+        env:
+          # The private-name denylist of scripts/check-names.sh. It is empty where secrets are
+          # not passed (a pull request from a fork); the check then runs its path half only.
+          APPRICOT_NAMES_DENYLIST: ${{ secrets.APPRICOT_NAMES_DENYLIST }}
+        run: docker compose run --rm -e APPRICOT_NAMES_DENYLIST dev just check
 
   deny:
     name: cargo deny

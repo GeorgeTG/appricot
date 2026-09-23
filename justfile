@@ -17,8 +17,15 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 default:
     @just --list --unsorted
 
-# Every gate: version pins, the Rust gates and licences, then the TypeScript gates.
-check: pins fmt-check clippy test display-levers doc deny web-check
+# Every gate: names and paths, version pins, the Rust gates and licences, then the TypeScript
+# gates.
+check: names-check pins fmt-check clippy test display-levers doc deny web-check
+
+# AGENTS.md, hard rule 5. The denylist comes from APPRICOT_NAMES_DENYLIST or
+# .git/info/names-denylist and is never in the tree. A hit prints file:line, never the name.
+# Fail on a private name or an absolute path into a home or another checkout.
+names-check:
+    sh scripts/check-names.sh
 
 # Two versions are pinned twice: the Rust toolchain (rust-toolchain.toml and the dev image's
 # base) and pnpm (package.json and the dev image). A drifted pair makes rustup or corepack

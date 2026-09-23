@@ -1,9 +1,8 @@
 # Roadmap
 
-Written 2026-09-19. Milestones are ordered by dependency. Each one lists the BigBrain task that
-tracks it (workspace `appricot`) and the exit criteria that close it. A milestone is done when
-every exit criterion is met, not when its code exists. The "where it stands" notes are dated
-2026-09-21.
+Written 2026-09-19. Milestones are ordered by dependency. Each one lists the task that tracks it
+and the exit criteria that close it. A milestone is done when every exit criterion is met, not
+when its code exists. The "where it stands" notes are dated 2026-09-21.
 
 The effort estimates are one senior engineer's own figures from the September 2026 research, with
 no external source: about 8-12 engineer-weeks to an S1 MVP and 20-28 to parity with a mature
@@ -124,7 +123,10 @@ Where it stands (2026-09-21): the code side has landed and is gated in CI — th
 `@appricot/react`, the hostile fixture and the decoder fuzz tests, and a demo host page that
 draws the streamed windows as its own floating windows under a strict CSP. Still open: the
 real-browser pass on desktop Chrome, Firefox and Safari, and everything that needs the pilot
-application on a real device.
+application on a real device. The clipboard criterion is met in one direction only: text pastes
+from the host into the app, and the app can ask for a paste, but v0 has no message that carries
+the app's selection to the browser. Copy from the app needs a new server-to-client message under
+ADR-0003 §7's gesture and policy rules, before v0 is accepted.
 
 ## M3: First host integration behind a flag
 

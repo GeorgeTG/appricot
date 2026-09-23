@@ -438,7 +438,7 @@ describe('headers cross the proxy by allowlist only', () => {
     const res = await plainGet(demo.port, '/readyz?hostile');
     expect(res.status).toBe(503);
     expect(res.headers['set-cookie']).toBeUndefined();
-    expect(res.headers.location).toBeUndefined();
+    expect(Object.keys(res.headers)).not.toContain('location');
     expect(res.headers['refresh']).toBeUndefined();
     expect(res.headers['content-type']).toBe('text/plain; charset=utf-8');
     expect(res.headers['x-content-type-options']).toBe('nosniff');

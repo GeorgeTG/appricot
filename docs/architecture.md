@@ -174,6 +174,8 @@ never a timer; input flows the other way.*
    events on it. The browser sends key events only to the focused element, so the client makes
    the canvas focusable (`tabIndex` 0, unless the host set its own) and focuses it, without
    scrolling, when the user presses a pointer button on it. There is no separate focus proxy.
+   It has no listener for IME composition events, so composed text does not reach the app yet
+   (§8).
 2. Pointer coordinates become **surface-local**: scaled from the canvas's CSS box to the logical
    surface size the host passes, and clamped inside the surface. The wheel's deltas are summed
    in CSS pixels, whatever their mode, and sent as whole steps, one per 100 px, at most 64 a
@@ -454,3 +456,5 @@ attacks:
 | The pilot application's full window inventory once it connects to a back end | l1-spike-x11-capture (needs a back end to connect to) |
 | S1 versus S3 | l1-spike-x11-capture |
 | The streamer's own memory and CPU cost, next to the reference figures of §6 | l1-spike-x11-capture (unmeasured until then) |
+| IME composition input: the client has no composition listener, so text composed in an IME does not reach the app | not scheduled; needed before a host serves CJK input |
+| Copy from the app to the host: v0 has no server-to-client message that carries clipboard text | a new message under [ADR-0003](adr/0003-untrusted-server-client.md) §7, before v0 is accepted; not scheduled |

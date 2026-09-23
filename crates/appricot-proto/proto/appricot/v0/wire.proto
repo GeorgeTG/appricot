@@ -1,7 +1,7 @@
 // The APPricot wire protocol, version 0.
 //
 // NORMATIVE FOR WAVE 1. This file is the single source of truth of the message set. The Rust
-// codec (crates/appricot-proto) and the TypeScript codec (packages/client/src/protocol.ts) are
+// codec (crates/appricot-proto) and the TypeScript codec (packages/client/src/wire.ts) are
 // both generated from, or hand-mirrored against, this file, and are proven against each other
 // by shared test vectors (crates/appricot-proto/testdata/vectors.json). The human-readable spec
 // is docs/protocol/v0.md. Change this file only together with both codecs, the vectors and the
@@ -35,13 +35,15 @@
 // REATTACH (rule 11)
 //   A dropped socket does not end the session. The server keeps the session for
 //   RESUME_GRACE_MS after the socket dies. The client reconnects and presents the
-//   `resume_serial` from its first HelloReply; the server answers `resumed = true` and
-//   re-sends the whole window set plus one full_redraw Frame per living surface.
+//   `resume_serial` from the most recent HelloReply it received; the server answers
+//   `resumed = true` and re-sends the whole window set plus one full_redraw Frame per living
+//   surface. Frame sequences restart at 1 on a resume.
 //
 // ------------------------------------------------------------------------------------------
 // THE LIMITS TABLE (rule 3). Both peers enforce every row BEFORE allocating or looping; a
 // violation closes the connection with Bye(BYE_LIMIT_VIOLATION). The table is mirrored in
-// crates/appricot-proto/src/limits.rs and docs/protocol/v0.md; the numbers below win.
+// crates/appricot-proto/src/limits.rs, packages/client/src/limits.ts and docs/protocol/v0.md;
+// the numbers below win.
 //
 //   MAX_MESSAGE_BYTES        16,777,216   one WebSocket binary message (both directions)
 //   MAX_FRAME_CREDITS              4      frames sent and not yet acked, per surface
@@ -61,7 +63,7 @@
 //   MAX_ERROR_TEXT_BYTES         1024     ServerError.text
 //   MAX_TOKEN_BYTES               256     Hello.stream_token
 //   MAX_KEY_CODE_BYTES             16     Key.code (physical key name, e.g. "KeyA")
-//   MAX_CODECS_OFFERED              8     entries in Hello.codecs
+//   MAX_CODECS_OFFERED              8     entries in Hello.codecs and in HelloReply.codecs
 //   MAX_CLIPBOARD_BYTES         65536     ClipboardSet.text, in UTF-8 bytes
 //   MAX_CURSOR_WIDTH              128     pixels
 //   MAX_CURSOR_HEIGHT             128     pixels
@@ -191,7 +193,8 @@ message HelloReply {
   string session_id = 2;
   /// The frame-credit limit the server will honour per surface (MAX_FRAME_CREDITS).
   uint32 max_frame_credits = 3;
-  /// The codecs the server will actually send, a subset of the client's offer.
+  /// The codecs the server may send: always RAW, which every client decodes, plus the
+  /// offered codecs the server will use.
   repeated uint32 codecs = 4;
   /// True when this connection resumed the session named by Hello.resume_serial. False,
   /// and the session state starts fresh, when there was nothing (left) to resume.

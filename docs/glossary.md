@@ -92,9 +92,9 @@ popup. The client keeps a popup inside its parent's box plus a small margin (pro
 parent, a size, anchor and gravity, and what to do when the popup would not fit. From xdg-shell's
 `xdg_positioner`. For X11 the streamer derives it from root coordinates.
 
-**Resume serial.** The serial a session's first `HelloReply` carries, which a reconnecting client
-presents in `Hello.resume_serial` to reattach to that session inside the grace window
-([protocol/v0.md §7](protocol/v0.md#7-reattachment)).
+**Resume serial.** The serial each `HelloReply` carries. A reconnecting client presents the one
+from the most recent `HelloReply` in `Hello.resume_serial` to reattach to that session inside the
+grace window ([protocol/v0.md §7](protocol/v0.md#7-reattachment)).
 
 **Seat.** Not used here. Some systems call a per-user application container a "seat"; this project
 says **session**. Wayland also has a `wl_seat`, a group of input devices belonging to one user;

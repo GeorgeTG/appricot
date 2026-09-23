@@ -19,22 +19,12 @@ host embeds.
 
 Do not scaffold L2 or L3. Write them down first.
 
-## BigBrain
-
-Workspace id: **`appricot`**. At session start:
-
-```
-probe_workspace(project_id="appricot")      # or path=<this checkout's absolute path>
-```
-
-Journal while you work; write a report at the end. The roadmap tasks map to milestones M0-M6 in
-[docs/roadmap.md](docs/roadmap.md).
-
 ## How to run anything
 
 **Everything runs in Docker.** Never run `cargo`, `pnpm`, `node`, `just` or `rustc` on the host.
-Use the host `docker compose` CLI, and only that — a second compose driver (dock-manager's helper,
-for example) fights this one over the same container. Compose project name: `appricot`.
+Use the host `docker compose` CLI, and only that — a second compose driver (an agent tool that
+runs `docker compose` from inside a helper container of its own, for example) fights this one over
+the same container. Compose project name: `appricot`.
 
 ```sh
 docker compose build dev                    # build the dev image (appricot-dev:local)
@@ -54,12 +44,13 @@ is `--locked` / `--frozen-lockfile` and fails loudly on a stale lockfile instead
 
 ## The gates
 
-`just check` = `pins fmt-check clippy test display-levers doc deny web-check`, and `web-check` in
-turn is `web-install web-licences web-build web-typecheck web-lint web-test`. Run them one at a
-time while iterating:
+`just check` = `names-check pins fmt-check clippy test display-levers doc deny web-check`, and
+`web-check` in turn is `web-install web-licences web-build web-typecheck web-lint web-test`. Run
+them one at a time while iterating:
 
 | Recipe | What it runs |
 |---|---|
+| `just names-check` | `scripts/check-names.sh`: no private name, no absolute path into a home or another checkout (hard rule 5 below) |
 | `just pins` | fails when rust-toolchain.toml and the dev image's base, or package.json's `packageManager` and the image's pnpm, name different versions |
 | `just fmt` / `fmt-check` | `cargo fmt --all` / `--check` |
 | `just clippy` | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` |
@@ -111,9 +102,12 @@ bounded before anything is allocated.
 
 This is enforced by lint, not by good intentions. `eslint.config.js` forbids the sinks by name
 (`innerHTML`, `outerHTML`, `insertAdjacentHTML`, `setHTMLUnsafe`, `dangerouslySetInnerHTML`,
-`document.write`, every `location`/`history` mutation, computed `setAttribute` names, non-literal
-`import()`, …), and `packages/client/src/untrusted-server.lint.test.ts` runs 33 cases against that
-config to prove each rule fires. **Weakening a rule turns that test red — fix the code instead.**
+`document.write`, the navigation globals, every `.location`, `history` and `open` spelling, URL
+and style attributes and properties, computed `setAttribute` names, non-literal `import()`, …).
+`packages/client/src/untrusted-server.lint.test.ts` pins every entry of that rule set and lints
+each entry alone against its probes, one probe per name a selector's pattern lists. **Dropping or
+narrowing a rule turns that test red — fix the code instead.** A sink reached through an alias
+(`const w = window`) is beyond a syntactic rule; review still owns that.
 Render text through `setTextOnly()` or as React children. `packages/client/src/hostile/` proves the
 whole policy against a hostile server in CI.
 
@@ -198,8 +192,16 @@ A future session must keep this, and it is not negotiable:
    not about citation.
 4. Measurements are attributed to **an internal benchmark**, with its date and method in a clause,
    never to a document, path or issue id in another repository.
-5. **A reviewer greps the diff before a commit** for the names in (1) and for absolute paths, in
-   every case and spelling. A hit is a blocker, not a nit.
+5. **A check enforces (1) and (2), and a reviewer still reads the diff.** `just names-check`
+   (`scripts/check-names.sh`, the first step of `just check`) reads every tracked file and every
+   untracked file that is not ignored, contents and paths. It fails on an absolute path into a
+   home directory or another checkout, and on any name in the private denylist, in any case. It
+   prints `file:line`, never the name. The denylist is never in the tree: CI reads it from the
+   repository secret `APPRICOT_NAMES_DENYLIST`, and a local run reads
+   `.git/info/names-denylist`, one name per line, which git never tracks. With neither, the
+   check runs the path half alone and says so. A list only catches the spellings it holds, so a
+   reviewer still greps the diff before a commit for new names and new spellings. A hit is a
+   blocker, not a nit.
 
 ## Docs
 

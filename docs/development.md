@@ -46,12 +46,13 @@ array after the `--`), it stops and asks for a quoted `'--'`, which always passe
 
 ## 2. The gates
 
-`just check` = `pins fmt-check clippy test display-levers doc deny web-check`, and `web-check`
-in turn is `web-install web-licences web-build web-typecheck web-lint web-test`. The recipes (see
+`just check` = `names-check pins fmt-check clippy test display-levers doc deny web-check`, and
+`web-check` in turn is `web-install web-licences web-build web-typecheck web-lint web-test`. The recipes (see
 [justfile](../justfile)):
 
 | Recipe | What it runs |
 |---|---|
+| `just names-check` | `scripts/check-names.sh`: no private name, no absolute path into a home or another checkout (§11) |
 | `just pins` | fails when rust-toolchain.toml and the dev image's base, or package.json's `packageManager` and the image's pnpm, name different versions |
 | `just fmt` / `fmt-check` | `cargo fmt --all` / `--check` |
 | `just clippy` | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` |
@@ -207,10 +208,14 @@ against the limits table before anything is allocated; pixels land only in host-
 
 This is enforced by lint, not by good intentions. `eslint.config.js` forbids the sinks by name
 (`innerHTML`, `outerHTML`, `insertAdjacentHTML`, `setHTMLUnsafe`, `dangerouslySetInnerHTML`,
-`document.write`, every `location`/`history` mutation, computed `setAttribute` names,
-non-literal `import()`, …), and
-`packages/client/src/untrusted-server.lint.test.ts` runs 33 cases against that config to prove
-each rule fires. To stay green:
+`document.write`, the navigation globals, every `.location`, `history` and `open` spelling, URL
+and style attributes and properties, computed `setAttribute` names, non-literal `import()`, …).
+`packages/client/src/untrusted-server.lint.test.ts` proves the set in three steps: the config
+holds exactly the entries the test pins, for every file type it lints; each entry, linted alone,
+reports its probes, with one probe per name a selector's pattern lists; and the full config
+reports every probe and leaves the safe spellings alone. A new rule therefore needs a pin and
+probes in that test. A sink reached through an alias (`const w = window`) is beyond a syntactic
+rule, so review still owns it. To stay green:
 
 - Render text through `setTextOnly()` (from `@appricot/client`) or as React children — never
   through a sink.
@@ -248,3 +253,36 @@ every measured number is attributed to the internal benchmark with its date and 
 rounded, never reworded. Decisions are ADRs under [adr/](adr/README.md); their bodies are
 history and are never rewritten, only amended or superseded, and the index table is updated in
 the same change.
+
+## 11. The names-and-paths check
+
+AGENTS.md's hard rule keeps two things out of the repository: the names of the owner's private
+projects, customers and vendors, and paths into other checkouts on the development machine.
+`just names-check` runs `scripts/check-names.sh`, and it is the first step of `just check`.
+
+- **What it reads.** Every tracked file, and every untracked file that `.gitignore` does not
+  exclude, so a new file is caught before it is added. It checks contents and file paths. A
+  binary file is checked through its runs of printable characters, where embedded metadata sits.
+- **Paths, always.** It fails on a drive-letter path (the Windows system folders aside), a Linux
+  or macOS home directory in any spelling, Git Bash and WSL included, a WSL share, or a
+  home-relative path into a projects or documents folder. Container paths such as `/work`,
+  `/target` and `/cargo` are not homes and pass, and so do web URLs.
+- **Names, from a denylist that is never in the tree.** Listing the names would put them in the
+  repository, so the list lives outside it. The check reads the variable
+  `APPRICOT_NAMES_DENYLIST` first; CI fills it from the repository secret of the same name. Then
+  it reads `.git/info/names-denylist` (strictly, `info/names-denylist` under
+  `git rev-parse --git-common-dir`), which git never tracks. The format is one name per line;
+  blank lines and lines starting with `#` are skipped. Case is ignored. A name of five
+  characters or more matches anywhere; a shorter one matches only as a whole word, so it does
+  not fire inside base64 data. With no list at all, the check says so and runs the path half
+  alone: a fresh clone, or a pull request from a fork, where CI passes no secrets.
+- **What a hit prints.** `file:line`, or the file alone for a binary file, and never the matched
+  text, so the output is safe in a public CI log. A hit in a file's own path is printed as its
+  position in `git ls-files --cached --others --exclude-standard`. The exit status is 0 when
+  clean, 1 on a hit and 2 when the check cannot run.
+- **Git worktrees.** A worktree's `.git` file names its git directory by a host path, which the
+  container cannot see, so the check exits 2 there. Mount the main checkout's `.git` into the
+  container and set `GIT_DIR` and `GIT_WORK_TREE`, or run the check from the main checkout.
+
+A list only catches the spellings it holds. Add a new name or spelling to the list the day it
+becomes relevant, and still read the diff before a commit.

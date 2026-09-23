@@ -156,6 +156,10 @@ where
     /// no way to serve a backend without its thread.
     pub fn spawn(backend: B) -> Self {
         let (cmd_tx, mut cmd_rx) = std_mpsc::channel::<Cmd>();
+        // Unbounded, so the actor never blocks on the async side; bounded in practice because
+        // someone always drains it: the session pump while a socket is attached, the server's
+        // keeper while the backend is idle or parked, and nobody for longer than the handshake
+        // deadline or a send deadline in between (crate::server, crate::session).
         let (feed_tx, feed_rx) = mpsc::unbounded_channel::<Feed>();
         let join = thread::Builder::new()
             .name("appricot-backend".into())

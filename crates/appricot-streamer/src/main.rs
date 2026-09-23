@@ -22,6 +22,21 @@
 //! session per process over a binary WebSocket at `GET /session`, with readiness at
 //! `GET /readyz`. The first client message must carry the stream token; without it nothing is
 //! served (rule 8, docs/protocol/README.md).
+//!
+//! # Exit status
+//!
+//! The process ends when its one session is over — nothing can be served after it:
+//!
+//! | Status | Meaning |
+//! |---|---|
+//! | 0 | The session ran its course: a `Bye`, an expired resume grace, or a stop. Also the version line. |
+//! | 1 | It never served: a bad configuration, no display, or no listener. |
+//! | 2 | Usage. |
+//! | 3 | The session ended on a fault of this side: the display died, or the server failed. |
+//!
+//! A termination signal still ends the process with the platform's default action: wiring it to
+//! the stop path (`ServerState::shutdown`, which says `Bye(BYE_SERVER_SHUTDOWN)` first) needs
+//! Tokio's `signal` feature, a dependency this crate has not taken yet.
 
 use std::env;
 use std::process::ExitCode;
@@ -29,6 +44,10 @@ use std::process::ExitCode;
 use appricot_streamer::backend::BackendHandle;
 use appricot_streamer::config::Config;
 use appricot_streamer::server;
+use appricot_streamer::session::EndCause;
+
+/// The exit status of a session that ended on a fault of this side (see the crate docs).
+const EXIT_FAULT: u8 = 3;
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -107,7 +126,7 @@ fn serve() -> ExitCode {
     runtime.block_on(run(cfg))
 }
 
-/// Serves until the process is stopped.
+/// Serves until the one session is over.
 ///
 /// One backend for the process's lifetime: `X11Backend::connect` is the single X connection,
 /// and its success is the readiness condition — a display without the required extensions
@@ -123,11 +142,17 @@ async fn run(cfg: Config) -> ExitCode {
     let state = server::ServerState::new(cfg.token.clone(), handle);
     state.set_ready();
 
-    match server::serve(state, &cfg.bind).await {
-        Ok(bound) => {
-            tracing::info!(?bound, "server ended");
-            ExitCode::SUCCESS
-        }
+    match server::serve(std::sync::Arc::clone(&state), &cfg.bind).await {
+        Ok(bound) => match state.outcome() {
+            Some(EndCause::Fault) => {
+                tracing::error!(?bound, "the session ended on a fault; exiting");
+                ExitCode::from(EXIT_FAULT)
+            }
+            Some(EndCause::Clean) | None => {
+                tracing::info!(?bound, "the session is over; exiting");
+                ExitCode::SUCCESS
+            }
+        },
         Err(e) => fail(format!("cannot serve on {bind}: {e}", bind = cfg.bind)),
     }
 }

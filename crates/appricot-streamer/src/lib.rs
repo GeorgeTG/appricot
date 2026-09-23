@@ -11,7 +11,8 @@
 //! - [`auth`]: the token compare with no early exit.
 //! - [`config`]: the `serve` configuration and its closed bind grammar.
 //! - [`backend`]: the backend actor thread — one OS thread owns the display connection.
-//! - [`server`]: routes (`/readyz`, `/session`), the one-session slot, and the bind.
+//! - [`server`]: routes (`/readyz`, `/session`), the one-session slot, its keeper, and the
+//!   bind.
 //! - [`session`]: the v0 protocol over one WebSocket: handshake, dispatch, frames, resume.
 
 pub mod auth;

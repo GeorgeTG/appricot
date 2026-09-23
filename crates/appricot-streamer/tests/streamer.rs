@@ -2,175 +2,31 @@
 //!
 //! Every test spawns the in-process axum server on `127.0.0.1:0` (never a fixed port) with a
 //! set token and the mock backend from `common`, and drives it with a real
-//! `tokio-tungstenite` client speaking the actual wire codec. What is asserted is the
-//! behaviour a host sees: the handshake, the refusals, the frame path, the input mapping and
-//! the resume.
+//! `tokio-tungstenite` client speaking the actual wire codec (`common::harness`). What is
+//! asserted is the behaviour a host sees: the handshake, the refusals, the frame path, the
+//! input mapping and the resume.
 
 // The shared mock carries helpers this binary does not exercise; that is what sharing means.
 #[allow(dead_code)]
 mod common;
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
-
 use appricot_core::{
     KeyCode, KeyEvent, Keysym, PointerButton, PressState, Rect, Size, SurfaceEvent, SurfaceId,
 };
 use appricot_proto::limits::{MAX_FRAME_CREDITS, MAX_TILE_BYTES, RESUME_GRACE_MS, codec};
-use appricot_proto::wire::{Body, ByeReason, Envelope, Hello, decode_envelope, encode_envelope};
-use futures_util::{SinkExt, StreamExt};
-use tokio::net::TcpStream;
+use appricot_proto::wire::{Body, ByeReason, Hello};
+use futures_util::SinkExt;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use appricot_streamer::backend::BackendHandle;
-use appricot_streamer::server::{self, ServerState};
+use appricot_streamer::server::ServerState;
+use appricot_streamer::session::EndCause;
+use common::harness::{
+    Client, TOKEN, connect, connect_with_retry, envelope, expect_bye, expect_error_and_bye,
+    expect_frame, expect_over, expect_surface_new, hello, hello_offering, hello_with_wrong_token,
+    http_get, read_body, read_until, send, serve_state, spawn_mock_server, upgrade_refused,
+};
 use common::{Input, MockBackend};
-
-const TOKEN: &[u8] = b"test-stream-token";
-
-/// A spawned server: its address, its state, and the mock backend's handle.
-struct TestServer {
-    addr: SocketAddr,
-    state: Arc<ServerState<MockBackend>>,
-    mock: common::MockHandle,
-}
-
-/// Binds the server on an ephemeral loopback port and serves it in the background.
-async fn spawn_server() -> TestServer {
-    let (backend, mock) = MockBackend::pair();
-    let backend = BackendHandle::spawn(backend);
-    let state = ServerState::new(TOKEN.to_vec(), backend);
-
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .expect("an ephemeral loopback port is free");
-    let addr = listener
-        .local_addr()
-        .expect("the listener knows its address");
-    let app = server::router::<MockBackend>().with_state(Arc::clone(&state));
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("the server serves");
-    });
-
-    TestServer { addr, state, mock }
-}
-
-/// A connected client WebSocket.
-type Client = WebSocketStream<MaybeTlsStream<TcpStream>>;
-
-/// Connects a WebSocket client to the server's `/session`.
-async fn connect(server: &TestServer) -> Client {
-    let url = format!("ws://{}/session", server.addr);
-    match connect_async(url).await {
-        Ok((stream, _response)) => stream,
-        Err(e) => panic!("cannot connect to /session: {e}"),
-    }
-}
-
-/// Connects, retrying while the server answers 503 (a previous session's socket is still
-/// live). Gives up after five seconds.
-async fn connect_with_retry(server: &TestServer) -> Client {
-    let url = format!("ws://{}/session", server.addr);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        match connect_async(url.clone()).await {
-            Ok((stream, _response)) => return stream,
-            Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Err(e) => panic!("cannot connect to /session, even with retries: {e}"),
-        }
-    }
-}
-
-/// The bytes of one client envelope.
-fn envelope(body: Body) -> Vec<u8> {
-    encode_envelope(&Envelope { body: Some(body) }).expect("the test builds valid messages")
-}
-
-/// A Hello with this token.
-fn hello(codecs: Vec<u32>, resume_serial: Option<u32>) -> Vec<u8> {
-    envelope(Body::Hello(Hello {
-        protocol_version: 0,
-        client_name: "integration-test".into(),
-        stream_token: TOKEN.to_vec(),
-        codecs,
-        resume_serial,
-    }))
-}
-
-/// Sends one envelope.
-async fn send(ws: &mut Client, bytes: &[u8]) {
-    ws.send(Message::Binary(bytes.to_vec().into()))
-        .await
-        .expect("the client sends");
-}
-
-/// Reads the next envelope, skipping pings, failing on anything else.
-async fn read_envelope(ws: &mut Client) -> Envelope {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let next = tokio::time::timeout(left, ws.next())
-            .await
-            .expect("an envelope arrives within the deadline")
-            .expect("the socket is open");
-        let message = next.expect("the socket carries a message");
-        match message {
-            Message::Binary(bytes) => {
-                return decode_envelope(&bytes).expect("the server sends valid envelopes");
-            }
-            Message::Pong(_) => {}
-            other => panic!("expected a binary envelope, got {other:?}"),
-        }
-    }
-}
-
-/// Reads the next envelope and unwraps its body variant, panicking with the actual body.
-async fn read_body(ws: &mut Client) -> Body {
-    let envelope = read_envelope(ws).await;
-    envelope
-        .body
-        .expect("the server never sends an empty envelope")
-}
-
-/// Reads one envelope of kind `want` (identified by `is`); panics on anything else, with the
-/// Bye that arrived instead when that is what came.
-///
-/// `read_envelope` already bounds the wait, so there is no loop here: the first body either
-/// matches, or the test has learned what it needs from the failure.
-async fn read_until<'a>(ws: &mut Client, want: &str, is: impl Fn(&Body) -> bool + 'a) -> Body {
-    match read_body(ws).await {
-        body if is(&body) => body,
-        Body::Bye(bye) => panic!(
-            "got Bye({:?}, {:?}) while waiting for {want}",
-            bye.reason, bye.text
-        ),
-        other => panic!("expected {want}, got {other:?}"),
-    }
-}
-
-/// Reads the ServerError and Bye the server sends for a client fault, and asserts the codes.
-async fn expect_error_and_bye(ws: &mut Client, code: u32, reason: ByeReason) {
-    match read_body(ws).await {
-        Body::ServerError(e) => assert_eq!(e.code, code, "the ServerError code"),
-        other => panic!("expected a ServerError, got {other:?}"),
-    }
-    match read_body(ws).await {
-        Body::Bye(b) => assert_eq!(b.reason, reason as i32, "the Bye reason"),
-        other => panic!("expected a Bye, got {other:?}"),
-    }
-    // After a Bye the socket closes; nothing follows.
-    let closed = tokio::time::timeout(Duration::from_secs(5), ws.next())
-        .await
-        .expect("the socket closes after a Bye");
-    assert!(matches!(
-        closed,
-        None | Some(Ok(Message::Close(_)) | Err(_))
-    ));
-}
 
 // -------------------------------------------------------------------------------------------
 // Handshake and refusals
@@ -178,11 +34,10 @@ async fn expect_error_and_bye(ws: &mut Client, code: u32, reason: ByeReason) {
 
 #[tokio::test]
 async fn hello_is_answered_with_version_codecs_and_resume_terms() {
-    let server = spawn_server().await;
-    server.state.set_ready();
-    let mut ws = connect(&server).await;
+    let (server, _mock) = spawn_mock_server().await;
+    let mut ws = connect(&server.addr).await;
 
-    send(&mut ws, &hello(vec![codec::QOI, codec::RAW], None)).await;
+    send(&mut ws, &hello_offering(vec![codec::QOI, codec::RAW], None)).await;
     let Body::HelloReply(reply) = read_body(&mut ws).await else {
         panic!("expected a HelloReply");
     };
@@ -201,11 +56,10 @@ async fn hello_is_answered_with_version_codecs_and_resume_terms() {
 
 #[tokio::test]
 async fn an_empty_codec_offer_means_raw() {
-    let server = spawn_server().await;
-    server.state.set_ready();
-    let mut ws = connect(&server).await;
+    let (server, _mock) = spawn_mock_server().await;
+    let mut ws = connect(&server.addr).await;
 
-    send(&mut ws, &hello(vec![], None)).await;
+    send(&mut ws, &hello(None)).await;
     let Body::HelloReply(reply) = read_body(&mut ws).await else {
         panic!("expected a HelloReply");
     };
@@ -214,52 +68,29 @@ async fn an_empty_codec_offer_means_raw() {
 
 #[tokio::test]
 async fn a_wrong_token_closes_with_bye_auth_failed() {
-    let server = spawn_server().await;
-    server.state.set_ready();
-    let mut ws = connect(&server).await;
+    let (server, _mock) = spawn_mock_server().await;
+    let mut ws = connect(&server.addr).await;
 
-    let wrong = envelope(Body::Hello(Hello {
-        protocol_version: 0,
-        client_name: "integration-test".into(),
-        stream_token: b"not-the-token".to_vec(),
-        codecs: vec![],
-        resume_serial: None,
-    }));
-    send(&mut ws, &wrong).await;
-
-    match read_body(&mut ws).await {
-        Body::Bye(b) => assert_eq!(b.reason, ByeReason::ByeAuthFailed as i32),
-        other => panic!("expected Bye BYE_AUTH_FAILED, got {other:?}"),
-    }
+    send(&mut ws, &hello_with_wrong_token(None)).await;
+    expect_bye(&mut ws, ByeReason::ByeAuthFailed).await;
 }
 
 #[tokio::test]
 async fn a_refused_handshake_does_not_consume_the_session() {
-    let server = spawn_server().await;
-    server.state.set_ready();
+    let (server, _mock) = spawn_mock_server().await;
 
     // A mistyped token first: the server answers BYE_AUTH_FAILED and closes the socket.
-    let mut wrong = connect(&server).await;
-    let typo = envelope(Body::Hello(Hello {
-        protocol_version: 0,
-        client_name: "integration-test".into(),
-        stream_token: b"not-the-token".to_vec(),
-        codecs: vec![],
-        resume_serial: None,
-    }));
-    send(&mut wrong, &typo).await;
-    match read_body(&mut wrong).await {
-        Body::Bye(b) => assert_eq!(b.reason, ByeReason::ByeAuthFailed as i32),
-        other => panic!("expected Bye BYE_AUTH_FAILED, got {other:?}"),
-    }
+    let mut wrong = connect(&server.addr).await;
+    send(&mut wrong, &hello_with_wrong_token(None)).await;
+    expect_bye(&mut wrong, ByeReason::ByeAuthFailed).await;
     drop(wrong);
 
     // The refusal claimed nothing — the session belongs to an authenticated Hello — so the
     // retry with the right token is served. Before this rule held the upgrade alone claimed
     // the session, and one typo left the process refusing every later upgrade with 503
     // (measured 2026-09-21).
-    let mut retry = connect_with_retry(&server).await;
-    send(&mut retry, &hello(vec![], None)).await;
+    let mut retry = connect_with_retry(&server.addr).await;
+    send(&mut retry, &hello(None)).await;
     let Body::HelloReply(reply) = read_body(&mut retry).await else {
         panic!("expected a HelloReply, not a refusal");
     };
@@ -268,9 +99,8 @@ async fn a_refused_handshake_does_not_consume_the_session() {
 
 #[tokio::test]
 async fn an_unsupported_version_closes_with_bye_protocol_version() {
-    let server = spawn_server().await;
-    server.state.set_ready();
-    let mut ws = connect(&server).await;
+    let (server, _mock) = spawn_mock_server().await;
+    let mut ws = connect(&server.addr).await;
 
     let futuristic = envelope(Body::Hello(Hello {
         protocol_version: 99,
@@ -280,18 +110,13 @@ async fn an_unsupported_version_closes_with_bye_protocol_version() {
         resume_serial: None,
     }));
     send(&mut ws, &futuristic).await;
-
-    match read_body(&mut ws).await {
-        Body::Bye(b) => assert_eq!(b.reason, ByeReason::ByeProtocolVersion as i32),
-        other => panic!("expected Bye BYE_PROTOCOL_VERSION, got {other:?}"),
-    }
+    expect_bye(&mut ws, ByeReason::ByeProtocolVersion).await;
 }
 
 #[tokio::test]
 async fn a_wrong_first_message_closes_with_bye_protocol_violation() {
-    let server = spawn_server().await;
-    server.state.set_ready();
-    let mut ws = connect(&server).await;
+    let (server, _mock) = spawn_mock_server().await;
+    let mut ws = connect(&server.addr).await;
 
     // A FrameAck before any Hello: the wrong first message.
     send(
@@ -302,33 +127,24 @@ async fn a_wrong_first_message_closes_with_bye_protocol_violation() {
         })),
     )
     .await;
-
-    match read_body(&mut ws).await {
-        Body::Bye(b) => assert_eq!(b.reason, ByeReason::ByeProtocolViolation as i32),
-        other => panic!("expected Bye BYE_PROTOCOL_VIOLATION, got {other:?}"),
-    }
+    expect_bye(&mut ws, ByeReason::ByeProtocolViolation).await;
 }
 
 #[tokio::test]
 async fn a_text_frame_is_refused() {
-    let server = spawn_server().await;
-    server.state.set_ready();
-    let mut ws = connect(&server).await;
+    let (server, _mock) = spawn_mock_server().await;
+    let mut ws = connect(&server.addr).await;
 
     ws.send(Message::Text("hello?".into()))
         .await
         .expect("text sends");
-    match read_body(&mut ws).await {
-        Body::Bye(b) => assert_eq!(b.reason, ByeReason::ByeProtocolViolation as i32),
-        other => panic!("expected Bye BYE_PROTOCOL_VIOLATION, got {other:?}"),
-    }
+    expect_bye(&mut ws, ByeReason::ByeProtocolViolation).await;
 }
 
 #[tokio::test]
 async fn garbage_bytes_close_with_server_error_and_bye() {
-    let server = spawn_server().await;
-    server.state.set_ready();
-    let mut ws = connect(&server).await;
+    let (server, _mock) = spawn_mock_server().await;
+    let mut ws = connect(&server.addr).await;
 
     send(&mut ws, &[0xff, 0xff, 0xff, 0x7f, 0x00, 0x01]).await;
     expect_error_and_bye(&mut ws, 4, ByeReason::ByeProtocolViolation).await;
@@ -336,9 +152,8 @@ async fn garbage_bytes_close_with_server_error_and_bye() {
 
 #[tokio::test]
 async fn a_limit_violation_closes_with_server_error_and_bye() {
-    let server = spawn_server().await;
-    server.state.set_ready();
-    let mut ws = connect(&server).await;
+    let (server, _mock) = spawn_mock_server().await;
+    let mut ws = connect(&server.addr).await;
 
     // A Hello whose stream_token is 300 bytes, over MAX_TOKEN_BYTES (256). Hand-built so the
     // encoder's own gate cannot refuse it first: this is what a hostile peer sends.
@@ -377,68 +192,42 @@ fn crafted_hello_with_oversized_token() -> Vec<u8> {
 
 #[tokio::test]
 async fn readiness_flips_from_503_to_200() {
-    let server = spawn_server().await;
-    assert_eq!(http_get(&server.addr, "/readyz").await, 503);
-    server.state.set_ready();
-    assert_eq!(http_get(&server.addr, "/readyz").await, 200);
-}
-
-/// A bare HTTP/1.1 GET over raw TCP, returning the status code.
-async fn http_get(addr: &SocketAddr, path: &str) -> u16 {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let mut stream = TcpStream::connect(addr).await.expect("TCP connects");
-    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-    stream
-        .write_all(request.as_bytes())
-        .await
-        .expect("GET sends");
-    let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .await
-        .expect("response reads");
-    let line = String::from_utf8_lossy(&response);
-    let status = line.split_whitespace().nth(1).expect("a status code");
-    status.parse().expect("the status code is a number")
+    let (backend, _mock) = MockBackend::pair();
+    let state = ServerState::new(TOKEN.to_vec(), BackendHandle::spawn(backend));
+    let addr = serve_state(std::sync::Arc::clone(&state)).await;
+    assert_eq!(http_get(&addr, "/readyz").await, 503);
+    state.set_ready();
+    assert_eq!(http_get(&addr, "/readyz").await, 200);
 }
 
 #[tokio::test]
 async fn a_second_session_while_one_is_live_is_refused() {
-    let server = spawn_server().await;
-    server.state.set_ready();
-    let mut first = connect(&server).await;
-    send(&mut first, &hello(vec![], None)).await;
+    let (server, _mock) = spawn_mock_server().await;
+    let mut first = connect(&server.addr).await;
+    send(&mut first, &hello(None)).await;
     let Body::HelloReply(_) = read_body(&mut first).await else {
         panic!("expected a HelloReply");
     };
 
     // While the first session is live, a second upgrade is refused before any protocol
-    // bytes: the WebSocket handshake itself fails with 503.
-    let url = format!("ws://{}/session", server.addr);
-    let second = connect_async(url).await;
-    assert!(second.is_err(), "a second session must not upgrade");
+    // bytes: the WebSocket handshake itself fails with 503, busy.
+    assert_eq!(upgrade_refused(&server.addr).await, 503, "busy, not gone");
 }
 
 #[tokio::test]
 async fn a_second_hello_after_the_handshake_closes_with_bye_protocol_violation() {
-    let server = spawn_server().await;
-    server.state.set_ready();
-    let mut ws = session_started(&server).await;
+    let (server, _mock) = spawn_mock_server().await;
+    let mut ws = session_started(&server.addr).await;
 
     // A Hello after the handshake is a forbidden order (v0.md §5: "a Hello after the
     // handshake"). It earns the same shape every client-caused close earns: a ServerError
     // with the order code, then the Bye naming the reason, then the socket closes.
-    send(&mut ws, &hello(vec![], None)).await;
+    send(&mut ws, &hello(None)).await;
     expect_error_and_bye(&mut ws, 3, ByeReason::ByeProtocolViolation).await;
 
-    // After the Bye the socket closes, and the session is over for good: the next upgrade
-    // meets a dead backend, not a parked session.
-    let url = format!("ws://{}/session", server.addr);
-    assert!(
-        connect_async(url).await.is_err(),
-        "an out-of-order Hello ends the session; nothing is served again"
-    );
+    // After the Bye the session is over for good: the next upgrade meets a dead backend, not
+    // a parked session, and is told so with 410.
+    expect_over(&server, EndCause::Clean).await;
 }
 
 // -------------------------------------------------------------------------------------------
@@ -446,9 +235,9 @@ async fn a_second_hello_after_the_handshake_closes_with_bye_protocol_violation()
 // -------------------------------------------------------------------------------------------
 
 /// Drives a session through the handshake and returns once the HelloReply is read.
-async fn session_started(server: &TestServer) -> Client {
-    let mut ws = connect(server).await;
-    send(&mut ws, &hello(vec![], None)).await;
+async fn session_started(addr: &std::net::SocketAddr) -> Client {
+    let mut ws = connect(addr).await;
+    send(&mut ws, &hello(None)).await;
     let Body::HelloReply(reply) = read_body(&mut ws).await else {
         panic!("expected a HelloReply");
     };
@@ -456,42 +245,13 @@ async fn session_started(server: &TestServer) -> Client {
     ws
 }
 
-/// Reads the next SurfaceNew, panicking with what arrived instead.
-async fn expect_surface_new(ws: &mut Client, surface_id: u32) -> appricot_proto::wire::SurfaceNew {
-    match read_until(
-        ws,
-        "SurfaceNew",
-        |b| matches!(b, Body::SurfaceNew(m) if m.surface_id == surface_id),
-    )
-    .await
-    {
-        Body::SurfaceNew(m) => m,
-        _ => unreachable!("read_until checked the variant"),
-    }
-}
-
-/// Reads the next Frame of `surface_id`.
-async fn expect_frame(ws: &mut Client, surface_id: u32) -> appricot_proto::wire::Frame {
-    match read_until(
-        ws,
-        "Frame",
-        |b| matches!(b, Body::Frame(m) if m.surface_id == surface_id),
-    )
-    .await
-    {
-        Body::Frame(m) => m,
-        _ => unreachable!("read_until checked the variant"),
-    }
-}
-
 #[tokio::test]
 async fn the_full_flow_surfaces_configures_frames_and_acks() {
-    let server = spawn_server().await;
-    server.state.set_ready();
-    let mut ws = session_started(&server).await;
+    let (server, mock) = spawn_mock_server().await;
+    let mut ws = session_started(&server.addr).await;
 
     // A window appears: announced, then framed whole (the first frame is a full redraw).
-    server.mock.create_surface(7, Size::new(300, 200));
+    mock.create_surface(7, Size::new(300, 200));
     let announced = expect_surface_new(&mut ws, 7).await;
     assert_eq!(announced.role, appricot_proto::wire::Role::Toplevel as i32);
     let size = announced.size.expect("a size is carried");
@@ -538,7 +298,7 @@ async fn the_full_flow_surfaces_configures_frames_and_acks() {
         })),
     )
     .await;
-    server.mock.push(SurfaceEvent::Damaged {
+    mock.push(SurfaceEvent::Damaged {
         id: SurfaceId::new(7),
         rect: Rect::new(10, 20, 30, 40),
     });
@@ -575,7 +335,7 @@ async fn the_full_flow_surfaces_configures_frames_and_acks() {
     .await;
 
     // The backend saw the configure, and the ack names serial 55 with the size taken.
-    let input = server.mock.wait_input(1).await;
+    let input = mock.wait_input(1).await;
     assert_eq!(
         input[0],
         Input::Configure {
@@ -631,10 +391,9 @@ fn expected_input_sequence() -> Vec<Input> {
 
 #[tokio::test]
 async fn input_reaches_the_backend_mapped() {
-    let server = spawn_server().await;
-    server.state.set_ready();
-    let mut ws = session_started(&server).await;
-    server.mock.create_surface(1, Size::new(100, 100));
+    let (server, mock) = spawn_mock_server().await;
+    let mut ws = session_started(&server.addr).await;
+    mock.create_surface(1, Size::new(100, 100));
     expect_surface_new(&mut ws, 1).await;
 
     send(
@@ -702,7 +461,7 @@ async fn input_reaches_the_backend_mapped() {
     .await;
 
     assert_eq!(
-        server.mock.wait_input(8).await,
+        mock.wait_input(8).await,
         expected_input_sequence(),
         "every input message maps and arrives in order"
     );
@@ -710,10 +469,9 @@ async fn input_reaches_the_backend_mapped() {
 
 #[tokio::test]
 async fn a_button_that_is_no_x_button_is_ignored() {
-    let server = spawn_server().await;
-    server.state.set_ready();
-    let mut ws = session_started(&server).await;
-    server.mock.create_surface(1, Size::new(100, 100));
+    let (server, mock) = spawn_mock_server().await;
+    let mut ws = session_started(&server.addr).await;
+    mock.create_surface(1, Size::new(100, 100));
     expect_surface_new(&mut ws, 1).await;
 
     send(
@@ -735,9 +493,20 @@ async fn a_button_that_is_no_x_button_is_ignored() {
         })),
     )
     .await;
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(server.mock.input().is_empty(), "button 9 delivered nothing");
+    // A sentinel the backend does record. Messages are handled in order, so once it arrives
+    // everything before it was handled: nothing need be waited for on a clock.
+    send(
+        &mut ws,
+        &envelope(Body::FocusNotify(appricot_proto::wire::FocusNotify {
+            surface_id: 1,
+        })),
+    )
+    .await;
+    assert_eq!(
+        mock.wait_input(1).await,
+        vec![Input::Focus { surface: 1 }],
+        "button 9 delivered nothing; only the sentinel arrived"
+    );
 }
 
 // -------------------------------------------------------------------------------------------
@@ -746,20 +515,16 @@ async fn a_button_that_is_no_x_button_is_ignored() {
 
 #[tokio::test]
 async fn a_dropped_socket_resumes_within_the_grace() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("appricot_streamer=debug")
-        .try_init();
-    let server = spawn_server().await;
-    server.state.set_ready();
+    let (server, mock) = spawn_mock_server().await;
 
-    let mut first = connect(&server).await;
-    send(&mut first, &hello(vec![], None)).await;
+    let mut first = connect(&server.addr).await;
+    send(&mut first, &hello(None)).await;
     let Body::HelloReply(reply) = read_body(&mut first).await else {
         panic!("expected a HelloReply");
     };
     let resume_serial = reply.resume_serial.expect("a session can be resumed");
 
-    server.mock.create_surface(7, Size::new(120, 80));
+    mock.create_surface(7, Size::new(120, 80));
     expect_surface_new(&mut first, 7).await;
     expect_frame(&mut first, 7).await;
 
@@ -767,8 +532,8 @@ async fn a_dropped_socket_resumes_within_the_grace() {
     // serial resumes it.
     drop(first);
 
-    let mut second = connect_with_retry(&server).await;
-    send(&mut second, &hello(vec![], Some(resume_serial))).await;
+    let mut second = connect_with_retry(&server.addr).await;
+    send(&mut second, &hello(Some(resume_serial))).await;
     let Body::HelloReply(resumed) = read_body(&mut second).await else {
         panic!("expected a HelloReply");
     };
@@ -791,11 +556,10 @@ async fn a_dropped_socket_resumes_within_the_grace() {
 
 #[tokio::test]
 async fn a_mismatched_resume_serial_replaces_the_session() {
-    let server = spawn_server().await;
-    server.state.set_ready();
+    let (server, _mock) = spawn_mock_server().await;
 
-    let mut first = connect(&server).await;
-    send(&mut first, &hello(vec![], None)).await;
+    let mut first = connect(&server.addr).await;
+    send(&mut first, &hello(None)).await;
     let Body::HelloReply(reply) = read_body(&mut first).await else {
         panic!("expected a HelloReply");
     };
@@ -806,8 +570,8 @@ async fn a_mismatched_resume_serial_replaces_the_session() {
     // A serial that names nothing replaces the parked session with a fresh one, as the spec
     // allows (v0.md §7): a client that wants a new session says so, and this server's policy
     // is to let it.
-    let mut second = connect_with_retry(&server).await;
-    send(&mut second, &hello(vec![], Some(999_999))).await;
+    let mut second = connect_with_retry(&server.addr).await;
+    send(&mut second, &hello(Some(999_999))).await;
     let Body::HelloReply(resumed) = read_body(&mut second).await else {
         panic!("expected a HelloReply");
     };
@@ -819,10 +583,9 @@ async fn a_mismatched_resume_serial_replaces_the_session() {
 
 #[tokio::test]
 async fn a_bye_ends_the_session_cleanly() {
-    let server = spawn_server().await;
-    server.state.set_ready();
+    let (server, _mock) = spawn_mock_server().await;
 
-    let mut ws = session_started(&server).await;
+    let mut ws = session_started(&server.addr).await;
     send(
         &mut ws,
         &envelope(Body::Bye(appricot_proto::wire::Bye {
@@ -833,13 +596,26 @@ async fn a_bye_ends_the_session_cleanly() {
     .await;
 
     // The server answers with its own Bye and closes.
-    match read_body(&mut ws).await {
-        Body::Bye(b) => assert_eq!(b.reason, ByeReason::ByePeerClosed as i32),
-        other => panic!("expected the server's Bye, got {other:?}"),
-    }
+    expect_bye(&mut ws, ByeReason::ByePeerClosed).await;
 
-    // And the session is over: the next upgrade meets a dead backend, not a parked session.
-    let url = format!("ws://{}/session", server.addr);
-    let again = connect_async(url).await;
-    assert!(again.is_err(), "a clean end leaves nothing to serve");
+    // And the session is over: the next upgrade meets a dead backend, not a parked session,
+    // and readiness reads red.
+    expect_over(&server, EndCause::Clean).await;
+}
+
+#[tokio::test]
+async fn windows_opened_before_the_first_client_are_announced_to_it() {
+    let (server, mock) = spawn_mock_server().await;
+    // The app opens its window while nobody is attached; the keeper keeps it in the standby
+    // session instead of letting the feed pile up.
+    mock.create_surface(4, Size::new(64, 48));
+    common::harness::wait_until("the backend took the event", || mock.queued() == 0).await;
+
+    let mut ws = session_started(&server.addr).await;
+    let announced = expect_surface_new(&mut ws, 4).await;
+    let size = announced.size.expect("a size is carried");
+    assert_eq!((size.width, size.height), (64, 48));
+    let frame = expect_frame(&mut ws, 4).await;
+    assert!(frame.full_redraw);
+    assert_eq!(frame.sequence, 1);
 }

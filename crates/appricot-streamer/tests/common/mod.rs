@@ -2,9 +2,12 @@
 //!
 //! It implements both frozen traits against shared state a test can see: input is recorded,
 //! surface events are queued and drained on demand, and `capture` paints deterministic
-//! pixels. It is how the tests watch the server from the backend side of the world.
+//! pixels. It is how the tests watch the server from the backend side of the world. The
+//! server spawn and the WebSocket client helpers live in [`harness`].
 
-use std::collections::HashMap;
+pub mod harness;
+
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -13,6 +16,19 @@ use appricot_core::{
     CaptureBackend, InputSink, KeyEvent, PixelBuffer, PixelFormat, Point, PointerButton,
     PressState, Rect, Size, SurfaceEvent, SurfaceId,
 };
+
+/// How one capture breaks the `CaptureBackend` contract, for the tests of contract C2.
+///
+/// Only the binaries that test the contract build one; the others see dead variants.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureFault {
+    /// A buffer one pixel narrower than the rectangle asked for: the surface shrank under the
+    /// capture.
+    Narrower,
+    /// A buffer of the rectangle's size with no bytes and stride 0.
+    Empty,
+}
 
 /// What the mock recorded, one variant per `InputSink` call, in arrival order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +98,13 @@ pub struct MockState {
     surfaces: HashMap<u32, Size>,
     /// Set to fail `drain_events` once, simulating a dead display.
     pub fail_drain: bool,
+    /// When set, every pointer motion damages the surface it lands on, after this pause (an
+    /// app that redraws under the pointer, with the round trip a real display costs).
+    motion_damage: Option<std::time::Duration>,
+    /// Faults the next captures commit, one each, oldest first.
+    capture_faults: VecDeque<CaptureFault>,
+    /// Set when the server dropped the backend: the display connection is gone.
+    dropped: bool,
 }
 
 /// A test's handle to the mock's state.
@@ -147,6 +170,40 @@ impl MockHandle {
         }
     }
 
+    /// Kills the display: the backend's next drain fails, as a dead X connection does.
+    pub fn kill_display(&self) {
+        self.lock().fail_drain = true;
+    }
+
+    /// Makes every pointer motion damage the surface under it, each after `pause`.
+    pub fn damage_on_motion(&self, pause: std::time::Duration) {
+        self.lock().motion_damage = Some(pause);
+    }
+
+    /// Makes the next captures commit `faults`, one per capture, in order.
+    pub fn fail_next_captures(&self, faults: &[CaptureFault]) {
+        self.lock().capture_faults.extend(faults.iter().copied());
+    }
+
+    /// How many pointer motions arrived so far.
+    pub fn motions(&self) -> usize {
+        self.lock()
+            .input
+            .iter()
+            .filter(|i| matches!(i, Input::Motion { .. }))
+            .count()
+    }
+
+    /// Whether the server dropped the backend.
+    pub fn is_dropped(&self) -> bool {
+        self.lock().dropped
+    }
+
+    /// How many surface events still wait for the backend actor to drain them.
+    pub fn queued(&self) -> usize {
+        self.lock().queue.len()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, MockState> {
         self.0.lock().expect("the mock state is not poisoned")
     }
@@ -160,6 +217,17 @@ impl MockBackend {
     pub fn pair() -> (Self, MockHandle) {
         let state = Arc::new(Mutex::new(MockState::default()));
         (Self(Arc::clone(&state)), MockHandle(state))
+    }
+}
+
+impl Drop for MockBackend {
+    fn drop(&mut self) {
+        // A test that panicked while holding the state must not turn this into a double panic.
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.dropped = true;
     }
 }
 
@@ -193,11 +261,29 @@ impl CaptureBackend for MockBackend {
     }
 
     fn capture(&mut self, id: SurfaceId, rect: Rect) -> Result<PixelBuffer, Self::Error> {
-        let state = self.0.lock().expect("the mock state is not poisoned");
+        let mut state = self.0.lock().expect("the mock state is not poisoned");
         if !state.surfaces.contains_key(&id.get()) {
             return Err(MockError(format!("no surface {}", id.get())));
         }
-        Ok(paint(id.get(), rect))
+        Ok(match state.capture_faults.pop_front() {
+            None => paint(id.get(), rect),
+            Some(CaptureFault::Narrower) => {
+                let narrower = Size::new(rect.size.width.saturating_sub(1), rect.size.height);
+                paint(
+                    id.get(),
+                    Rect {
+                        size: narrower,
+                        ..rect
+                    },
+                )
+            }
+            Some(CaptureFault::Empty) => PixelBuffer {
+                size: rect.size,
+                stride: 0,
+                format: PixelFormat::Bgrx8888,
+                data: Vec::new(),
+            },
+        })
     }
 }
 
@@ -205,6 +291,24 @@ impl InputSink for MockBackend {
     type Error = MockError;
 
     fn pointer_motion(&mut self, id: SurfaceId, at: Point) -> Result<(), Self::Error> {
+        let damage = self
+            .0
+            .lock()
+            .expect("the mock state is not poisoned")
+            .motion_damage;
+        if let Some(pause) = damage {
+            // The pause stands for the display round trip; it runs on the backend's thread,
+            // as a real one would.
+            std::thread::sleep(pause);
+            self.0
+                .lock()
+                .expect("the mock state is not poisoned")
+                .queue
+                .push(SurfaceEvent::Damaged {
+                    id,
+                    rect: Rect::new(0, 0, 16, 16),
+                });
+        }
         self.record(Input::Motion {
             surface: id.get(),
             at,

@@ -2,18 +2,22 @@
 //!
 //! [`run_session`] owns one socket, the [`Session`] state machine and the
 //! [`BackendHandle`] for the connection's lifetime, in one `select` loop over the socket and
-//! the backend's feed. Nothing here touches a clock except the resume grace
-//! (docs/protocol/v0.md §7: "the one sanctioned timer in the whole protocol"), which is
-//! session management — frame pacing is the client's acks driving [`Session::plan_frame`],
-//! never a tick (§6: "nothing on a timer").
+//! the backend's feed. Frame pacing is the client's acks driving [`Session::plan_frame`], never
+//! a tick (docs/protocol/v0.md §6: "nothing on a timer"). The clocks this module does read all
+//! manage the session, and none of them sends anything: the resume grace (§7), the handshake
+//! deadline (§2) and the send deadline that treats a stalled peer as gone.
 //!
 //! # Handshake
 //!
 //! The first binary message must be a `Hello` carrying the stream token (rule 8,
-//! docs/protocol/v0.md §5). Text frames, undecodable bytes, wrong messages, bad tokens and
-//! unsupported versions each close with the `Bye` the spec names. Codecs are negotiated to
-//! the first offered codec this server can encode — QOI before RAW when the client's order
-//! says so; an empty offer means RAW, as the spec fixes.
+//! docs/protocol/v0.md §5), and it must arrive within the handshake deadline
+//! ([`crate::config::handshake_timeout_ms`]). Text frames, undecodable bytes, wrong messages,
+//! bad tokens, unsupported versions and a silent socket each close with the `Bye` the spec
+//! names. Codecs are negotiated to the first offered codec this server can encode — QOI before
+//! RAW when the client's order says so; an empty offer means RAW, as the spec fixes.
+//!
+//! A refused handshake changes nothing: the pump hands its start back ([`SessionEnd::Refused`])
+//! with the session state and the grace deadline exactly as they were.
 //!
 //! # One session, one resume
 //!
@@ -23,20 +27,22 @@
 //! does **not** name it replaces the parked session with a fresh one (`resumed = false`):
 //! the spec leaves this to the implementation's policy (§7), and a client that wants a new
 //! session "simply sends Hello without resume_serial". `BYE_SESSION_GONE` is answered only
-//! when there is nothing left to serve: the backend died with the display connection.
+//! when there is nothing left to serve: a resume meets a backend whose display died.
 //!
-//! Keysyms pass through untouched: on the wire a printable key's keysym is its Unicode
-//! codepoint and a non-printing key's is an X11 keysym (docs/protocol/v0.md §8), and the
-//! backend owns the resolution — the streamer never rewrites one.
+//! Keysyms pass through untouched: docs/protocol/v0.md §8 defines them, and the backend owns
+//! the resolution — the streamer never rewrites one, and never logs one: nothing the user types
+//! reaches a log line.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
+use tokio::sync::watch;
+use tokio::time::Instant;
 
 use appricot_core::{
     Anchor, CaptureBackend, FramePlan, GoneReason, InputSink, KeyCode, KeyEvent, Keysym, Point,
@@ -52,7 +58,7 @@ use appricot_proto::wire::{
     SurfaceNew, Tile, decode_envelope, encode_envelope,
 };
 
-use crate::auth::token_matches;
+use crate::auth::StreamToken;
 use crate::backend::{BackendError, BackendHandle, Feed};
 
 /// The sink half of the session's WebSocket.
@@ -60,68 +66,141 @@ type WsSink = SplitSink<WebSocket, Message>;
 /// The stream half of the session's WebSocket.
 type WsStream = SplitStream<WebSocket>;
 
+/// The longest one outbound message may take to leave. A peer that cannot take a message in
+/// this long — it stopped reading, or a proxy in the way stalled — is treated as gone and the
+/// session parks, so the backend's feed never waits behind a send that will not finish. Far
+/// longer than the largest frame (48 RAW tiles, 12 MiB) takes on any link APPricot serves.
+const SEND_DEADLINE: Duration = Duration::from_secs(60);
+
 /// Everything a session needs from the server process.
 #[derive(Debug)]
 pub struct SessionConfig {
-    /// The stream token the first `Hello` must carry.
-    pub token: Arc<Vec<u8>>,
+    /// The stream token the first `Hello` must carry. Redacted in `Debug`.
+    pub token: Arc<StreamToken>,
+    /// Turns true when the server asks its session to stop (see
+    /// [`crate::server::ServerState::shutdown`]); the session answers `Bye(BYE_SERVER_SHUTDOWN)`.
+    pub stop: watch::Receiver<bool>,
 }
 
-/// How the pump starts: with a bare backend, or resuming a parked session.
+/// How the pump starts: with the standby state of an unclaimed backend, or resuming a parked
+/// session.
 #[derive(Debug)]
 pub enum Start<B> {
-    /// No session ever ran on this backend.
-    Fresh(BackendHandle<B>),
+    /// No client is attached, and none was since the backend started.
+    Fresh(Standby<B>),
     /// A parked session waits out its grace; its `Hello` decides resume or replace.
     Resume(ParkedSession<B>),
+}
+
+/// Why a session is over for good.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndCause {
+    /// The session ran its course: a `Bye` either way, a client's protocol fault, an expired
+    /// grace, or a stop the server asked for.
+    Clean,
+    /// Something on this side failed: the display died, or the server hit an internal fault.
+    Fault,
 }
 
 /// What the pump hands back when its socket is done.
 #[derive(Debug)]
 pub enum SessionEnd<B> {
     /// The socket died without a closing `Bye`: the session is parked for its grace, backend
-    /// included, and the caller starts the grace keeper.
+    /// included.
     Parked(ParkedSession<B>),
-    /// The session is over (a `Bye` was exchanged, or the display died); the backend was
-    /// dropped with it and nothing can be served again.
-    Ended,
-    /// The handshake was refused — a bad token, an unsupported version, or no `Hello` at all —
-    /// so no session ever existed and nothing was claimed. The caller puts the backend back and
-    /// the next client may try again: a mistyped token costs a retry, not the process.
+    /// The session is over (a `Bye` was exchanged, the display died, or the server faulted);
+    /// the backend was dropped with it and nothing can be served again.
+    Ended(EndCause),
+    /// Nothing was claimed: the handshake was refused before an authenticated `Hello` (a bad
+    /// token, an unsupported version, a silent socket, no `Hello` at all), or the reply never
+    /// left. The start comes back exactly as it went in — session state, resume serial and
+    /// grace deadline untouched — and the next client may try again: a mistyped token costs a
+    /// retry, not the process.
     Refused(Start<B>),
+}
+
+/// A backend and the session state kept on it while no socket serves it.
+///
+/// [`Standby::absorb_feed`] keeps the display's events flowing into the session, so the state
+/// stays current and the feed channel stays bounded however long nobody is attached; the keeper
+/// task in [`crate::server`] calls it.
+#[derive(Debug)]
+pub struct Standby<B> {
+    session: Session,
+    backend: BackendHandle<B>,
+    /// Set when the display died while nobody was attached.
+    fatal: Option<BackendError>,
+}
+
+impl<B> Standby<B> {
+    /// The standby state of a backend no session ever ran on.
+    pub fn new(backend: BackendHandle<B>) -> Self {
+        Self {
+            session: Session::new(),
+            backend,
+            fatal: None,
+        }
+    }
+
+    /// Applies whatever the backend produced since the last call; outputs are discarded — the
+    /// client, when it comes, is synchronised by the announcement of the whole window set, not
+    /// by a replay.
+    pub fn absorb_feed(&mut self) {
+        absorb(&mut self.session, &mut self.backend, &mut self.fatal);
+    }
+
+    /// Whether the display died while nobody was attached.
+    pub fn display_died(&self) -> bool {
+        self.fatal.is_some()
+    }
 }
 
 /// A session that outlives its socket, waiting out the resume grace.
 ///
-/// While parked, [`ParkedSession::absorb_feed`] keeps the display's events flowing into the
-/// session (state stays current and the feed channel stays bounded); the keeper task in
-/// [`crate::server`] calls it and tears the session down when the grace expires.
+/// The grace ends at an absolute [`ParkedSession::deadline`], fixed when the socket died. A
+/// refused handshake hands the session back with the same deadline, so no number of refusals
+/// extends the grace.
 #[derive(Debug)]
 pub struct ParkedSession<B> {
-    session: Session,
-    backend: BackendHandle<B>,
+    standby: Standby<B>,
     /// The serial a reconnecting `Hello` must name.
-    pub(crate) resume_serial: u32,
-    /// The grace window, from [`RESUME_GRACE_MS`].
-    pub(crate) grace: Duration,
-    /// Set when the display died while parked; a resume meets `BYE_SERVER_SHUTDOWN`.
-    pub(crate) fatal: Option<BackendError>,
+    resume_serial: u32,
+    /// When the grace runs out.
+    deadline: Instant,
 }
 
 impl<B> ParkedSession<B> {
-    /// Applies whatever the backend produced while parked; outputs are discarded — the
-    /// client, when it comes back, is resynchronised by the resume, not by a replay.
+    /// Applies whatever the backend produced while parked (see [`Standby::absorb_feed`]).
     pub fn absorb_feed(&mut self) {
-        for feed in self.backend.drain_feed() {
-            match feed {
-                Feed::Events(events) => {
-                    let mut discard = Vec::new();
-                    for event in events {
-                        self.session.apply_event(event, &mut discard);
-                    }
+        self.standby.absorb_feed();
+    }
+
+    /// When the grace runs out; the keeper tears the session down from then on.
+    pub fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    /// Whether the display died while the session was parked.
+    pub fn display_died(&self) -> bool {
+        self.standby.display_died()
+    }
+}
+
+/// Drains the backend's feed into `session`, discarding what it would have sent.
+fn absorb<B>(
+    session: &mut Session,
+    backend: &mut BackendHandle<B>,
+    fatal: &mut Option<BackendError>,
+) {
+    for feed in backend.drain_feed() {
+        match feed {
+            Feed::Events(events) => {
+                let mut discard = Vec::new();
+                for event in events {
+                    session.apply_event(event, &mut discard);
                 }
-                Feed::Fatal(e) => self.fatal = Some(e),
             }
+            Feed::Fatal(e) => *fatal = Some(e),
         }
     }
 }
@@ -134,6 +213,7 @@ static SESSION_COUNTER: AtomicU32 = AtomicU32::new(1);
 const ERR_LIMIT: u32 = 1;
 const ERR_ORDER: u32 = 3;
 const ERR_DECODE: u32 = 4;
+const ERR_INTERNAL: u32 = 5;
 
 /// Runs one session from upgrade to socket end.
 ///
@@ -142,7 +222,7 @@ const ERR_DECODE: u32 = 4;
 /// socket that died without saying why.
 pub async fn run_session<B>(
     socket: WebSocket,
-    config: SessionConfig,
+    mut config: SessionConfig,
     start: Start<B>,
 ) -> SessionEnd<B>
 where
@@ -151,46 +231,54 @@ where
     let (mut sink, mut stream) = socket.split();
 
     let mut pump = match start {
-        Start::Fresh(backend) => Pump {
-            session: Session::new(),
-            backend,
+        Start::Fresh(standby) => Pump {
+            session: standby.session,
+            backend: standby.backend,
             surfaces: Vec::new(),
             configure_acks: HashMap::new(),
             prefer: Encoding::Raw,
-            parked_resume_serial: 0,
-            parked_fatal: None,
+            parked: None,
+            fatal: standby.fatal,
+            delivery_warned: false,
         },
-        Start::Resume(parked) => {
-            let serial = parked.resume_serial;
-            let fatal = parked.fatal;
-            Pump {
-                session: parked.session,
-                backend: parked.backend,
-                // The resume re-announces the window set; the mirror is rebuilt from it.
-                surfaces: Vec::new(),
-                configure_acks: HashMap::new(),
-                prefer: Encoding::Raw,
-                parked_resume_serial: serial,
-                parked_fatal: fatal,
-            }
-        }
+        Start::Resume(parked) => Pump {
+            session: parked.standby.session,
+            backend: parked.standby.backend,
+            // The resume re-announces the window set; the mirror is rebuilt from it.
+            surfaces: Vec::new(),
+            configure_acks: HashMap::new(),
+            prefer: Encoding::Raw,
+            parked: Some((parked.resume_serial, parked.deadline)),
+            fatal: parked.standby.fatal,
+            delivery_warned: false,
+        },
     };
 
-    match handshake(&mut sink, &mut stream, &config, &mut pump).await {
-        // Nothing was claimed: the session begins with an accepted `Hello`, so a refused
-        // handshake hands the backend straight back (see `SessionEnd::Refused`).
-        Handshake::Rejected => SessionEnd::Refused(unclaim(pump)),
+    match handshake(&mut sink, &mut stream, &mut config, &mut pump).await {
+        // Nothing was claimed: hand the start straight back (see `SessionEnd::Refused`).
+        Handshake::Unclaimed => SessionEnd::Refused(unclaim(pump)),
+        Handshake::Ended(cause) => SessionEnd::Ended(cause),
+        // The client holds the new serial; the state it names is parked under it.
+        Handshake::Lost { resume_serial } => park(pump, resume_serial, "handshake"),
         Handshake::Accepted {
             resume_serial,
             session_id,
         } => {
-            // A resume marks every surface for a full redraw inside the handshake; nothing on
-            // the feed will call for a frame afterwards, so the first pump happens here. For
-            // a fresh session this plans nothing (no surfaces live yet).
-            if pump_frames(&mut sink, &mut pump).await == Flow::Stop {
-                return SessionEnd::Ended;
+            // The announcement marked every surface for a full redraw; nothing on the feed will
+            // call for a frame afterwards, so the first pump happens here, right after the
+            // announcement with nothing in between (v0.md §7).
+            if let Some(exit) = pump_frames(&mut sink, &mut pump).await.exit() {
+                return finish(exit, pump, resume_serial, &session_id).await;
             }
-            steady(&mut sink, &mut stream, pump, resume_serial, session_id).await
+            steady(
+                &mut sink,
+                &mut stream,
+                &mut config,
+                pump,
+                resume_serial,
+                session_id,
+            )
+            .await
         }
     }
 }
@@ -210,41 +298,93 @@ struct Pump<B> {
     configure_acks: HashMap<SurfaceId, Vec<(u32, u32)>>,
     /// The codec the encoder prefers this session (RAW is the fallback whatever this says).
     prefer: Encoding,
-    /// The serial a parked session was answering with when its socket died; 0 on a fresh
-    /// start, meaning nothing can be resumed.
-    parked_resume_serial: u32,
-    /// Set when resuming a session whose display died while parked.
-    parked_fatal: Option<BackendError>,
+    /// The park this pump claimed: the serial a resume must name and the grace deadline it
+    /// keeps. `None` on a fresh start, meaning nothing can be resumed.
+    parked: Option<(u32, Instant)>,
+    /// Set when the display died while nobody was attached, or during the handshake.
+    fatal: Option<BackendError>,
+    /// Whether a failed input delivery was already reported at warn level this session.
+    delivery_warned: bool,
 }
 
-/// Hands an unclaimed backend back after a refused handshake.
-///
-/// A fresh backend is still fresh — no session ever touched it. A parked session is still
-/// parked, and its session state is untouched: the refusal happened before the authenticated
-/// `Hello` that is the only thing able to change it. The grace is re-armed in full, so a
-/// client that keeps refusing handshakes extends a parked session by one window per attempt;
-/// that is bounded by the same rate as any other request and buys the retry that matters.
-fn unclaim<B>(pump: Pump<B>) -> Start<B>
-where
-    B: CaptureBackend + InputSink + Send + 'static,
-{
-    if pump.parked_resume_serial == 0 {
-        Start::Fresh(pump.backend)
-    } else {
-        Start::Resume(ParkedSession {
-            session: pump.session,
-            backend: pump.backend,
-            resume_serial: pump.parked_resume_serial,
-            grace: Duration::from_millis(u64::from(crate::config::resume_grace_ms())),
-            fatal: pump.parked_fatal,
-        })
+impl<B> Pump<B> {
+    /// Drains the backend's feed into the session, discarding what it would have sent (see
+    /// [`Standby::absorb_feed`]).
+    fn absorb_feed(&mut self) {
+        absorb(&mut self.session, &mut self.backend, &mut self.fatal);
     }
 }
 
-/// The outcome of the auth gate.
+/// Hands an unclaimed start back after a refused handshake.
+///
+/// A fresh backend is still fresh, with its standby session. A parked session is still parked,
+/// under its own serial and with its **original** grace deadline: the refusal happened before
+/// anything could change it, and refusing a handshake never buys more time.
+fn unclaim<B>(pump: Pump<B>) -> Start<B> {
+    let standby = Standby {
+        session: pump.session,
+        backend: pump.backend,
+        fatal: pump.fatal,
+    };
+    match pump.parked {
+        None => Start::Fresh(standby),
+        Some((resume_serial, deadline)) => Start::Resume(ParkedSession {
+            standby,
+            resume_serial,
+            deadline,
+        }),
+    }
+}
+
+/// Parks the pump's session under `resume_serial`, with a grace that starts now.
+fn park<B>(mut pump: Pump<B>, resume_serial: u32, session_id: &str) -> SessionEnd<B> {
+    pump.session.detach();
+    tracing::info!(session = %session_id, "socket gone; session parked for the grace");
+    SessionEnd::Parked(ParkedSession {
+        standby: Standby {
+            session: pump.session,
+            backend: pump.backend,
+            fatal: pump.fatal,
+        },
+        resume_serial,
+        deadline: Instant::now()
+            + Duration::from_millis(u64::from(crate::config::resume_grace_ms())),
+    })
+}
+
+/// Ends a pump's run the way `exit` says.
+///
+/// Every key and button the backend holds is released first (contract C9): a socket that goes,
+/// or a session that ends, never leaves the app with a key held down.
+async fn finish<B>(exit: Exit, pump: Pump<B>, resume_serial: u32, session_id: &str) -> SessionEnd<B>
+where
+    B: CaptureBackend + InputSink + Send + 'static,
+{
+    if let Err(e) = pump.backend.blur().await {
+        tracing::debug!(error = %e, "releasing held input failed");
+    }
+    match exit {
+        Exit::Park => park(pump, resume_serial, session_id),
+        Exit::End(cause) => {
+            tracing::info!(session = %session_id, ?cause, "session ended");
+            SessionEnd::Ended(cause)
+        }
+    }
+}
+
+/// The outcome of the handshake.
 enum Handshake {
-    /// The socket closed with the refusal `Bye` already sent; the session is over.
-    Rejected,
+    /// Nothing changed: refused before the authenticated `Hello` (the refusal is already
+    /// answered and logged), or the reply never left. The caller hands the start back.
+    Unclaimed,
+    /// Authenticated, and the session cannot go on; the `Bye` was sent.
+    Ended(EndCause),
+    /// The client received the reply's new serial, and the socket died before the
+    /// announcement finished: the session parks under that serial.
+    Lost {
+        /// The serial the client holds.
+        resume_serial: u32,
+    },
     /// The handshake succeeded.
     Accepted {
         /// The serial a future reconnect must name.
@@ -254,25 +394,65 @@ enum Handshake {
     },
 }
 
-/// Reads the first message and answers the `Hello`, or closes with the refusal the spec names.
-async fn handshake(
+/// Logs a refused handshake: the reason only, never what the peer offered.
+fn refused(reason: &'static str) {
+    tracing::info!(reason, "handshake refused");
+}
+
+/// Resolves once the server asks the session to stop; never resolves otherwise.
+async fn stop_asked(stop: &mut watch::Receiver<bool>) {
+    if stop.wait_for(|stop| *stop).await.is_err() {
+        // The server state is gone, and with it anyone who could ask; nothing will.
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Reads the first message and checks it is an authenticated `Hello` this server speaks, or
+/// closes with the refusal the spec names and says how the handshake ended.
+async fn read_hello(
     sink: &mut WsSink,
     stream: &mut WsStream,
-    config: &SessionConfig,
-    pump: &mut Pump<impl CaptureBackend + InputSink + Send + 'static>,
-) -> Handshake {
+    config: &mut SessionConfig,
+) -> Result<wire::Hello, Handshake> {
+    let deadline =
+        Instant::now() + Duration::from_millis(u64::from(crate::config::handshake_timeout_ms()));
     let bytes = loop {
-        match stream.next().await {
-            // A dead socket and a close frame are the same refusal: no Hello arrived.
-            None | Some(Err(_) | Ok(Message::Close(_))) => return Handshake::Rejected,
-            // Pings are answered by the socket itself; pongs carry nothing for us.
-            Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-            // No text frames, ever (rule 2); the first message must be binary.
-            Some(Ok(Message::Text(_))) => {
-                let _ = send_bye(sink, ByeReason::ByeProtocolViolation, "binary frames only").await;
-                return Handshake::Rejected;
+        let next = tokio::select! {
+            biased;
+            () = stop_asked(&mut config.stop) => {
+                let _ = send_bye(sink, ByeReason::ByeServerShutdown, "the server is stopping")
+                    .await;
+                return Err(Handshake::Ended(EndCause::Clean));
             }
-            Some(Ok(Message::Binary(bytes))) => break bytes.to_vec(),
+            next = tokio::time::timeout_at(deadline, stream.next()) => next,
+        };
+        match next {
+            // A socket that upgrades and then says nothing must not hold the one slot: the
+            // deadline covers the whole wait, pings included (v0.md §2).
+            Err(_elapsed) => {
+                refused("no Hello before the handshake deadline");
+                let _ = send_bye(
+                    sink,
+                    ByeReason::ByeProtocolViolation,
+                    "no Hello before the handshake deadline",
+                )
+                .await;
+                return Err(Handshake::Unclaimed);
+            }
+            // A dead socket and a close frame are the same refusal: no Hello arrived.
+            Ok(None | Some(Err(_) | Ok(Message::Close(_)))) => {
+                refused("the socket closed before a Hello");
+                return Err(Handshake::Unclaimed);
+            }
+            // Pings are answered by the socket itself; pongs carry nothing for us.
+            Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => {}
+            // No text frames, ever (rule 2); the first message must be binary.
+            Ok(Some(Ok(Message::Text(_)))) => {
+                refused("a text frame");
+                let _ = send_bye(sink, ByeReason::ByeProtocolViolation, "binary frames only").await;
+                return Err(Handshake::Unclaimed);
+            }
+            Ok(Some(Ok(Message::Binary(bytes)))) => break bytes,
         }
     };
 
@@ -281,58 +461,84 @@ async fn handshake(
             body: Some(Body::Hello(hello)),
         }) => hello,
         Ok(_) => {
+            refused("the first message is not a Hello");
             let _ = send_bye(sink, ByeReason::ByeProtocolViolation, "expected Hello").await;
-            return Handshake::Rejected;
+            return Err(Handshake::Unclaimed);
         }
-        Err(e) => return decode_refusal(sink, &e).await,
+        Err(e) => {
+            refused("the first message does not decode");
+            refuse_undecodable(sink, &e).await;
+            return Err(Handshake::Unclaimed);
+        }
     };
 
     // Authenticate before anything else is even looked at.
-    if !token_matches(&config.token, &hello.stream_token) {
+    if !config.token.matches(&hello.stream_token) {
+        refused("bad token");
         let _ = send_bye(sink, ByeReason::ByeAuthFailed, "").await;
-        return Handshake::Rejected;
+        return Err(Handshake::Unclaimed);
     }
 
     // Version: refuse what we do not speak; never guess (rule 1).
     if hello.protocol_version != u32::from(PROTOCOL_VERSION) {
+        refused("unsupported protocol version");
         let _ = send_bye(
             sink,
             ByeReason::ByeProtocolVersion,
             &format!("server speaks v{PROTOCOL_VERSION}"),
         )
         .await;
-        return Handshake::Rejected;
+        return Err(Handshake::Unclaimed);
     }
+    Ok(hello)
+}
+
+/// Reads the first message and answers the `Hello`, or closes with the refusal the spec names.
+async fn handshake<B>(
+    sink: &mut WsSink,
+    stream: &mut WsStream,
+    config: &mut SessionConfig,
+    pump: &mut Pump<B>,
+) -> Handshake
+where
+    B: CaptureBackend + InputSink + Send + 'static,
+{
+    let hello = match read_hello(sink, stream, config).await {
+        Ok(hello) => hello,
+        Err(outcome) => return outcome,
+    };
+
+    // Authenticated. Bring the state up to date first: the feed went unread while the socket
+    // was upgrading, and a display that died meanwhile must be seen before anything is promised.
+    pump.absorb_feed();
 
     // Codecs: answer the first offered codec the encoder can produce.
     pump.prefer = negotiate(&hello.codecs);
 
     // Resume or replace. Serials are process-unique, so a fresh session never collides with
     // the serial of the one it replaced.
+    let parked_serial = pump.parked.map(|(serial, _)| serial);
+    let resumed = parked_serial.is_some() && hello.resume_serial == parked_serial;
+
+    // A display that died leaves nothing to serve: a resume meets the session-gone Bye (v0.md
+    // §7), any other Hello the shutdown Bye, and the session ends either way.
+    if pump.fatal.is_some() {
+        let (reason, text) = if resumed {
+            (
+                ByeReason::ByeSessionGone,
+                "the display died while the session was parked",
+            )
+        } else {
+            (ByeReason::ByeServerShutdown, "the display died")
+        };
+        let _ = send_bye(sink, reason, text).await;
+        tracing::error!("display dead; the handshake ended the session");
+        return Handshake::Ended(EndCause::Fault);
+    }
+
     let number = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
     let resume_serial = number;
     let session_id = format!("session-{number}");
-    let resumed =
-        hello.resume_serial == Some(pump.parked_resume_serial) && pump.parked_resume_serial != 0;
-
-    // A parked session whose display died meets the shutdown Bye, not a resume.
-    if resumed && pump.parked_fatal.is_some() {
-        let _ = send_bye(
-            sink,
-            ByeReason::ByeServerShutdown,
-            "the display died while parked",
-        )
-        .await;
-        return Handshake::Rejected;
-    }
-
-    // A Hello that does not name the parked serial replaces the session (v0.md §7). The
-    // parked core session died with its client: it is detached, and a detached session emits
-    // nothing and plans no frames — so the replacement starts from a fresh one on the same
-    // backend, or the new client would hold a socket that never tells it a thing.
-    if !resumed && pump.parked_resume_serial != 0 {
-        pump.session = Session::new();
-    }
 
     let reply = HelloReply {
         protocol_version: u32::from(PROTOCOL_VERSION),
@@ -352,18 +558,39 @@ async fn handshake(
         // (crate::config::resume_grace_ms).
         resume_grace_ms: Some(crate::config::resume_grace_ms()),
     };
-    if send_body(sink, Body::HelloReply(reply)).await.is_err() {
-        return Handshake::Rejected;
+    match send_body(sink, Body::HelloReply(reply)).await {
+        Ok(()) => {}
+        // The reply never left and nothing has changed yet: the client still holds only the
+        // serial it came with, so everything goes back exactly as it was.
+        Err(SendFault::Socket) => return Handshake::Unclaimed,
+        Err(SendFault::Encode) => {
+            internal_fault(sink).await;
+            return Handshake::Ended(EndCause::Fault);
+        }
     }
 
-    // A resume re-announces the whole window set; the steady loop then plans one full-redraw
-    // frame per surface, because the resume reset every surface's pacing.
-    if resumed {
-        let mut out = Vec::new();
+    // A Hello that does not name the parked serial replaces the session (v0.md §7) — only now
+    // that the client holds the new serial. The parked core session died with its client: it
+    // is detached, and a detached session emits nothing and plans no frames, so the replacement
+    // starts from a fresh one on the same backend.
+    if parked_serial.is_some() && !resumed {
+        pump.session = Session::new();
+    }
+
+    // Announce the whole window set, then the frames (run_session), with nothing in between
+    // (v0.md §7). For a resume this is the resynchronisation, always; for a fresh start it is
+    // every window the app opened before the client came, when it opened any.
+    let mut out = Vec::new();
+    if resumed || pump.session.surface_count() > 0 {
         pump.session.resume(&mut out);
-        for event in &out {
-            if send_session_event(sink, pump, event).await.is_err() {
-                return Handshake::Rejected;
+    }
+    for event in &out {
+        match send_session_event(sink, pump, event).await {
+            Ok(()) => {}
+            Err(SendFault::Socket) => return Handshake::Lost { resume_serial },
+            Err(SendFault::Encode) => {
+                internal_fault(sink).await;
+                return Handshake::Ended(EndCause::Fault);
             }
         }
     }
@@ -375,8 +602,6 @@ async fn handshake(
 }
 
 /// Applies one feed item: events into the session, then whatever frames they call for.
-///
-/// [`Flow::Stop`] means the session is over — the display died, or the wire failed.
 async fn apply_feed<B>(
     feed: Option<Feed>,
     sink: &mut WsSink,
@@ -391,17 +616,17 @@ where
         None | Some(Feed::Fatal(_)) => {
             let _ = send_bye(sink, ByeReason::ByeServerShutdown, "the display died").await;
             tracing::error!(session = %session_id, "display dead; session ended");
-            Flow::Stop
+            Flow::Stop(EndCause::Fault)
         }
         Some(Feed::Events(events)) => {
             let mut out = Vec::new();
             for event in events {
                 pump.session.apply_event(event, &mut out);
             }
-            if emit_events(sink, pump, &out).await == Flow::Stop {
-                return Flow::Stop;
+            match emit_events(sink, pump, &out).await {
+                Flow::On => pump_frames(sink, pump).await,
+                flow => flow,
             }
-            pump_frames(sink, pump).await
         }
     }
 }
@@ -410,6 +635,7 @@ where
 async fn steady<B>(
     sink: &mut WsSink,
     stream: &mut WsStream,
+    config: &mut SessionConfig,
     mut pump: Pump<B>,
     resume_serial: u32,
     session_id: String,
@@ -424,13 +650,22 @@ where
         // being moved — leaves it ready every time, so the feed starved and the stream
         // collapsed to about one frame per second while the pointer moved, catching up only
         // in the pauses (measured 2026-09-22: 169 pointer moves in 1.5 s produced 2 frames,
-        // trailing lag 168 ms). That is the delay a user feels as a lagging pointer. A feed
-        // batch is finite, so the socket is served as soon as the batch is applied.
+        // trailing lag 168 ms). That is the delay a user feels as a lagging pointer.
+        //
+        // The socket is read again only once a drain comes back empty. What keeps that from
+        // starving the socket in turn is not the batch but its producers: the actor pushes at
+        // most one feed item per command or per 25 ms poll, and a batch can send frames only
+        // while credits are free — at most MAX_FRAME_CREDITS per surface, refilled only by acks
+        // read from the socket. A change that lets the feed produce faster, or adds output
+        // that needs no credit, must keep that bound or poll the socket inside this loop.
         let ready = pump.backend.drain_feed();
         if !ready.is_empty() {
             for feed in ready {
-                if apply_feed(Some(feed), sink, &mut pump, &session_id).await == Flow::Stop {
-                    return SessionEnd::Ended;
+                if let Some(exit) = apply_feed(Some(feed), sink, &mut pump, &session_id)
+                    .await
+                    .exit()
+                {
+                    return finish(exit, pump, resume_serial, &session_id).await;
                 }
             }
             continue;
@@ -438,56 +673,36 @@ where
 
         let from_client = tokio::select! {
             biased;
+            () = stop_asked(&mut config.stop) => {
+                let _ = send_bye(sink, ByeReason::ByeServerShutdown, "the server is stopping")
+                    .await;
+                return finish(Exit::End(EndCause::Clean), pump, resume_serial, &session_id)
+                    .await;
+            }
             message = stream.next() => message,
             feed = pump.backend.next_feed() => {
-                if apply_feed(feed, sink, &mut pump, &session_id).await == Flow::Stop {
-                    return SessionEnd::Ended;
+                if let Some(exit) = apply_feed(feed, sink, &mut pump, &session_id).await.exit() {
+                    return finish(exit, pump, resume_serial, &session_id).await;
                 }
                 continue;
             }
         };
 
-        match from_client {
-            // The socket died without a Bye: park the session for its grace (v0.md §7).
-            None | Some(Err(_)) => {
-                pump.session.detach();
-                tracing::info!(session = %session_id, "socket gone; session parked for the grace");
-                return SessionEnd::Parked(ParkedSession {
-                    session: pump.session,
-                    backend: pump.backend,
-                    resume_serial,
-                    grace: Duration::from_millis(u64::from(crate::config::resume_grace_ms())),
-                    fatal: None,
-                });
+        let flow = match from_client {
+            // The socket died, or closed without a Bye: the client is gone without a word, and
+            // the session parks for its grace (v0.md §7).
+            None | Some(Err(_) | Ok(Message::Close(_))) => Flow::Gone,
+            Some(Ok(Message::Binary(bytes))) => handle_client_bytes(sink, &mut pump, &bytes).await,
+            // Pings are answered by the socket itself; pongs carry nothing for us.
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => Flow::On,
+            // No text frames, ever (rule 2).
+            Some(Ok(Message::Text(_))) => {
+                let _ = send_bye(sink, ByeReason::ByeProtocolViolation, "binary frames only").await;
+                Flow::Stop(EndCause::Clean)
             }
-            Some(Ok(message)) => match message {
-                Message::Binary(bytes) => {
-                    if handle_client_bytes(sink, &mut pump, &bytes).await == Flow::Stop {
-                        return SessionEnd::Ended;
-                    }
-                }
-                // Pings are answered by the socket itself; pongs carry nothing for us.
-                Message::Ping(_) | Message::Pong(_) => {}
-                Message::Close(_) => {
-                    // A close frame, not a Bye: the client is gone without a word. Parked,
-                    // like any dropped socket — the grace decides what happens next.
-                    pump.session.detach();
-                    tracing::info!(session = %session_id, "socket closed; session parked");
-                    return SessionEnd::Parked(ParkedSession {
-                        session: pump.session,
-                        backend: pump.backend,
-                        resume_serial,
-                        grace: Duration::from_millis(u64::from(crate::config::resume_grace_ms())),
-                        fatal: None,
-                    });
-                }
-                // No text frames, ever (rule 2).
-                Message::Text(_) => {
-                    let _ =
-                        send_bye(sink, ByeReason::ByeProtocolViolation, "binary frames only").await;
-                    return SessionEnd::Ended;
-                }
-            },
+        };
+        if let Some(exit) = flow.exit() {
+            return finish(exit, pump, resume_serial, &session_id).await;
         }
     }
 }
@@ -497,20 +712,97 @@ where
 enum Flow {
     /// Keep going.
     On,
-    /// The session is done; the caller returns.
-    Stop,
+    /// The session is over; whatever the spec names was already said on the wire.
+    Stop(EndCause),
+    /// The socket is gone — a send failed or stalled: the session parks, exactly as when a
+    /// read fails (v0.md §7, design rule 11).
+    Gone,
 }
 
-/// Answers a decode failure with the ServerError and Bye the spec names.
-async fn decode_refusal(sink: &mut WsSink, e: &DecodeError) -> Handshake {
-    let (code, reason) = match e {
-        DecodeError::TooLarge | DecodeError::LimitViolation { .. } => {
-            (ERR_LIMIT, ByeReason::ByeLimitViolation)
+/// How a pump's run ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Exit {
+    /// The socket is gone: park for the grace.
+    Park,
+    /// The session is over.
+    End(EndCause),
+}
+
+impl Flow {
+    /// How the run ends, or `None` while it carries on.
+    fn exit(self) -> Option<Exit> {
+        match self {
+            Self::On => None,
+            Self::Stop(cause) => Some(Exit::End(cause)),
+            Self::Gone => Some(Exit::Park),
         }
-        DecodeError::Decode(_) => (ERR_DECODE, ByeReason::ByeProtocolViolation),
+    }
+}
+
+/// Why a send did not happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendFault {
+    /// The encoder refused the message: a bug on this side.
+    Encode,
+    /// The socket failed, or the peer stalled past [`SEND_DEADLINE`]: it is gone.
+    Socket,
+}
+
+/// Turns a failed send into the flow it means: a gone socket parks, an encode refusal is an
+/// internal fault that ends the session.
+async fn fault_flow(sink: &mut WsSink, fault: SendFault) -> Flow {
+    match fault {
+        SendFault::Socket => Flow::Gone,
+        SendFault::Encode => internal_fault(sink).await,
+    }
+}
+
+/// Closes on a fault of this server's own: `ServerError` code 5 (internal error), then
+/// `Bye(BYE_SERVER_SHUTDOWN)` — never a reason that blames the client.
+async fn internal_fault(sink: &mut WsSink) -> Flow {
+    let _ = send_error_and_bye(
+        sink,
+        ERR_INTERNAL,
+        "internal error",
+        ByeReason::ByeServerShutdown,
+    )
+    .await;
+    Flow::Stop(EndCause::Fault)
+}
+
+/// The refusal a decode failure earns: `None` to close without a reply, else the
+/// `ServerError` code and the `Bye` reason.
+fn refusal_for(e: &DecodeError) -> Option<(u32, ByeReason)> {
+    match e {
+        // An envelope whose oneof names no body this server knows (the codec refuses it as
+        // field "body"): a protocol violation that closes without a reply (v0.md §1).
+        DecodeError::LimitViolation { field: "body" } => None,
+        DecodeError::Decode(_) => Some((ERR_DECODE, ByeReason::ByeProtocolViolation)),
+        _ => Some((ERR_LIMIT, ByeReason::ByeLimitViolation)),
+    }
+}
+
+/// Answers a decode failure the way [`refusal_for`] says, and closes.
+async fn refuse_undecodable(sink: &mut WsSink, e: &DecodeError) {
+    match refusal_for(e) {
+        None => close_without_reply(sink).await,
+        Some((code, reason)) => {
+            let _ = send_error_and_bye(sink, code, &e.to_string(), reason).await;
+        }
+    }
+}
+
+/// Closes the socket with no protocol message: only the WebSocket close frame, with code 1002
+/// (protocol error).
+async fn close_without_reply(sink: &mut WsSink) {
+    let close = CloseFrame {
+        code: close_code::PROTOCOL,
+        reason: "".into(),
     };
-    let _ = send_error_and_bye(sink, code, &e.to_string(), reason).await;
-    Handshake::Rejected
+    if let Err(e) = sink.send(Message::Close(Some(close))).await {
+        tracing::debug!(error = %e, "socket close failed");
+    }
+    let _ = sink.close().await;
 }
 
 /// Picks the codec this session's tiles prefer: the first offered codec the encoder can
@@ -528,22 +820,18 @@ fn negotiate(offered: &[u32]) -> Encoding {
 ///
 /// The `Err` flow has already answered on the wire; the caller only stops.
 async fn decode_client_message(sink: &mut WsSink, bytes: &[u8]) -> Result<Body, Flow> {
-    let envelope = match decode_envelope(bytes) {
-        Ok(envelope) => envelope,
-        Err(e) => {
-            let (code, reason) = match &e {
-                DecodeError::Decode(_) => (ERR_DECODE, ByeReason::ByeProtocolViolation),
-                _ => (ERR_LIMIT, ByeReason::ByeLimitViolation),
-            };
-            let _ = send_error_and_bye(sink, code, &e.to_string(), reason).await;
-            return Err(Flow::Stop);
+    match decode_envelope(bytes) {
+        Ok(Envelope { body: Some(body) }) => Ok(body),
+        // The codec refuses a body-less envelope itself (see `refusal_for`); should it ever
+        // hand one over, it earns the same silent close.
+        Ok(Envelope { body: None }) => {
+            close_without_reply(sink).await;
+            Err(Flow::Stop(EndCause::Clean))
         }
-    };
-    if let Some(body) = envelope.body {
-        Ok(body)
-    } else {
-        let _ = send_bye(sink, ByeReason::ByeProtocolViolation, "empty envelope").await;
-        Err(Flow::Stop)
+        Err(e) => {
+            refuse_undecodable(sink, &e).await;
+            Err(Flow::Stop(EndCause::Clean))
+        }
     }
 }
 
@@ -568,8 +856,9 @@ where
             waiting.remove(0);
         }
         waiting.push((core_serial.get(), m.serial));
-        if emit_events(sink, pump, &out).await == Flow::Stop {
-            return Flow::Stop;
+        let flow = emit_events(sink, pump, &out).await;
+        if flow != Flow::On {
+            return flow;
         }
         if let Err(e) = pump.backend.configure(id, size).await {
             tracing::warn!(surface = id.get(), error = %e, "backend refused a configure");
@@ -582,28 +871,49 @@ where
 ///
 /// The keysym is authoritative and passes through untouched (v0.md §8); the backend owns any
 /// codepoint-to-X11 resolution. An invalid physical code drops the message, never the
-/// connection.
+/// connection. Nothing about the key is ever logged — not the keysym, not the code, not the
+/// backend's error, which can name the keysym: that is what the user typed.
 async fn deliver_key<B>(pump: &mut Pump<B>, m: wire::Key) -> Flow
 where
     B: CaptureBackend + InputSink + Send + 'static,
 {
     let Some(code) = KeyCode::new(&m.code) else {
-        tracing::debug!(code = %m.code, "key with an invalid physical code ignored");
+        tracing::debug!("key with an invalid physical code ignored");
         return Flow::On;
     };
-    if m.modifiers != 0 {
-        // v0 logs modifiers and acts on none of them.
-        tracing::trace!(modifiers = m.modifiers, "key modifiers");
-    }
     let key = KeyEvent {
         keysym: Keysym(m.keysym),
         code: Some(code),
         state: press_state(m.pressed),
     };
-    if let Err(e) = pump.backend.key(key).await {
-        tracing::warn!(error = %e, "key delivery failed");
+    if pump.backend.key(key).await.is_err() {
+        delivery_failed(pump, "key", None);
     }
     Flow::On
+}
+
+/// Logs a failed input delivery without flooding the log: the first failure of a session at
+/// warn, every later one at debug (a backend whose thread died fails every pointer move).
+/// `error` is left out where its text could carry what the user typed.
+fn delivery_failed<B>(pump: &mut Pump<B>, what: &'static str, error: Option<&BackendError>) {
+    let first = !pump.delivery_warned;
+    pump.delivery_warned = true;
+    match (first, error) {
+        (true, Some(e)) => {
+            tracing::warn!(what, error = %e, "input delivery failed; later failures log at debug");
+        }
+        (true, None) => tracing::warn!(what, "input delivery failed; later failures log at debug"),
+        (false, Some(e)) => tracing::debug!(what, error = %e, "input delivery failed"),
+        (false, None) => tracing::debug!(what, "input delivery failed"),
+    }
+}
+
+/// Whether `id` names a surface this connection announced and that still lives.
+///
+/// Input goes only there: a window the session refused (past a cap) or never reported is
+/// tracked by the backend all the same, and a guessed id must not reach it.
+fn announced<B>(pump: &Pump<B>, id: SurfaceId) -> bool {
+    pump.surfaces.contains(&id)
 }
 
 /// Handles one binary message from the client in the steady state.
@@ -611,8 +921,9 @@ async fn handle_client_bytes<B>(sink: &mut WsSink, pump: &mut Pump<B>, bytes: &[
 where
     B: CaptureBackend + InputSink + Send + 'static,
 {
-    let Ok(body) = decode_client_message(sink, bytes).await else {
-        return Flow::Stop;
+    let body = match decode_client_message(sink, bytes).await {
+        Ok(body) => body,
+        Err(flow) => return flow,
     };
     match body {
         Body::Configure(m) => apply_configure(sink, pump, m).await,
@@ -623,59 +934,60 @@ where
             pump_frames(sink, pump).await
         }
         Body::PointerMove(m) => {
-            if let Err(e) = pump
-                .backend
-                .pointer_motion(SurfaceId::new(m.surface_id), Point::new(m.x, m.y))
-                .await
+            let id = SurfaceId::new(m.surface_id);
+            if announced(pump, id)
+                && let Err(e) = pump.backend.pointer_motion(id, Point::new(m.x, m.y)).await
             {
-                tracing::warn!(error = %e, "pointer motion delivery failed");
+                delivery_failed(pump, "pointer motion", Some(&e));
             }
             Flow::On
         }
         Body::PointerButton(m) => {
+            let id = SurfaceId::new(m.surface_id);
             let Some(button) = pointer_button(m.button) else {
                 return Flow::On; // not an X button: ignore, never fatal
             };
             let state = press_state(m.pressed);
-            if let Err(e) = pump
-                .backend
-                .pointer_button(SurfaceId::new(m.surface_id), button, state)
-                .await
+            if announced(pump, id)
+                && let Err(e) = pump.backend.pointer_button(id, button, state).await
             {
-                tracing::warn!(error = %e, "pointer button delivery failed");
+                delivery_failed(pump, "pointer button", Some(&e));
             }
             Flow::On
         }
         Body::PointerAxis(m) => {
-            if let Err(e) = pump
-                .backend
-                .pointer_axis(
-                    SurfaceId::new(m.surface_id),
-                    Point::new(m.steps_x, m.steps_y),
-                )
-                .await
+            let id = SurfaceId::new(m.surface_id);
+            if announced(pump, id)
+                && let Err(e) = pump
+                    .backend
+                    .pointer_axis(id, Point::new(m.steps_x, m.steps_y))
+                    .await
             {
-                tracing::warn!(error = %e, "pointer axis delivery failed");
+                delivery_failed(pump, "pointer axis", Some(&e));
             }
             Flow::On
         }
         Body::Key(m) => deliver_key(pump, m).await,
         Body::FocusNotify(m) => {
-            if let Err(e) = pump.backend.focus(SurfaceId::new(m.surface_id)).await {
-                tracing::warn!(error = %e, "focus delivery failed");
+            let id = SurfaceId::new(m.surface_id);
+            if announced(pump, id)
+                && let Err(e) = pump.backend.focus(id).await
+            {
+                delivery_failed(pump, "focus", Some(&e));
             }
             Flow::On
         }
         Body::BlurRelease(_) => {
             if let Err(e) = pump.backend.blur().await {
-                tracing::warn!(error = %e, "blur delivery failed");
+                delivery_failed(pump, "blur", Some(&e));
             }
             Flow::On
         }
         Body::ClipboardSet(m) => {
-            // The codec already capped the text at MAX_CLIPBOARD_BYTES before this ran.
-            if let Err(e) = pump.backend.clipboard_set(m.text).await {
-                tracing::warn!(error = %e, "clipboard delivery failed");
+            // The codec already capped the text at MAX_CLIPBOARD_BYTES before this ran. The
+            // error is left out of the log: the text is what the user copied.
+            if pump.backend.clipboard_set(m.text).await.is_err() {
+                delivery_failed(pump, "clipboard", None);
             }
             Flow::On
         }
@@ -684,7 +996,7 @@ where
             if pump.session.close_request(id)
                 && let Err(e) = pump.backend.close(id).await
             {
-                tracing::warn!(error = %e, "close request delivery failed");
+                delivery_failed(pump, "close request", Some(&e));
             }
             Flow::On
         }
@@ -692,7 +1004,7 @@ where
         // with the backend — nothing is parked for a client that said goodbye.
         Body::Bye(_) => {
             let _ = send_bye(sink, ByeReason::ByePeerClosed, "").await;
-            Flow::Stop
+            Flow::Stop(EndCause::Clean)
         }
         // A second Hello, or a message from the wrong direction: forbidden orders (§5). The
         // ServerError carries the code every client-caused close carries, then the Bye names
@@ -705,7 +1017,7 @@ where
                 ByeReason::ByeProtocolViolation,
             )
             .await;
-            Flow::Stop
+            Flow::Stop(EndCause::Clean)
         }
     }
 }
@@ -735,8 +1047,8 @@ where
     B: CaptureBackend + InputSink + Send + 'static,
 {
     for event in out {
-        if send_session_event(sink, pump, event).await.is_err() {
-            return Flow::Stop;
+        if let Err(fault) = send_session_event(sink, pump, event).await {
+            return fault_flow(sink, fault).await;
         }
     }
     Flow::On
@@ -750,7 +1062,7 @@ async fn send_session_event<B>(
     sink: &mut WsSink,
     pump: &mut Pump<B>,
     event: &SessionEvent,
-) -> Result<(), ()>
+) -> Result<(), SendFault>
 where
     B: CaptureBackend + InputSink + Send + 'static,
 {
@@ -882,23 +1194,18 @@ where
         let bounds = surface.size();
         match build_frame(pump, id, bounds, plan).await {
             Ok(Some(frame)) => {
-                if send_body(sink, Body::Frame(frame)).await.is_err() {
-                    return Flow::Stop;
+                if let Err(fault) = send_body(sink, Body::Frame(frame)).await {
+                    return fault_flow(sink, fault).await;
                 }
             }
-            // Nothing to send (the damage vanished or every tile's surface died mid-frame).
+            // Nothing to send (the damage vanished, or every tile was skipped mid-frame).
             Ok(None) => {}
             Err(e) => {
                 // Building a frame cannot fail in a correct process; if it does, the session
-                // is lying about its own state and must not continue.
+                // is lying about its own state and must not continue. The fault is this
+                // server's, and the close says so.
                 tracing::error!(surface = id.get(), error = %e, "frame build failed");
-                let _ = send_bye(
-                    sink,
-                    ByeReason::ByeProtocolViolation,
-                    "internal frame error",
-                )
-                .await;
-                return Flow::Stop;
+                return internal_fault(sink).await;
             }
         }
     }
@@ -910,6 +1217,12 @@ where
 /// The plan's rectangles are unioned before cutting: one cut of the union always stays inside
 /// `MAX_TILES_PER_FRAME` (a whole 1920x1200 surface is 40 tiles), where many rectangles cut
 /// apart could pass the cap.
+///
+/// A tile is skipped, never fatal, when its capture fails (the surface died mid-frame), when
+/// the buffer does not match the tile's rectangle (the surface changed size under the capture,
+/// against the `CaptureBackend` contract), or when the encoder refuses the buffer: a tile on
+/// the wire always carries exactly the pixels its rectangle names (contract C2). The event
+/// that explains the change follows on the feed.
 async fn build_frame<B>(
     pump: &Pump<B>,
     id: SurfaceId,
@@ -932,8 +1245,20 @@ where
                 continue;
             }
         };
-        let encoded = encode_tile(&buffer, pump.prefer)
-            .map_err(|e| FrameError(format!("encode refused a captured tile: {e}")))?;
+        if buffer.size != rect.size {
+            tracing::debug!(
+                surface = id.get(),
+                "captured buffer does not match its tile; tile skipped"
+            );
+            continue;
+        }
+        let encoded = match encode_tile(&buffer, pump.prefer) {
+            Ok(encoded) => encoded,
+            Err(e) => {
+                tracing::debug!(surface = id.get(), error = %e, "encoder refused a tile; tile skipped");
+                continue;
+            }
+        };
         tiles.push(Tile {
             rect: Some(wire::Rect {
                 x: rect.origin.x,
@@ -973,15 +1298,25 @@ impl std::fmt::Display for FrameError {
 
 /// Encodes and sends one body as one binary message.
 ///
-/// Fails (and the caller closes) when the message would break the limits table: an encode
-/// error is a bug on this side, and the peer gets a close rather than a broken message.
-async fn send_body(sink: &mut WsSink, body: Body) -> Result<(), ()> {
+/// An encode refusal is a bug on this side ([`SendFault::Encode`]): the peer gets a close
+/// rather than a broken message. A socket error, or a send that does not finish within
+/// [`SEND_DEADLINE`], means the peer is gone ([`SendFault::Socket`]).
+async fn send_body(sink: &mut WsSink, body: Body) -> Result<(), SendFault> {
     let bytes = encode_envelope(&Envelope { body: Some(body) }).map_err(|e| {
         tracing::error!(error = %e, "encode refused an outbound message; this is a bug");
+        SendFault::Encode
     })?;
-    sink.send(Message::Binary(bytes.into())).await.map_err(|e| {
-        tracing::debug!(error = %e, "socket send failed");
-    })
+    match tokio::time::timeout(SEND_DEADLINE, sink.send(Message::Binary(bytes.into()))).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => {
+            tracing::debug!(error = %e, "socket send failed");
+            Err(SendFault::Socket)
+        }
+        Err(_elapsed) => {
+            tracing::warn!("a send stalled past its deadline; the peer is treated as gone");
+            Err(SendFault::Socket)
+        }
+    }
 }
 
 /// Sends a Bye and closes.
@@ -1073,10 +1408,11 @@ fn wire_anchor(a: Anchor) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{negotiate, pointer_button, press_state};
+    use super::{ERR_DECODE, ERR_LIMIT, negotiate, pointer_button, press_state, refusal_for};
 
     use appricot_core::{PointerButton, PressState};
     use appricot_proto::limits::codec;
+    use appricot_proto::wire::{ByeReason, DecodeError, decode_envelope};
 
     #[test]
     fn an_empty_offer_means_raw() {
@@ -1108,5 +1444,38 @@ mod tests {
     fn pressed_flags_map_to_press_states() {
         assert_eq!(press_state(true), PressState::Pressed);
         assert_eq!(press_state(false), PressState::Released);
+    }
+
+    #[test]
+    fn an_envelope_naming_no_known_body_closes_without_a_reply() {
+        // Field 25, wire type 2, empty: a message this version does not know.
+        let unknown = decode_envelope(&[0xca, 0x01, 0x00]).expect_err("no body is refused");
+        assert_eq!(
+            refusal_for(&unknown),
+            None,
+            "v0.md §1: close without a reply"
+        );
+        let empty = decode_envelope(&[]).expect_err("an empty envelope names no body");
+        assert_eq!(refusal_for(&empty), None);
+    }
+
+    #[test]
+    fn other_decode_failures_keep_their_codes() {
+        assert_eq!(
+            refusal_for(&DecodeError::TooLarge),
+            Some((ERR_LIMIT, ByeReason::ByeLimitViolation))
+        );
+        assert_eq!(
+            refusal_for(&DecodeError::LimitViolation {
+                field: "hello.stream_token"
+            }),
+            Some((ERR_LIMIT, ByeReason::ByeLimitViolation))
+        );
+        let garbage = decode_envelope(&[0xff, 0xff, 0xff, 0x7f, 0x00, 0x01])
+            .expect_err("garbage does not decode");
+        assert_eq!(
+            refusal_for(&garbage),
+            Some((ERR_DECODE, ByeReason::ByeProtocolViolation))
+        );
     }
 }

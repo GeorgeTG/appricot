@@ -11,6 +11,67 @@
 //! and the instruction timing of the loop is not flattened); it has no early exit, which is the
 //! property this gate needs. A remote attacker who cannot measure the loop's duration learns
 //! nothing from it either way.
+//!
+//! The token itself travels through the process as a [`StreamToken`], whose `Debug` prints a
+//! placeholder and which has no `Display`: a `?config` in a log line or a panic message cannot
+//! put the secret into the container's logs (threat model §4.1, "Tokens redacted in
+//! `Debug`/`Display`").
+
+use std::fmt;
+
+/// The stream token, redacted wherever it is formatted.
+///
+/// `Debug` prints `StreamToken(<redacted>, N bytes)`; there is no `Display`. Equality uses
+/// [`token_matches`], so comparing two tokens has no early exit either.
+#[derive(Clone)]
+pub struct StreamToken(Vec<u8>);
+
+impl StreamToken {
+    /// Wraps the token's bytes.
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// The token's bytes, for the one comparison that needs them.
+    pub fn expose(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// How many bytes the token has.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the token has no bytes at all.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// True when `offered` is this token, byte for byte (see [`token_matches`]).
+    pub fn matches(&self, offered: &[u8]) -> bool {
+        token_matches(&self.0, offered)
+    }
+}
+
+impl From<Vec<u8>> for StreamToken {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+}
+
+impl fmt::Debug for StreamToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "StreamToken(<redacted>, {} bytes)", self.0.len())
+    }
+}
+
+impl PartialEq for StreamToken {
+    fn eq(&self, other: &Self) -> bool {
+        token_matches(&self.0, &other.0)
+    }
+}
+
+impl Eq for StreamToken {}
 
 /// True when `offered` is byte-for-byte `expected`.
 ///
@@ -32,7 +93,17 @@ pub fn token_matches(expected: &[u8], offered: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::token_matches;
+    use super::{StreamToken, token_matches};
+
+    #[test]
+    fn a_token_never_formats_its_bytes() {
+        let token = StreamToken::new(b"sesame-open-please".to_vec());
+        let shown = format!("{token:?}");
+        assert!(!shown.contains("sesame"), "Debug leaked the token: {shown}");
+        assert_eq!(shown, "StreamToken(<redacted>, 18 bytes)");
+        assert!(token.matches(b"sesame-open-please"));
+        assert!(!token.matches(b"sesame"));
+    }
 
     #[test]
     fn equal_tokens_match() {

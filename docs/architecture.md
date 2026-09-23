@@ -36,13 +36,17 @@ built.*
 In the container, the streamer's real shape: `appricot-streamer` is a single **axum** server
 bound to `loopback:<port>` (an ephemeral port by default) or a `unix:<path>` socket — every
 other address form is refused loudly. It exposes two routes: `GET /readyz`, which answers
-`200 ready` only once the backend has connected and probed its display (before that, `503
-starting`), and `GET /session`, the binary-only WebSocket. It serves **one session per
-process**: a second upgrade while a session is live is refused over HTTP, a clean `Bye` ends
-the slot forever, and a socket that drops without one parks the session for the resume grace
-(10 s, [protocol/v0.md §7](protocol/v0.md#7-reattachment)) — a reconnect with the right
-`resume_serial` gets the whole window set back plus one full redraw per surface, and at grace
-expiry the backend is torn down.
+`200 ready` only once the backend has connected and probed its display (before that,
+`503 starting`; once the session is over, `503 gone`), and `GET /session`, the binary-only
+WebSocket. It serves **one session per process**: a second upgrade while a session is live is
+refused with `503`, and a socket that drops without a `Bye` parks the session for the resume
+grace (10 s, [protocol/v0.md §7](protocol/v0.md#7-reattachment)) — a reconnect with the right
+`resume_serial` gets the whole window set back plus one full redraw per surface. A clean `Bye`,
+an expired grace or a dead display ends the session for good: the backend is torn down, every
+later upgrade is refused with `410`, and the process exits (status 0 after a clean end, 3 after
+a fault). A handshake the streamer refuses, or a socket that sends no `Hello` within
+the handshake deadline (5 s, [protocol/v0.md §2](protocol/v0.md#2-handshake-and-authentication)),
+claims nothing.
 
 The host app owns the page, the chrome and the user's identity. APPricot owns the stream. The
 app inside the container owns nothing outside its own windows.

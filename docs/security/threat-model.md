@@ -117,6 +117,13 @@ severity is stated here and none is borrowed from elsewhere.
 4. **A test asserts that a session cannot reach a sibling's socket.** It is an exit criterion of
    M4 ([roadmap.md](../roadmap.md)), not a manual check.
 
+**Open gap against rule 2 (recorded 2026-09-23, for L1 only).** The v0 streamer's `GET /readyz`
+carries no token. It changes nothing and answers one bit of state (`starting`, `ready`, `gone`),
+and nothing of the session. A token check there would put the stream token into every health
+probe's configuration. The gap closes with L2's readiness gate, which must carry the session's
+token as this rule asks. The session route, `GET /session`, is not affected: nothing is served
+before an authenticated `Hello`.
+
 ### 4.3 ADV2: a tenant trying to reach a sibling session
 
 **State: planned.** Every control in this table belongs to L2 or L3, which are not built. What

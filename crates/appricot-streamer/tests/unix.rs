@@ -4,6 +4,8 @@
 //! way, filesystem permissions as the access control). This file drives the real `serve` entry
 //! point — not a hand-routed test server — over a unique socket in the temp directory, with a
 //! `tokio-tungstenite` client on a `tokio` `UnixStream` and a bare HTTP/1.1 GET for readiness.
+//! It also pins what the bind does to whatever already sits at the path, the socket's mode, and
+//! that `serve` returns once the session is over.
 
 #![cfg(unix)]
 
@@ -11,54 +13,66 @@
 #[allow(dead_code)]
 mod common;
 
+use std::io::ErrorKind;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use appricot_core::Size;
-use appricot_proto::wire::{Body, Envelope, Hello, decode_envelope, encode_envelope};
-use futures_util::{SinkExt, StreamExt};
+use appricot_proto::wire::{Body, ByeReason};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use tokio::task::JoinHandle;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::client_async;
-use tokio_tungstenite::tungstenite::Message;
 
 use appricot_streamer::backend::BackendHandle;
 use appricot_streamer::config::Bind;
-use appricot_streamer::server::{self, ServerState};
-
-const TOKEN: &[u8] = b"test-stream-token";
+use appricot_streamer::server::{self, Bound, ServerState};
+use appricot_streamer::session::EndCause;
+use common::harness::{TOKEN, expect_bye, hello, read_body, send};
 
 /// Numbers the sockets this binary binds, so parallel tests never share a path.
 static NEXT_SOCKET: AtomicU32 = AtomicU32::new(0);
 
-/// A unique socket path in the temp directory.
-fn socket_path() -> PathBuf {
-    let n = NEXT_SOCKET.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "appricot-streamer-test-{}-{n}.sock",
-        std::process::id()
-    ))
+/// A unique socket path in the temp directory; removed when dropped.
+struct SocketPath(PathBuf);
+
+impl SocketPath {
+    fn new() -> Self {
+        let n = NEXT_SOCKET.fetch_add(1, Ordering::Relaxed);
+        Self(std::env::temp_dir().join(format!(
+            "appricot-streamer-test-{}-{n}.sock",
+            std::process::id()
+        )))
+    }
 }
 
-/// Serves the real `serve` entry point on `path`, returning the state (readiness is latched
-/// through it) and the mock's handle.
-fn spawn_server(path: &Path) -> (Arc<ServerState<common::MockBackend>>, common::MockHandle) {
+impl Drop for SocketPath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// A running `serve`: its state, the mock's handle, and the task that returns when it stops.
+struct Serving {
+    state: Arc<ServerState<common::MockBackend>>,
+    mock: common::MockHandle,
+    task: JoinHandle<std::io::Result<Bound>>,
+}
+
+/// Runs the real `serve` entry point on `path`. Readiness is left for the test to latch.
+fn serve_on(path: &Path) -> Serving {
     let (backend, mock) = common::MockBackend::pair();
-    let backend = BackendHandle::spawn(backend);
-    let state = ServerState::new(TOKEN.to_vec(), backend);
+    let state = ServerState::new(TOKEN.to_vec(), BackendHandle::spawn(backend));
     let bind = Bind::Unix {
         path: path.to_owned(),
     };
     let serving = Arc::clone(&state);
-    tokio::spawn(async move {
-        if let Err(e) = server::serve(serving, &bind).await {
-            panic!("cannot serve on the unix socket: {e}");
-        }
-    });
-    (state, mock)
+    let task = tokio::spawn(async move { server::serve(serving, &bind).await });
+    Serving { state, mock, task }
 }
 
 /// Connects a unix stream, retrying while the server has not bound the socket yet.
@@ -68,7 +82,7 @@ async fn connect_unix(path: &Path) -> UnixStream {
         match UnixStream::connect(path).await {
             Ok(stream) => return stream,
             Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
             Err(e) => panic!("cannot connect to the unix socket: {e}"),
         }
@@ -110,69 +124,32 @@ async fn connect_session(path: &Path) -> WebSocketStream<UnixStream> {
     }
 }
 
-/// Sends one envelope.
-async fn send(ws: &mut WebSocketStream<UnixStream>, bytes: &[u8]) {
-    ws.send(Message::Binary(bytes.to_vec().into()))
-        .await
-        .expect("the client sends");
-}
-
-/// Reads the next envelope body, skipping pings, failing on anything else.
-async fn read_body(ws: &mut WebSocketStream<UnixStream>) -> Body {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let next = tokio::time::timeout(left, ws.next())
-            .await
-            .expect("an envelope arrives within the deadline")
-            .expect("the socket is open");
-        let message = next.expect("the socket carries a message");
-        match message {
-            Message::Binary(bytes) => {
-                return decode_envelope(&bytes)
-                    .expect("the server sends valid envelopes")
-                    .body
-                    .expect("the server never sends an empty envelope");
-            }
-            Message::Pong(_) => {}
-            other => panic!("expected a binary envelope, got {other:?}"),
-        }
-    }
-}
-
-#[tokio::test]
-async fn the_unix_socket_serves_readiness_and_a_session() {
-    let path = socket_path();
-    let (state, mock) = spawn_server(&path);
-
-    // Readiness over the unix socket: red before the latch, green after it.
-    assert_eq!(http_get(&path, "/readyz").await, 503);
-    state.set_ready();
-    assert_eq!(http_get(&path, "/readyz").await, 200);
-
-    // The WebSocket handshake over the same socket: a real session, not a handshake echo.
-    let mut ws = connect_session(&path).await;
-    send(
-        &mut ws,
-        &encode_envelope(&Envelope {
-            body: Some(Body::Hello(Hello {
-                protocol_version: 0,
-                client_name: "unix-test".into(),
-                stream_token: TOKEN.to_vec(),
-                codecs: vec![],
-                resume_serial: None,
-            })),
-        })
-        .expect("the test builds valid messages"),
-    )
-    .await;
+/// Upgrades and completes the handshake.
+async fn session_started(path: &Path) -> WebSocketStream<UnixStream> {
+    let mut ws = connect_session(path).await;
+    send(&mut ws, &hello(None)).await;
     let Body::HelloReply(reply) = read_body(&mut ws).await else {
         panic!("expected a HelloReply");
     };
     assert!(!reply.resumed);
+    ws
+}
+
+#[tokio::test]
+async fn the_unix_socket_serves_readiness_and_a_session() {
+    let path = SocketPath::new();
+    let serving = serve_on(&path.0);
+
+    // Readiness over the unix socket: red before the latch, green after it.
+    assert_eq!(http_get(&path.0, "/readyz").await, 503);
+    serving.state.set_ready();
+    assert_eq!(http_get(&path.0, "/readyz").await, 200);
+
+    // The WebSocket handshake over the same socket: a real session, not a handshake echo.
+    let mut ws = session_started(&path.0).await;
 
     // And the session streams: a surface is announced and framed over the unix socket.
-    mock.create_surface(3, Size::new(64, 48));
+    serving.mock.create_surface(3, Size::new(64, 48));
     match read_body(&mut ws).await {
         Body::SurfaceNew(m) => assert_eq!(m.surface_id, 3),
         other => panic!("expected SurfaceNew(3), got {other:?}"),
@@ -184,6 +161,95 @@ async fn the_unix_socket_serves_readiness_and_a_session() {
         }
         other => panic!("expected a Frame of 3, got {other:?}"),
     }
+}
 
-    let _ = std::fs::remove_file(&path);
+#[tokio::test]
+async fn the_socket_is_the_owners_alone() {
+    let path = SocketPath::new();
+    let serving = serve_on(&path.0);
+    serving.state.set_ready();
+    assert_eq!(http_get(&path.0, "/readyz").await, 200);
+
+    let mode = std::fs::metadata(&path.0)
+        .expect("the socket exists")
+        .permissions()
+        .mode();
+    assert_eq!(
+        mode & 0o777,
+        0o600,
+        "filesystem permissions are the access control"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_socket_file_is_replaced() {
+    let path = SocketPath::new();
+    // A socket file nobody answers on: what a crashed process leaves behind.
+    drop(std::os::unix::net::UnixListener::bind(&path.0).expect("a socket binds"));
+    assert!(path.0.exists(), "the stale file stays behind");
+
+    let serving = serve_on(&path.0);
+    serving.state.set_ready();
+    assert_eq!(
+        http_get(&path.0, "/readyz").await,
+        200,
+        "the new server took the path"
+    );
+}
+
+#[tokio::test]
+async fn a_live_socket_is_not_taken_over() {
+    let path = SocketPath::new();
+    // Another server still owns the path and answers on it.
+    let _other = std::os::unix::net::UnixListener::bind(&path.0).expect("a socket binds");
+
+    let serving = serve_on(&path.0);
+    let refused = tokio::time::timeout(Duration::from_secs(5), serving.task)
+        .await
+        .expect("serve gives up at once")
+        .expect("the serve task does not panic")
+        .expect_err("a live socket is refused, not replaced");
+    assert_eq!(refused.kind(), ErrorKind::AddrInUse);
+    assert!(
+        std::os::unix::net::UnixStream::connect(&path.0).is_ok(),
+        "the other server still answers on its path"
+    );
+}
+
+#[tokio::test]
+async fn a_file_that_is_not_a_socket_is_never_removed() {
+    let path = SocketPath::new();
+    std::fs::write(&path.0, b"precious").expect("a regular file is written");
+
+    let serving = serve_on(&path.0);
+    let refused = tokio::time::timeout(Duration::from_secs(5), serving.task)
+        .await
+        .expect("serve gives up at once")
+        .expect("the serve task does not panic")
+        .expect_err("a regular file is refused, not replaced");
+    assert_eq!(refused.kind(), ErrorKind::AlreadyExists);
+    assert_eq!(
+        std::fs::read(&path.0).expect("the file is still there"),
+        b"precious"
+    );
+}
+
+#[tokio::test]
+async fn a_stop_says_bye_and_serve_returns() {
+    let path = SocketPath::new();
+    let serving = serve_on(&path.0);
+    serving.state.set_ready();
+    let mut ws = session_started(&path.0).await;
+
+    // The path a termination signal takes: the live session hears BYE_SERVER_SHUTDOWN, the
+    // session is over, and serve returns so the process can exit.
+    serving.state.shutdown();
+    expect_bye(&mut ws, ByeReason::ByeServerShutdown).await;
+    let bound = tokio::time::timeout(Duration::from_secs(5), serving.task)
+        .await
+        .expect("serve returns once the session is over")
+        .expect("the serve task does not panic")
+        .expect("serve ends cleanly");
+    assert!(matches!(bound, Bound::Unix(p) if p == path.0));
+    assert_eq!(serving.state.outcome(), Some(EndCause::Clean));
 }

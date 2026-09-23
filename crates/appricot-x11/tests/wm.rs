@@ -1012,14 +1012,15 @@ fn one_drain_handles_a_bounded_number_of_events() {
             )
             .expect("poly_point");
     }
-    // A round trip: the server has handled every draw, and queued every notification.
+    // A round trip: the server has handled every draw. The notifications still reach the
+    // backend's socket at the server's pace, so the drains below poll until they are all in
+    // rather than assume they already are.
     client
         .conn
         .get_input_focus()
         .expect("get_input_focus")
         .reply()
         .expect("focus reply");
-    std::thread::sleep(Duration::from_millis(50));
 
     let damaged = |batch: &[SurfaceEvent]| {
         batch
@@ -1027,15 +1028,21 @@ fn one_drain_handles_a_bounded_number_of_events() {
             .filter(|e| matches!(e, SurfaceEvent::Damaged { id: d, .. } if *d == id))
             .count()
     };
-    let mut first = Vec::new();
-    backend.drain_events(&mut first).expect("drain_events");
-    assert!(damaged(&first) <= 512, "{} in one drain", damaged(&first));
-    let mut second = Vec::new();
-    backend.drain_events(&mut second).expect("drain_events");
-    assert!(
-        damaged(&second) > 0,
-        "the rest stayed queued for the next drain"
-    );
+    let deadline = Instant::now() + TIMEOUT;
+    let mut total = 0;
+    while total < 1000 && Instant::now() < deadline {
+        let mut batch = Vec::new();
+        backend.drain_events(&mut batch).expect("drain_events");
+        let n = damaged(&batch);
+        assert!(n <= 512, "{n} in one drain");
+        total += n;
+        if n == 0 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    // More than one drain's worth arrived, so the cap was exercised: no batch above held more
+    // than 512, and whatever a drain left behind stayed queued for the next one.
+    assert!(total > 512, "only {total} notifications arrived");
 }
 
 #[test]

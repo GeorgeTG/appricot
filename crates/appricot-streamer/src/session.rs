@@ -343,7 +343,7 @@ async fn handshake(
         codecs: match pump.prefer {
             Encoding::Qoi => vec![codec::RAW, codec::QOI],
             // RAW is the floor; a codec added later still leaves RAW as the must-decode.
-            _ => vec![codec::RAW],
+            Encoding::Raw => vec![codec::RAW],
         },
         resumed,
         resume_serial: Some(resume_serial),

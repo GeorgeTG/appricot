@@ -3,11 +3,20 @@
 //! # Responsibility
 //!
 //! - Cut a damaged rectangle into grid-aligned tiles ([`cut_into_tiles`]) and encode each
-//!   one ([`encode_tile`]) with a lossless codec: RAW (wire id 1, the pixels themselves)
-//!   or QOI (wire id 2, implemented in-house from the published specification in the
-//!   private `qoi` module).
+//!   one ([`encode_tile`], or [`encode_tile_owned`] on the hot path) with a lossless codec:
+//!   RAW (wire id 1, the pixels themselves) or QOI (wire id 2, implemented in-house from
+//!   the published specification in the private `qoi` module).
 //! - Mirror both codecs back to captured pixels ([`decode_tile`]), for tests, resync
 //!   paths and future server-side consumers.
+//!
+//! # The fourth byte
+//!
+//! A `Bgrx8888` pixel is blue, green, red and one unused byte (docs/protocol/v0.md §11).
+//! The unused byte carries nothing on the wire, whatever codec a tile gets: RAW sends it
+//! and every decoder ignores it, QOI does not encode it, and every tile decodes to opaque
+//! pixels. So a capture buffer decodes to the same pixels as RAW and as QOI, and the
+//! per-tile choice between them never shows. A depth-32 window's alpha is dropped: v0
+//! defines no transparency.
 //!
 //! # Not its responsibility
 //!
@@ -19,6 +28,8 @@
 //!   surface stays licence-audited by hand.
 
 mod qoi;
+#[cfg(test)]
+mod tile_vectors;
 
 use appricot_core::{PixelBuffer, PixelFormat, Rect, Size};
 use std::fmt;
@@ -35,18 +46,28 @@ pub const TILE_SIZE: u32 = 256;
 /// crates/appricot-proto/proto/appricot/v0/wire.proto (encode depends on no sibling but
 /// core, so the number is repeated here). A RAW 256x256 tile is exactly this many bytes,
 /// and [`encode_tile`] never returns more: QOI falls back to RAW before it could.
+///
+/// Both numbers are pinned at compile time: against each other below, and against the
+/// wire's limits table in crates/appricot-streamer/tests/encode_limits.rs, the one crate
+/// that sees both sides.
 pub const MAX_TILE_BYTES: usize = 262_144;
+
+// A full RAW tile is exactly the payload cap: TILE_SIZE squared, four bytes per pixel.
+const _: () = assert!(MAX_TILE_BYTES == 4 * (TILE_SIZE as usize) * (TILE_SIZE as usize));
 
 /// How a tile's payload is encoded. The wire codec ids are stable and live in the limits
 /// table of the protocol; [`Encoding::id`] and [`Encoding::from_id`] translate.
+///
+/// Not `#[non_exhaustive]`: a codec is added together with every crate that matches on
+/// this, so a new variant should break those matches rather than hide behind a wildcard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum Encoding {
     /// Uncompressed pixels: row-major from the top, 4 bytes per pixel in blue, green,
-    /// red, unused order, no stride padding. Wire id 1; every peer must decode it.
+    /// red, unused order, no stride padding. The unused byte is sent as captured, and
+    /// every decoder ignores it. Wire id 1; every peer must decode it.
     Raw,
-    /// The QOI image format, implemented in-house from the published specification.
-    /// Wire id 2.
+    /// The QOI image format, implemented in-house from the published specification: a
+    /// 3-channel stream of opaque pixels. Wire id 2.
     Qoi,
 }
 
@@ -69,8 +90,9 @@ impl Encoding {
         }
     }
 
-    /// True when decoding gives back exactly the captured pixels. Every v0 codec is
-    /// lossless, including the unused fourth byte of each BGRX pixel.
+    /// True when decoding gives back exactly the captured colour: blue, green and red.
+    /// Every v0 codec is lossless. The unused fourth byte is not colour, and it decodes as
+    /// 255 whatever the codec (see "The fourth byte" in the crate documentation).
     pub const fn is_lossless(self) -> bool {
         match self {
             Self::Raw | Self::Qoi => true,
@@ -93,7 +115,6 @@ pub struct EncodedTile {
 
 /// What can go wrong while encoding a tile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum EncodeError {
     /// The buffer covers no pixel; a tile is never empty.
     EmptyTile,
@@ -152,7 +173,6 @@ impl std::error::Error for EncodeError {}
 
 /// What can go wrong while decoding a tile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum DecodeError {
     /// The codec id names no v0 codec (0 is never a codec).
     UnknownCodec(u32),
@@ -193,9 +213,6 @@ pub enum DecodeError {
     QoiBadEndMarker,
     /// A chunk produced more pixels than the header declares.
     QoiPixelOverflow,
-    /// An RGBA chunk inside a 3-channel stream, which the QOI spec forbids encoders
-    /// from issuing.
-    QoiAlphaChunkInThreeChannel,
 }
 
 impl fmt::Display for DecodeError {
@@ -231,9 +248,6 @@ impl fmt::Display for DecodeError {
             }
             Self::QoiBadEndMarker => write!(f, "QOI end marker is damaged"),
             Self::QoiPixelOverflow => write!(f, "QOI chunk overruns the declared pixels"),
-            Self::QoiAlphaChunkInThreeChannel => {
-                write!(f, "QOI alpha chunk inside a 3-channel stream")
-            }
         }
     }
 }
@@ -303,9 +317,15 @@ fn saturate_to_i32(value: i64) -> i32 {
 /// `buf` must be a single tile: format `Bgrx8888`, at most [`TILE_SIZE`] by
 /// [`TILE_SIZE`], `stride == width * 4`, exactly `width * height * 4` bytes of data.
 /// `prefer` names the codec to try; RAW is always accepted, and QOI is used only when it
-/// actually compresses: if the QOI stream would be longer than the RAW payload or exceed
-/// [`MAX_TILE_BYTES`], the tile comes back as RAW. Either way the payload never exceeds
-/// the RAW size, and both codecs are lossless down to the unused fourth byte.
+/// does not lose to RAW: if the QOI stream would be longer than the RAW payload or exceed
+/// [`MAX_TILE_BYTES`], the tile comes back as RAW. A tie keeps QOI. The QOI encoder stops
+/// as soon as its stream passes that size, so a tile that does not compress costs little
+/// more than a RAW one. Either way the payload never exceeds the RAW size, and both codecs
+/// decode to the same opaque pixels (see "The fourth byte" in the crate documentation).
+///
+/// This borrows the buffer, so a tile that goes out RAW copies its pixels. A caller that
+/// owns the buffer and drops it afterwards should call [`encode_tile_owned`], which moves
+/// them instead.
 ///
 /// # Examples
 ///
@@ -326,6 +346,48 @@ fn saturate_to_i32(value: i64) -> i32 {
 /// assert_eq!(back, buf);
 /// ```
 pub fn encode_tile(buf: &PixelBuffer, prefer: Encoding) -> Result<EncodedTile, EncodeError> {
+    let raw_len = check_tile(buf)?;
+    Ok(
+        qoi_tile(buf, prefer, raw_len).unwrap_or_else(|| EncodedTile {
+            codec: Encoding::Raw.id(),
+            data: buf.data.clone(),
+        }),
+    )
+}
+
+/// Encodes exactly one tile of pixels, as [`encode_tile`] does, and consumes the buffer.
+///
+/// The result is the one [`encode_tile`] gives for the same buffer. The difference is the
+/// cost: a tile that goes out RAW moves the buffer's pixels into the payload instead of
+/// copying them. This is the form for the capture-and-send hot path, whose buffer is
+/// dropped right after encoding.
+///
+/// # Examples
+///
+/// ```
+/// use appricot_core::{PixelFormat, PixelBuffer, Size};
+/// use appricot_encode::{Encoding, encode_tile_owned};
+///
+/// let buf = PixelBuffer {
+///     size: Size::new(1, 1),
+///     stride: 4,
+///     format: PixelFormat::Bgrx8888,
+///     data: vec![10, 20, 30, 255],
+/// };
+/// let pixels = buf.data.as_ptr();
+/// let tile = encode_tile_owned(buf, Encoding::Raw).expect("a valid tile encodes");
+/// assert_eq!(tile.data.as_ptr(), pixels, "the RAW payload is the buffer, not a copy");
+/// ```
+pub fn encode_tile_owned(buf: PixelBuffer, prefer: Encoding) -> Result<EncodedTile, EncodeError> {
+    let raw_len = check_tile(&buf)?;
+    Ok(qoi_tile(&buf, prefer, raw_len).unwrap_or(EncodedTile {
+        codec: Encoding::Raw.id(),
+        data: buf.data,
+    }))
+}
+
+/// Checks that `buf` is exactly one tile, and returns its RAW payload length.
+fn check_tile(buf: &PixelBuffer) -> Result<usize, EncodeError> {
     let Size { width, height } = buf.size;
     if width == 0 || height == 0 {
         return Err(EncodeError::EmptyTile);
@@ -350,33 +412,33 @@ pub fn encode_tile(buf: &PixelBuffer, prefer: Encoding) -> Result<EncodedTile, E
             expected: expected_len,
         });
     }
+    Ok(expected_len)
+}
 
+/// The QOI tile for a checked `buf`, when `prefer` asks for QOI and the stream stays within
+/// [`qoi_budget`]; `None` means the tile goes out RAW.
+fn qoi_tile(buf: &PixelBuffer, prefer: Encoding, raw_len: usize) -> Option<EncodedTile> {
     match prefer {
-        Encoding::Raw => Ok(EncodedTile {
-            codec: Encoding::Raw.id(),
-            data: buf.data.clone(),
+        Encoding::Raw => None,
+        Encoding::Qoi => qoi::encode_within(
+            buf.size.width,
+            buf.size.height,
+            &buf.data,
+            qoi_budget(raw_len),
+        )
+        .map(|data| EncodedTile {
+            codec: Encoding::Qoi.id(),
+            data,
         }),
-        Encoding::Qoi => {
-            let encoded = qoi::encode(width, height, &buf.data);
-            if falls_back_to_raw(encoded.len(), expected_len) {
-                Ok(EncodedTile {
-                    codec: Encoding::Raw.id(),
-                    data: buf.data.clone(),
-                })
-            } else {
-                Ok(EncodedTile {
-                    codec: Encoding::Qoi.id(),
-                    data: encoded,
-                })
-            }
-        }
     }
 }
 
-/// True when a QOI payload of `qoi_len` bytes loses to the RAW payload of `raw_len`
-/// bytes and the tile should be sent RAW instead.
-fn falls_back_to_raw(qoi_len: usize, raw_len: usize) -> bool {
-    qoi_len > raw_len || qoi_len > MAX_TILE_BYTES
+/// The longest QOI stream worth sending in place of a RAW payload of `raw_len` bytes. A
+/// longer one loses to RAW, and the tile is sent RAW instead; a stream of exactly this
+/// length is kept. The cap is redundant for a checked tile, whose RAW payload is at most
+/// [`MAX_TILE_BYTES`], and stays as a second guard.
+fn qoi_budget(raw_len: usize) -> usize {
+    raw_len.min(MAX_TILE_BYTES)
 }
 
 /// Decodes one tile's payload back into the pixels it was cut from, whatever codec was
@@ -384,8 +446,9 @@ fn falls_back_to_raw(qoi_len: usize, raw_len: usize) -> bool {
 ///
 /// `codec` is the wire id; `size` must be the tile's true size and at most
 /// [`TILE_SIZE`] by [`TILE_SIZE`]. The result is always `Bgrx8888` with no stride
-/// padding. A 3-channel QOI tile decodes with the unused fourth byte set to 255 (the
-/// wire protocol says a 3-channel tile is opaque); a 4-channel one restores it exactly.
+/// padding, and its unused fourth byte is always 255, whatever the codec, the QOI channels
+/// byte or the stream's alpha say: every tile is opaque (see "The fourth byte" in the crate
+/// documentation). The TypeScript client decodes every payload to the same pixels.
 /// The bounds are strict: a RAW payload must be exactly `width * height * 4` bytes, a
 /// QOI header must name `size` exactly, and a QOI stream must end with its marker and
 /// nothing after it.
@@ -408,11 +471,15 @@ pub fn decode_tile(codec: u32, data: &[u8], size: Size) -> Result<PixelBuffer, D
                     expected: expected_len,
                 });
             }
+            let mut data = data.to_vec();
+            for pixel in data.chunks_exact_mut(4) {
+                pixel[3] = 0xFF; // the unused byte: every tile is opaque
+            }
             Ok(PixelBuffer {
                 size,
                 stride,
                 format: PixelFormat::Bgrx8888,
-                data: data.to_vec(),
+                data,
             })
         }
         Some(Encoding::Qoi) => {
@@ -422,7 +489,7 @@ pub fn decode_tile(codec: u32, data: &[u8], size: Size) -> Result<PixelBuffer, D
                 target[0] = source[2]; // blue
                 target[1] = source[1]; // green
                 target[2] = source[0]; // red
-                target[3] = source[3]; // alpha: 255 in a 3-channel stream already
+                target[3] = 0xFF; // the stream's alpha is dropped: every tile is opaque
             }
             Ok(PixelBuffer {
                 size,
@@ -439,7 +506,7 @@ pub fn decode_tile(codec: u32, data: &[u8], size: Size) -> Result<PixelBuffer, D
 mod tests {
     use super::{
         DecodeError, EncodeError, Encoding, MAX_TILE_BYTES, TILE_SIZE, cut_into_tiles, decode_tile,
-        encode_tile, falls_back_to_raw, qoi,
+        encode_tile, encode_tile_owned, qoi, qoi_budget,
     };
     use appricot_core::{PixelBuffer, PixelFormat, Rect, Size};
 
@@ -524,7 +591,8 @@ mod tests {
         })
     }
 
-    /// Uniform noise in all four bytes: nothing compresses, QOI loses to RAW.
+    /// Uniform noise in all four bytes. QOI saves only the odd LUMA step on it, and the
+    /// fourth byte, which QOI ignores, is garbage.
     fn noise(width: u32, height: u32) -> PixelBuffer {
         let mut rng = XorShift32(0x00DD_B1A5);
         tile_buffer(width, height, |_, _| {
@@ -559,8 +627,35 @@ mod tests {
         assert!(Encoding::Qoi.is_lossless());
     }
 
+    /// A pattern that no QOI chunk shortens: every pixel is 128 away in green from the one
+    /// before (outside DIFF and LUMA; the first is 77 away in red from the starting black),
+    /// and no pixel repeats, so every pixel costs a full 4-byte RGB chunk.
+    fn incompressible(width: u32, height: u32) -> PixelBuffer {
+        tile_buffer(width, height, |x, y| {
+            let blue = u8::try_from(x).expect("tile widths stay below 256");
+            let red = u8::try_from(y)
+                .expect("tile heights stay below 256")
+                .wrapping_add(77);
+            let green = if (y * width + x).is_multiple_of(2) {
+                0
+            } else {
+                128
+            };
+            [blue, green, red, 0xFF]
+        })
+    }
+
+    /// The pixels every decoder gives back for `buf`: the same, with the unused byte 255.
+    fn opaque(buf: &PixelBuffer) -> PixelBuffer {
+        let mut data = buf.data.clone();
+        for pixel in data.chunks_exact_mut(4) {
+            pixel[3] = 0xFF;
+        }
+        PixelBuffer { data, ..*buf }
+    }
+
     #[test]
-    fn both_codecs_round_trip_every_pattern_losslessly() {
+    fn both_codecs_round_trip_every_pattern_to_the_same_opaque_pixels() {
         for (name, pattern) in patterns() {
             for (width, height) in sizes() {
                 let buf = pattern(width, height);
@@ -570,13 +665,63 @@ mod tests {
                     let back = decode_tile(tile.codec, &tile.data, buf.size)
                         .unwrap_or_else(|e| panic!("{name} {width}x{height}: {e:?}"));
                     assert_eq!(
-                        back, buf,
+                        back,
+                        opaque(&buf),
                         "{name} {width}x{height} must survive codec {}",
                         tile.codec
                     );
                 }
             }
         }
+    }
+
+    #[test]
+    fn raw_and_qoi_decode_a_garbage_fourth_byte_to_the_same_opaque_pixels() {
+        // Encode-2: a depth-32 window's fourth byte (0 in transparent corners, anything in
+        // between) must not make a QOI tile draw differently from a RAW one.
+        let buf = tile_buffer(16, 16, |x, y| {
+            let fourth = [0x00, 0x7F, 0xC3, 0xFF][usize::try_from((x + y) % 4).expect("small")];
+            [0x40, 0x80, u8::try_from(x / 4).expect("small"), fourth]
+        });
+        let raw = encode_tile(&buf, Encoding::Raw).expect("a valid tile encodes");
+        let qoi = encode_tile(&buf, Encoding::Qoi).expect("a valid tile encodes");
+        assert_eq!(raw.codec, Encoding::Raw.id());
+        assert_eq!(qoi.codec, Encoding::Qoi.id(), "this tile compresses");
+        let from_raw = decode_tile(raw.codec, &raw.data, buf.size).expect("RAW decodes");
+        let from_qoi = decode_tile(qoi.codec, &qoi.data, buf.size).expect("QOI decodes");
+        assert_eq!(from_raw, from_qoi);
+        assert_eq!(from_qoi, opaque(&buf));
+    }
+
+    #[test]
+    fn the_owned_form_gives_the_same_tiles_and_moves_raw_pixels() {
+        let mut all = patterns();
+        all.push(("incompressible", incompressible));
+        for (name, pattern) in all {
+            for (width, height) in sizes() {
+                let buf = pattern(width, height);
+                for prefer in [Encoding::Raw, Encoding::Qoi] {
+                    let borrowed = encode_tile(&buf, prefer).expect("a valid tile encodes");
+                    let owned = encode_tile_owned(buf.clone(), prefer).expect("a valid tile");
+                    assert_eq!(owned, borrowed, "{name} {width}x{height} {prefer:?}");
+                    // A RAW tile's payload is the moved buffer itself, not a copy of it.
+                    let moved = buf.clone();
+                    let moved_pixels = moved.data.as_ptr();
+                    let tile = encode_tile_owned(moved, prefer).expect("a valid tile encodes");
+                    if tile.codec == Encoding::Raw.id() {
+                        assert_eq!(tile.data.as_ptr(), moved_pixels, "{name}: RAW is moved");
+                    }
+                }
+            }
+        }
+        // A buffer that is not one tile is refused the same way.
+        assert_eq!(
+            encode_tile_owned(tile_buffer(257, 1, |_, _| [0; 4]), Encoding::Qoi),
+            Err(EncodeError::TileTooLarge {
+                width: 257,
+                height: 1
+            })
+        );
     }
 
     #[test]
@@ -603,48 +748,39 @@ mod tests {
     }
 
     #[test]
-    fn incompressible_noise_falls_back_to_raw() {
-        for (width, height) in sizes() {
-            let buf = noise(width, height);
+    fn an_incompressible_tile_falls_back_to_raw() {
+        for (width, height) in sizes().into_iter().chain([(1, 256), (256, 1), (120, 132)]) {
+            let buf = incompressible(width, height);
             let tile = encode_tile(&buf, Encoding::Qoi).expect("a valid tile encodes");
             assert_eq!(
                 tile.codec,
                 Encoding::Raw.id(),
-                "noise {width}x{height} must come back RAW"
+                "{width}x{height} must come back RAW"
             );
             assert_eq!(tile.data, buf.data, "the RAW fallback is the input itself");
+            // And the fallback was not vacuous: the QOI stream is exactly the worst case,
+            // 22 bytes of header and end marker over the RAW payload.
+            let qoi_len = qoi::encode(width, height, &buf.data).len();
+            assert_eq!(qoi_len, buf.data.len() + 22, "{width}x{height}");
         }
-        // And the fallback was not vacuous: the QOI stream really does grow past RAW.
-        let buf = noise(256, 256);
-        let qoi_len = qoi::encode(256, 256, &buf.data).len();
-        assert!(qoi_len > buf.data.len());
+        let tile = encode_tile(&incompressible(256, 256), Encoding::Qoi).expect("encodes");
+        assert_eq!(tile.data.len(), MAX_TILE_BYTES);
     }
 
     #[test]
-    fn an_always_rgba_image_is_the_provable_worst_case() {
-        // Alpha alternates every pixel, so every pixel needs a 5-byte RGBA chunk:
-        // 5 bytes per pixel against 4 raw, by construction, at any size.
-        let worst = tile_buffer(256, 256, |x, y| {
-            let alpha = if (x + y) % 2 == 0 { 0 } else { 255 };
-            let red = u8::try_from(x).expect("tile widths stay below 256");
-            let green = u8::try_from(y).expect("tile heights stay below 256");
-            let blue = red ^ green;
-            [blue, green, red, alpha]
-        });
-        let tile = encode_tile(&worst, Encoding::Qoi).expect("a valid tile encodes");
-        assert_eq!(tile.codec, Encoding::Raw.id());
-        assert_eq!(tile.data.len(), 256 * 256 * 4);
-        assert!(tile.data.len() <= MAX_TILE_BYTES);
-    }
+    fn the_qoi_budget_keeps_a_tie_and_never_exceeds_the_tile_cap() {
+        assert_eq!(qoi_budget(1000), 1000, "a stream as long as RAW is kept");
+        assert_eq!(qoi_budget(MAX_TILE_BYTES), MAX_TILE_BYTES);
+        assert_eq!(qoi_budget(MAX_TILE_BYTES + 1), MAX_TILE_BYTES);
 
-    #[test]
-    fn the_fallback_threshold_prefers_raw_only_when_qoi_exceeds_it() {
-        let raw = 1000;
-        assert!(!falls_back_to_raw(raw, raw), "equal size keeps QOI");
-        assert!(falls_back_to_raw(raw + 1, raw));
-        assert!(!falls_back_to_raw(raw - 1, raw));
-        assert!(!falls_back_to_raw(0, raw));
-        assert!(falls_back_to_raw(MAX_TILE_BYTES + 1, raw));
+        // The tie, end to end: one pixel's QOI stream is 26 bytes (header 14, one RGB
+        // chunk, end marker 8), so a 26-byte budget keeps it and 25 does not.
+        let pixel = [0x33, 0x22, 0x11, 0xFF];
+        assert_eq!(
+            qoi::encode_within(1, 1, &pixel, 26).map(|stream| stream.len()),
+            Some(26)
+        );
+        assert_eq!(qoi::encode_within(1, 1, &pixel, 25), None);
     }
 
     #[test]
@@ -802,22 +938,59 @@ mod tests {
         );
     }
 
+    /// Assembles a QOI stream: header, chunks, end marker.
+    fn qoi_stream(width: u32, height: u32, channels: u8, chunks: &[u8]) -> Vec<u8> {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(b"qoif");
+        stream.extend_from_slice(&width.to_be_bytes());
+        stream.extend_from_slice(&height.to_be_bytes());
+        stream.extend_from_slice(&[channels, 0]);
+        stream.extend_from_slice(chunks);
+        stream.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
+        stream
+    }
+
     #[test]
     fn decoding_restores_a_three_channel_qoi_tile_as_opaque() {
         // A hand-built 3-channel stream: one RGB pixel, then a run of one.
-        let mut stream = Vec::new();
-        stream.extend_from_slice(b"qoif");
-        stream.extend_from_slice(&2_u32.to_be_bytes());
-        stream.extend_from_slice(&1_u32.to_be_bytes());
-        stream.extend_from_slice(&[3, 0]);
-        stream.extend_from_slice(&[0xFE, 10, 20, 30, 0xC0]);
-        stream.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
+        let stream = qoi_stream(2, 1, 3, &[0xFE, 10, 20, 30, 0xC0]);
         let back = decode_tile(Encoding::Qoi.id(), &stream, Size::new(2, 1))
             .expect("a well-formed 3-channel tile decodes");
         assert_eq!(back.size, Size::new(2, 1));
         assert_eq!(back.stride, 8);
         assert_eq!(back.format, PixelFormat::Bgrx8888);
         assert_eq!(back.data, vec![30, 20, 10, 0xFF, 30, 20, 10, 0xFF]);
+
+        // Encode-5: an INDEX chunk into a slot no pixel has filled reads (0,0,0,0), and
+        // the RGB chunk after it carries that alpha 0 forward. Both come out opaque.
+        let unfilled = qoi_stream(2, 1, 3, &[0x05, 0xFE, 1, 2, 3]);
+        let back = decode_tile(Encoding::Qoi.id(), &unfilled, Size::new(2, 1))
+            .expect("an INDEX into an unfilled slot decodes");
+        assert_eq!(back.data, vec![0, 0, 0, 0xFF, 3, 2, 1, 0xFF]);
+
+        // Encode-6: an RGBA chunk in a 3-channel stream decodes, as the reference decoder
+        // decodes it, and the pixel is opaque all the same.
+        let rgba_chunk = qoi_stream(1, 1, 3, &[0xFF, 1, 2, 3, 7]);
+        let back = decode_tile(Encoding::Qoi.id(), &rgba_chunk, Size::new(1, 1))
+            .expect("an RGBA chunk in a 3-channel stream decodes");
+        assert_eq!(back.data, vec![3, 2, 1, 0xFF]);
+    }
+
+    #[test]
+    fn decoding_makes_a_four_channel_qoi_tile_opaque() {
+        // A 4-channel stream whose pixels carry alpha 0 and 128: the wire ignores alpha.
+        let stream = qoi_stream(2, 1, 4, &[0xFF, 1, 2, 3, 0, 0xFF, 4, 5, 6, 128]);
+        let back = decode_tile(Encoding::Qoi.id(), &stream, Size::new(2, 1))
+            .expect("a well-formed 4-channel tile decodes");
+        assert_eq!(back.data, vec![3, 2, 1, 0xFF, 6, 5, 4, 0xFF]);
+    }
+
+    #[test]
+    fn decoding_a_raw_tile_makes_it_opaque() {
+        let payload = [1, 2, 3, 0, 4, 5, 6, 0x80];
+        let back =
+            decode_tile(Encoding::Raw.id(), &payload, Size::new(2, 1)).expect("a RAW tile decodes");
+        assert_eq!(back.data, vec![1, 2, 3, 0xFF, 4, 5, 6, 0xFF]);
     }
 
     /// The shared `cut_into_tiles` property check: valid, aligned, ordered, covering.

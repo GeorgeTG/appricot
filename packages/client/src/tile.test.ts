@@ -99,8 +99,9 @@ describe('decodeTile: codec 1 (RAW)', () => {
 });
 
 describe('decodeTile: codec 2 (QOI)', () => {
-  it('decodes RGB, RUN, RGBA and RGB-alpha-carryover chunks', () => {
-    // 2x2, 4 channels. Pixels: red, red (run), half-transparent green, blue.
+  it('decodes RGB, RUN, RGBA and RGB-alpha-carryover chunks, and draws every pixel opaque', () => {
+    // 2x2, 4 channels. Pixels: red, red (run), green with alpha 128, blue. Every tile is opaque
+    // (v0 §11): the stream's alpha never reaches the pixels.
     const data = new Uint8Array([
       ...qoiHeader(2, 2, 4),
       0xfe, 255, 0, 0, // RGB: (255, 0, 0), alpha carries over from the initial 255.
@@ -115,8 +116,58 @@ describe('decodeTile: codec 2 (QOI)', () => {
 
     expect(Array.from(imageData.data)).toEqual([
       255, 0, 0, 255, 255, 0, 0, 255,
-      0, 255, 0, 128, 0, 0, 255, 128,
+      0, 255, 0, 255, 0, 0, 255, 255,
     ]);
+  });
+
+  it('keeps the stream alpha in the index hash while drawing opaque pixels', () => {
+    // 4x1, 4 channels. (10,10,10,0) lands in slot 22; a DIFF of +1 makes (11,11,11,0), slot 37
+    // with its alpha 0 (it would be slot 26 with alpha 255); an RGB chunk; then INDEX 37.
+    const data = new Uint8Array([
+      ...qoiHeader(4, 1, 4),
+      0xff, 10, 10, 10, 0,
+      0x7f, // QOI_OP_DIFF: +1 in every channel
+      0xfe, 200, 0, 0,
+      37, // QOI_OP_INDEX
+      ...QOI_END,
+    ]);
+    const tile: Tile = { rect: { x: 0, y: 0, width: 4, height: 1 }, codec: CODEC.QOI, data };
+
+    const { imageData } = decodeTile(tile, { width: 4, height: 1 });
+
+    expect(Array.from(imageData.data)).toEqual([
+      10, 10, 10, 255, 11, 11, 11, 255, 200, 0, 0, 255, 11, 11, 11, 255,
+    ]);
+  });
+
+  it('stores the starting pixel in the index after a leading RUN, as qoi.h does', () => {
+    // 6x1, 3 channels: a RUN of two repeats the starting (0,0,0,255), which the RUN stores at
+    // slot 53, so INDEX 53 reads it back. A DIFF of +1 makes (1,1,1,255), slot 4; an RGB chunk;
+    // INDEX 4 finds (1,1,1). Without the store, INDEX 53 would read (0,0,0,0), the DIFF would
+    // make (1,1,1,0) at slot 15, and INDEX 4 would draw black.
+    const data = new Uint8Array([
+      ...qoiHeader(6, 1, 3),
+      0xc1, 53, 0x7f, 0xfe, 9, 9, 9, 4,
+      ...QOI_END,
+    ]);
+    const tile: Tile = { rect: { x: 0, y: 0, width: 6, height: 1 }, codec: CODEC.QOI, data };
+
+    const { imageData } = decodeTile(tile, { width: 6, height: 1 });
+
+    expect(Array.from(imageData.data)).toEqual([
+      0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 1, 1, 1, 255, 9, 9, 9, 255, 1, 1, 1, 255,
+    ]);
+  });
+
+  it('draws an INDEX into a slot no pixel filled as opaque black', () => {
+    // 2x1, 3 channels: INDEX 5 reads the zero-initialized (0,0,0,0); the RGB chunk after it
+    // carries alpha 0 forward. Both pixels are drawn opaque.
+    const data = new Uint8Array([...qoiHeader(2, 1, 3), 0x05, 0xfe, 1, 2, 3, ...QOI_END]);
+    const tile: Tile = { rect: { x: 0, y: 0, width: 2, height: 1 }, codec: CODEC.QOI, data };
+
+    const { imageData } = decodeTile(tile, { width: 2, height: 1 });
+
+    expect(Array.from(imageData.data)).toEqual([0, 0, 0, 255, 1, 2, 3, 255]);
   });
 
   it('decodes INDEX chunks through the 64-slot previously-seen cache', () => {

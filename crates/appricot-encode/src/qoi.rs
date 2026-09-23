@@ -8,14 +8,21 @@
 //!
 //! Scope here:
 //!
-//! - [`encode`] always writes a 4-channel stream (colorspace 0, sRGB with linear alpha).
-//! - [`decode`] accepts 3- and 4-channel streams and is strict, because its input arrives
-//!   on the wire: bad magic, an unknown channels or colorspace byte, header dimensions
-//!   that disagree with the expected size, a truncated chunk, a missing end marker, bytes
-//!   after the end marker and chunks that overrun the declared pixel count are all
-//!   errors. A 3-channel stream decodes with alpha 255 (the wire protocol says a
-//!   3-channel tile is opaque); an RGBA chunk inside one is rejected, as the spec forbids
-//!   encoders from issuing it there.
+//! - [`encode_within`] writes a 3-channel stream (colorspace 0) of opaque pixels. The
+//!   fourth byte of a BGRX pixel is unused on the wire (docs/protocol/v0.md §11), so the
+//!   encoder ignores it and encodes every pixel with alpha 255. Alpha therefore never
+//!   changes, and no RGBA chunk is ever written. The encoder gives up, and returns
+//!   nothing, as soon as the stream outgrows the byte budget the caller names.
+//! - [`decode`] accepts 3- and 4-channel streams. It is strict about framing, because its
+//!   input arrives on the wire: bad magic, an unknown channels or colorspace byte, header
+//!   dimensions that disagree with the expected size, a truncated chunk, a missing end
+//!   marker, bytes after the end marker and chunks that overrun the declared pixel count
+//!   are all errors. The chunks themselves decode as the specification says, whatever the
+//!   channels byte says. The reference decoder reads an RGBA chunk in a 3-channel stream
+//!   too, and calls the header's colorspace "purely informative"
+//!   (<https://github.com/phoboslab/qoi/blob/master/qoi.h>, checked 2026-09-23); so does
+//!   this one. The alpha it returns is the stream's own: [`crate::decode_tile`] drops it,
+//!   because every tile is opaque.
 //!
 //! Format summary (the spec is the authority). A 14-byte header: magic `qoif`, width and
 //! height as unsigned 32-bit big-endian, one channels byte (3 RGB or 4 RGBA), one
@@ -34,8 +41,15 @@
 //!
 //! The index holds 64 pixels, starts all zero `(0,0,0,0)`, and every newly produced pixel
 //! is stored at slot `(r*3 + g*5 + b*7 + a*11) % 64`. The previous pixel starts
-//! `(0,0,0,255)`. A RUN chunk stores no index entry: it repeats a value that is already
-//! in it.
+//! `(0,0,0,255)`, and no chunk has stored it yet.
+//!
+//! The index after a RUN chunk. The decoder stores the current pixel after every chunk, a
+//! RUN chunk included, as the reference decoder does. That store changes the index only
+//! for a stream that opens with a RUN: its pixel is the starting `(0,0,0,255)`, which then
+//! lands at slot 53. Every other RUN repeats a pixel that the chunk before it has just
+//! stored. The encoder does not store on RUN, as the reference encoder does not, so it
+//! never emits an INDEX chunk that relies on that store. Its streams decode the same
+//! either way, and a stream from an encoder that does store on RUN decodes correctly here.
 
 use crate::DecodeError;
 use appricot_core::Size;
@@ -78,13 +92,14 @@ impl Pixel {
         a: 255,
     };
 
-    /// Reads a pixel from BGRX bytes (blue, green, red, unused/alpha).
-    fn from_bgrx(bytes: [u8; 4]) -> Self {
+    /// Reads an opaque pixel from BGRX bytes (blue, green, red, unused). The fourth byte is
+    /// unused on the wire, so it is ignored and the alpha is always 255.
+    fn opaque_from_bgrx(bytes: [u8; 4]) -> Self {
         Self {
             b: bytes[0],
             g: bytes[1],
             r: bytes[2],
-            a: bytes[3],
+            a: 255,
         }
     }
 
@@ -113,58 +128,91 @@ fn is_luma_small(delta: u8) -> bool {
     !(8..248).contains(&delta)
 }
 
-/// Encodes one image as a 4-channel QOI stream.
+/// The longest stream the encoder can write for `pixels` pixels: the header, four bytes per
+/// pixel and the end marker. Four is the most one pixel costs: alpha never changes, so no
+/// pixel needs the 5-byte RGBA chunk, and a RUN chunk covers at least one pixel.
+pub(crate) const fn worst_case_len(pixels: usize) -> usize {
+    HEADER_LEN + 4 * pixels + END_MARKER.len()
+}
+
+/// Encodes one image as a 3-channel QOI stream of opaque pixels, with no byte budget.
+#[cfg(test)]
+pub(crate) fn encode(width: u32, height: u32, bgrx: &[u8]) -> Vec<u8> {
+    encode_within(width, height, bgrx, usize::MAX).expect("an unlimited budget is never spent")
+}
+
+/// Encodes one image as a 3-channel QOI stream of opaque pixels, or returns `None` once the
+/// stream is longer than `budget` bytes.
 ///
 /// `bgrx` must hold exactly `width * height` pixels in BGRX byte order, as every
 /// [`PixelBuffer`](appricot_core::pixels::PixelBuffer) with format `Bgrx8888` and no
-/// stride padding does; the fourth byte of each pixel becomes the QOI alpha channel, so
-/// the round trip is byte-exact.
+/// stride padding does. The fourth byte of each pixel is ignored: the stream carries blue,
+/// green and red, and it decodes to opaque pixels.
+///
+/// The budget is checked after every row, and once more on the finished stream, so a
+/// stream of exactly `budget` bytes is returned. A stream only grows, so giving up early
+/// never drops a stream that would have fitted. The buffer is reserved once, at the
+/// longest stream the image can produce, so it is never reallocated.
 ///
 /// The chunk choice follows the spec's natural ladder: run, then index, then the smallest
 /// delta chunk that fits, then a full pixel. The output is deterministic: the same input
 /// always yields the same bytes.
-pub(crate) fn encode(width: u32, height: u32, bgrx: &[u8]) -> Vec<u8> {
-    let pixels = usize::try_from(width).expect("width fits in usize")
-        * usize::try_from(height).expect("height fits in usize");
+pub(crate) fn encode_within(
+    width: u32,
+    height: u32,
+    bgrx: &[u8],
+    budget: usize,
+) -> Option<Vec<u8>> {
+    let columns = usize::try_from(width).expect("width fits in usize");
+    let pixels = columns * usize::try_from(height).expect("height fits in usize");
     debug_assert_eq!(bgrx.len(), pixels * 4, "caller supplies exactly one tile");
 
-    let mut out = Vec::with_capacity(HEADER_LEN + pixels + END_MARKER.len());
+    let mut out = Vec::with_capacity(worst_case_len(pixels));
     out.extend_from_slice(&MAGIC);
     out.extend_from_slice(&width.to_be_bytes());
     out.extend_from_slice(&height.to_be_bytes());
-    out.push(4); // channels: RGBA
+    out.push(3); // channels: RGB, every pixel is opaque
     out.push(0); // colorspace: sRGB with linear alpha
 
     let mut index = [Pixel::TRANSPARENT; INDEX_SLOTS];
     let mut prev = Pixel::BLACK_OPAQUE;
     let mut run: u32 = 0;
-    for chunk in bgrx.chunks_exact(4) {
-        let px = Pixel::from_bgrx(chunk.try_into().expect("chunks_exact yields four bytes"));
-        if px == prev {
-            run += 1;
-            if run == MAX_RUN {
-                push_run(&mut out, run);
-                run = 0;
+    // A zero-width image has no bytes, so the row length only has to be non-zero.
+    for row in bgrx.chunks_exact(4 * columns.max(1)) {
+        for chunk in row.chunks_exact(4) {
+            let px =
+                Pixel::opaque_from_bgrx(chunk.try_into().expect("chunks_exact yields four bytes"));
+            if px == prev {
+                run += 1;
+                if run == MAX_RUN {
+                    push_run(&mut out, run);
+                    run = 0;
+                }
+            } else {
+                if run > 0 {
+                    push_run(&mut out, run);
+                    run = 0;
+                }
+                emit_pixel(&mut out, &mut index, prev, px);
             }
-        } else {
-            if run > 0 {
-                push_run(&mut out, run);
-                run = 0;
-            }
-            emit_pixel(&mut out, &mut index, prev, px);
+            prev = px;
         }
-        prev = px;
+        if out.len() > budget {
+            return None;
+        }
     }
     if run > 0 {
         push_run(&mut out, run);
     }
     out.extend_from_slice(&END_MARKER);
-    out
+    (out.len() <= budget).then_some(out)
 }
 
-/// Emits the chunk for `px`, which differs from `prev`: an index hit, a DIFF, a LUMA, a
-/// full RGB (alpha carried) or a full RGBA, whichever comes first and fits.
+/// Emits the chunk for `px`, which differs from `prev`: an index hit, a DIFF, a LUMA or a
+/// full RGB, whichever comes first and fits. Both pixels are opaque, so alpha never needs
+/// a chunk of its own.
 fn emit_pixel(out: &mut Vec<u8>, index: &mut [Pixel; INDEX_SLOTS], prev: Pixel, px: Pixel) {
+    debug_assert_eq!(px.a, prev.a, "the encoder only sees opaque pixels");
     let slot = px.index_slot();
     if index[slot] == px {
         // INDEX: the tag bits are zero, so the byte is the slot number itself.
@@ -173,10 +221,6 @@ fn emit_pixel(out: &mut Vec<u8>, index: &mut [Pixel; INDEX_SLOTS], prev: Pixel, 
     }
     index[slot] = px;
 
-    if px.a != prev.a {
-        out.extend_from_slice(&[0xFF, px.r, px.g, px.b, px.a]);
-        return;
-    }
     // Deltas as two's-complement bytes: wrapping arithmetic on u8 is exactly the spec's
     // signed arithmetic on channel values, without a single cast.
     let dr = px.r.wrapping_sub(prev.r);
@@ -211,8 +255,10 @@ fn push_run(out: &mut Vec<u8>, run: u32) {
 
 /// A decoded QOI stream: the pixels as `r, g, b, a` quadruples, row-major from the top.
 ///
-/// The dimensions always match the expected size the caller asked for; a 3-channel stream
-/// decodes with alpha 255 everywhere.
+/// The dimensions always match the expected size the caller asked for. The alpha is the
+/// decoder's running alpha, whatever the channels byte says: 255 unless an RGBA chunk
+/// changed it or an INDEX chunk read a slot that no pixel has filled. The wire ignores it
+/// ([`crate::decode_tile`] makes every pixel opaque).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Decoded {
     /// The pixels, `width * height * 4` bytes.
@@ -264,9 +310,8 @@ pub(crate) fn decode(data: &[u8], expected: Size) -> Result<Decoded, DecodeError
         let px = if b1 == 0xFE {
             read_triple(data, &mut pos, prev.a)?
         } else if b1 == 0xFF {
-            if channels == 3 {
-                return Err(DecodeError::QoiAlphaChunkInThreeChannel);
-            }
+            // Read in a 3-channel stream too, as the reference decoder does: the channels
+            // byte describes the image, it does not change how chunks decode.
             if pos + 4 > data.len() {
                 return Err(DecodeError::QoiTruncated);
             }
@@ -294,12 +339,14 @@ pub(crate) fn decode(data: &[u8], expected: Size) -> Result<Decoded, DecodeError
                 }
                 2 => read_luma(data, &mut pos, prev, b1)?,
                 _ => {
-                    // RUN: repeat the previous pixel. The index needs no update: the
-                    // value is already stored at its slot by the chunk that produced it.
+                    // RUN: repeat the previous pixel, and store it in the index like every
+                    // other chunk (see "The index after a RUN chunk" above). The store only
+                    // matters when the stream opens with a RUN.
                     let run = usize::from(b1 & 0x3F) + 1;
                     if written + run > pixels {
                         return Err(DecodeError::QoiPixelOverflow);
                     }
+                    index[prev.index_slot()] = prev;
                     for _ in 0..run {
                         rgba[written * 4..written * 4 + 4]
                             .copy_from_slice(&[prev.r, prev.g, prev.b, prev.a]);
@@ -365,7 +412,10 @@ fn read_luma(data: &[u8], pos: &mut usize, prev: Pixel, b1: u8) -> Result<Pixel,
 
 #[cfg(test)]
 mod tests {
-    use super::{Decoded, END_MARKER, HEADER_LEN, MAGIC, decode, encode};
+    use super::{
+        Decoded, END_MARKER, HEADER_LEN, INDEX_SLOTS, MAGIC, Pixel, decode, emit_pixel, encode,
+        encode_within, worst_case_len,
+    };
     use crate::DecodeError;
     use appricot_core::Size;
 
@@ -402,7 +452,7 @@ mod tests {
         expected.extend_from_slice(b"qoif");
         expected.extend_from_slice(&1_u32.to_be_bytes());
         expected.extend_from_slice(&1_u32.to_be_bytes());
-        expected.extend_from_slice(&[4, 0]);
+        expected.extend_from_slice(&[3, 0]); // 3 channels: every pixel is opaque
         expected.extend_from_slice(&[0xFE, 0x11, 0x22, 0x33]);
         expected.extend_from_slice(&END_MARKER);
         assert_eq!(out, expected);
@@ -457,12 +507,19 @@ mod tests {
     }
 
     #[test]
-    fn an_alpha_change_forces_rgba_chunks() {
-        // DIFF and LUMA carry the alpha over, so two pixels that differ only in alpha
-        // need full RGBA chunks.
+    fn the_unused_fourth_byte_is_ignored_and_no_rgba_chunk_is_written() {
+        // Two black pixels whose unused bytes differ (0x80, 0x81, not 0xFF). The fourth
+        // byte is unused on the wire, so both are opaque black, which is the starting
+        // previous pixel: one run of two, and no RGBA chunk.
         let out = encode(2, 1, &bgrx(&[[0, 0, 0, 0x80], [0, 0, 0, 0x81]]));
+        assert_eq!(out[12], 3, "a 3-channel stream");
         let chunks = &out[HEADER_LEN..out.len() - END_MARKER.len()];
-        assert_eq!(chunks, &[0xFF, 0, 0, 0, 0x80, 0xFF, 0, 0, 0, 0x81]);
+        assert_eq!(chunks, &[0xC1]);
+
+        // Whatever the fourth byte holds, the stream is the one for 0xFF.
+        let garbage = [[0x10, 0x20, 0x30, 0x00], [0x40, 0x50, 0x60, 0x7F]];
+        let opaque = [[0x10, 0x20, 0x30, 0xFF], [0x40, 0x50, 0x60, 0xFF]];
+        assert_eq!(encode(2, 1, &bgrx(&garbage)), encode(2, 1, &bgrx(&opaque)));
     }
 
     #[test]
@@ -592,20 +649,42 @@ mod tests {
             decode(&overflowing, expected),
             Err(DecodeError::QoiPixelOverflow)
         );
+    }
 
-        // An RGBA chunk inside a 3-channel stream, which the spec forbids encoders from
-        // issuing.
+    #[test]
+    fn decodes_an_rgba_chunk_in_a_three_channel_stream() {
+        // The reference decoder reads QOI_OP_RGBA whatever the channels byte says, and so
+        // does this one. The alpha becomes the running alpha: the run repeats it.
         let alpha_in_rgb = stream(2, 1, 3, &[0xFF, 1, 2, 3, 4, 0xC0]);
+        assert_eq!(decode_ok(&alpha_in_rgb, 2, 1), vec![1, 2, 3, 4, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn an_index_into_an_unfilled_slot_yields_the_zero_pixel() {
+        // The index starts all zero, and the decoder hands back what the slot holds, in a
+        // 3-channel stream as in a 4-channel one. decode_tile makes it opaque.
+        let data = stream(1, 1, 3, &[0x05]);
+        assert_eq!(decode_ok(&data, 1, 1), vec![0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn decoding_stores_the_pixel_after_a_run_chunk() {
+        // A stream that opens with a run of two repeats the starting (0,0,0,255). The
+        // decoder stores it at slot 53 after the RUN chunk, as the reference decoder does,
+        // so INDEX 53 reads it back. Without that store the slot would still be zero.
+        assert_eq!(Pixel::BLACK_OPAQUE.index_slot(), 53);
+        let data = stream(3, 1, 3, &[0xC1, 53]);
         assert_eq!(
-            decode(&alpha_in_rgb, expected),
-            Err(DecodeError::QoiAlphaChunkInThreeChannel)
+            decode_ok(&data, 3, 1),
+            vec![0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255]
         );
     }
 
     #[test]
-    fn encoded_streams_decode_back_byte_for_byte() {
-        // Every chunk type appears in this mixed image: a run, a delta chunk, a full
-        // pixel, an index hit and a full pixel with an alpha change.
+    fn encoded_streams_decode_back_to_the_opaque_pixels() {
+        // Every chunk the encoder writes appears in this mixed image: a run, a delta chunk,
+        // a full pixel and an index hit. The last pixel's unused byte is not 0xFF, and it
+        // is ignored.
         let mut pixels = Vec::new();
         pixels.extend([[0_u8, 0, 0, 0xFF]; 40]); // run (equals the initial previous pixel)
         pixels.push([1, 2, 3, 0xFF]); // a delta chunk
@@ -613,14 +692,289 @@ mod tests {
         pixels.push([2, 2, 3, 0xFF]); // a smaller delta chunk
         pixels.push([40, 60, 70, 0xFF]); // a full pixel (deltas too large)
         pixels.push([1, 2, 3, 0xFF]); // an index hit (seen above)
-        pixels.push([0, 0, 0, 0x80]); // a full pixel with an alpha change
+        pixels.push([9, 8, 7, 0x80]); // a full pixel whose unused byte is 0x80
         let width = u32::try_from(pixels.len()).expect("a one-row image");
         let bgrx_pixels = pixels;
         let out = encode(width, 1, &bgrx(&bgrx_pixels));
         let Decoded { rgba } =
             decode(&out, Size::new(width, 1)).expect("a well-formed stream decodes");
         for (source, decoded) in bgrx_pixels.iter().zip(rgba.chunks_exact(4)) {
-            assert_eq!(decoded, [source[2], source[1], source[0], source[3]]);
+            assert_eq!(decoded, [source[2], source[1], source[0], 0xFF]);
         }
+    }
+
+    /// One delta step: the previous pixel, the next one, and the chunk tag the encoder
+    /// must pick for it.
+    struct Step {
+        what: &'static str,
+        prev: [u8; 3],
+        next: [u8; 3],
+        tag: Tag,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Tag {
+        Diff,
+        Luma,
+        Rgb,
+    }
+
+    /// An opaque pixel from red, green and blue.
+    fn rgb(channels: [u8; 3]) -> Pixel {
+        Pixel {
+            r: channels[0],
+            g: channels[1],
+            b: channels[2],
+            a: 255,
+        }
+    }
+
+    /// Adds a signed delta to a channel, wrapping as the spec's arithmetic does.
+    fn plus(value: u8, delta: i16) -> u8 {
+        let wrapped = (i16::from(value) + delta).rem_euclid(256);
+        u8::try_from(wrapped).expect("rem_euclid(256) is a byte")
+    }
+
+    /// The steps at the exact edges of the DIFF and LUMA ranges, and one past each edge.
+    fn edge_steps() -> Vec<Step> {
+        let base = [100_u8, 100, 100];
+        let mut steps = Vec::new();
+        // DIFF: -2..=1 in each channel on its own; -3 and +2 fall to LUMA.
+        for channel in 0..3 {
+            for (delta, tag) in [
+                (-2, Tag::Diff),
+                (1, Tag::Diff),
+                (-3, Tag::Luma),
+                (2, Tag::Luma),
+            ] {
+                let mut next = base;
+                next[channel] = plus(base[channel], delta);
+                steps.push(Step {
+                    what: "diff edge",
+                    prev: base,
+                    next,
+                    tag,
+                });
+            }
+        }
+        // LUMA green: -32..=31 with red and blue following green; -33 and +32 fall to RGB.
+        for (delta, tag) in [
+            (-32, Tag::Luma),
+            (31, Tag::Luma),
+            (-33, Tag::Rgb),
+            (32, Tag::Rgb),
+        ] {
+            let value = plus(100, delta);
+            steps.push(Step {
+                what: "luma green edge",
+                prev: base,
+                next: [value, value, value],
+                tag,
+            });
+        }
+        // LUMA red- and blue-minus-green: -8..=7 around a green step of +10; -9 and +8
+        // fall to RGB.
+        for channel in [0, 2] {
+            for (delta, tag) in [
+                (-8, Tag::Luma),
+                (7, Tag::Luma),
+                (-9, Tag::Rgb),
+                (8, Tag::Rgb),
+            ] {
+                let mut next = [110, 110, 110];
+                next[channel] = plus(110, delta);
+                steps.push(Step {
+                    what: "luma red/blue edge",
+                    prev: base,
+                    next,
+                    tag,
+                });
+            }
+        }
+        // Wraparound: 255 -> 0 is +1 and 0 -> 255 is -1, both DIFF; 250 -> 20 in every
+        // channel is a green step of +26, LUMA.
+        steps.push(Step {
+            what: "diff wraps up",
+            prev: [255, 255, 255],
+            next: [0, 0, 0],
+            tag: Tag::Diff,
+        });
+        steps.push(Step {
+            what: "diff wraps down",
+            prev: [0, 0, 0],
+            next: [255, 255, 255],
+            tag: Tag::Diff,
+        });
+        steps.push(Step {
+            what: "luma wraps",
+            prev: [250, 250, 250],
+            next: [20, 20, 20],
+            tag: Tag::Luma,
+        });
+        steps
+    }
+
+    #[test]
+    fn delta_chunks_are_chosen_exactly_at_their_range_edges() {
+        for step in edge_steps() {
+            let (prev, next) = (rgb(step.prev), rgb(step.next));
+            let mut out = Vec::new();
+            let mut index = [Pixel::TRANSPARENT; INDEX_SLOTS];
+            emit_pixel(&mut out, &mut index, prev, next);
+            let tag = match (out.first(), out.len()) {
+                (Some(&byte), 1) if byte >> 6 == 1 => Tag::Diff,
+                (Some(&byte), 2) if byte >> 6 == 2 => Tag::Luma,
+                (Some(&0xFE), 4) => Tag::Rgb,
+                other => panic!("{}: unexpected chunk {other:?} ({out:?})", step.what),
+            };
+            assert_eq!(
+                tag, step.tag,
+                "{}: {:?} -> {:?}",
+                step.what, step.prev, step.next
+            );
+
+            // And the chunk decodes back to the exact pixel: a full RGB chunk sets the
+            // previous pixel, the chunk under test follows it.
+            let mut chunks = vec![0xFE, prev.r, prev.g, prev.b];
+            chunks.extend_from_slice(&out);
+            let rgba = decode_ok(&stream(2, 1, 3, &chunks), 2, 1);
+            assert_eq!(
+                rgba[4..],
+                [next.r, next.g, next.b, 255],
+                "{}: {:?} -> {:?} must decode back",
+                step.what,
+                step.prev,
+                step.next
+            );
+        }
+    }
+
+    /// A tiny deterministic PRNG (xorshift32).
+    struct XorShift32(u32);
+
+    impl XorShift32 {
+        fn next(&mut self) -> u32 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            self.0 = x;
+            x
+        }
+
+        /// A value in `0..bound`, for small bounds.
+        fn below(&mut self, bound: u32) -> u32 {
+            self.next() % bound
+        }
+
+        fn byte(&mut self) -> u8 {
+            u8::try_from(self.next() & 0xFF).expect("masked to a byte")
+        }
+    }
+
+    /// A seeded image of UI-like content: runs, small and large steps, pixels repeated
+    /// from earlier, and unused bytes that are not 0xFF.
+    fn random_image(rng: &mut XorShift32, pixels: usize) -> Vec<u8> {
+        let mut seen: Vec<[u8; 3]> = Vec::new();
+        let mut current = [rng.byte(), rng.byte(), rng.byte()];
+        let mut out = Vec::with_capacity(pixels * 4);
+        while out.len() < pixels * 4 {
+            match rng.below(6) {
+                // A run of the current colour.
+                0 => {}
+                // A small step, inside DIFF or LUMA or just outside.
+                1 | 2 => {
+                    let green = i16::try_from(rng.below(70)).expect("small") - 35;
+                    let red = green + i16::try_from(rng.below(20)).expect("small") - 10;
+                    let blue = green + i16::try_from(rng.below(20)).expect("small") - 10;
+                    current = [
+                        plus(current[0], red),
+                        plus(current[1], green),
+                        plus(current[2], blue),
+                    ];
+                }
+                // A colour seen before, likely still in the index.
+                3 if !seen.is_empty() => {
+                    let pick = usize::try_from(
+                        rng.below(u32::try_from(seen.len().min(64)).expect("small")),
+                    )
+                    .expect("small");
+                    current = seen[seen.len() - 1 - pick];
+                }
+                // A jump anywhere.
+                _ => current = [rng.byte(), rng.byte(), rng.byte()],
+            }
+            seen.push(current);
+            // Mostly short repeats; one in eight is long enough to cross a 62-pixel run.
+            let long = rng.below(8) == 0;
+            let repeat = 1 + rng.below(if long { 130 } else { 3 });
+            for _ in 0..repeat {
+                if out.len() == pixels * 4 {
+                    break;
+                }
+                let unused = if rng.below(4) == 0 { rng.byte() } else { 0xFF };
+                out.extend_from_slice(&[current[2], current[1], current[0], unused]);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn seeded_random_images_round_trip_through_encode_and_decode() {
+        let mut rng = XorShift32(0x0BAD_5EED);
+        for iteration in 0..300 {
+            let width = 1 + rng.below(256);
+            let height = 1 + rng.below(if iteration % 10 == 0 { 256 } else { 16 });
+            let pixels = usize::try_from(width * height).expect("fits");
+            let image = random_image(&mut rng, pixels);
+            let out = encode(width, height, &image);
+            assert!(
+                out.len() <= worst_case_len(pixels),
+                "{width}x{height}: over the bound"
+            );
+            let rgba = decode_ok(&out, width, height);
+            for (index, (source, decoded)) in
+                image.chunks_exact(4).zip(rgba.chunks_exact(4)).enumerate()
+            {
+                assert_eq!(
+                    decoded,
+                    [source[2], source[1], source[0], 0xFF],
+                    "iteration {iteration}, {width}x{height}, pixel {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_budget_stops_the_encoder_and_a_tie_is_kept() {
+        let pixels: Vec<[u8; 4]> = (0..64_u8)
+            .map(|i| [i.wrapping_mul(37), i, 200, 0xFF])
+            .collect();
+        let image = bgrx(&pixels);
+        let full = encode(64, 1, &image);
+        assert_eq!(
+            encode_within(64, 1, &image, full.len()).as_deref(),
+            Some(full.as_slice()),
+            "a stream of exactly the budget is kept"
+        );
+        assert_eq!(encode_within(64, 1, &image, full.len() - 1), None);
+        assert_eq!(encode_within(64, 1, &image, 0), None);
+    }
+
+    #[test]
+    fn the_worst_case_is_four_bytes_a_pixel() {
+        // Every pixel differs from the one before by 128 in green (outside DIFF and LUMA),
+        // the first one included (red 77 is far from the starting black), and no pixel
+        // repeats, so every pixel is a full RGB chunk.
+        let pixels: Vec<[u8; 4]> = (0..200_u8)
+            .map(|i| [i, if i.is_multiple_of(2) { 0 } else { 128 }, 77, 0xFF])
+            .collect();
+        let out = encode(200, 1, &bgrx(&pixels));
+        assert_eq!(out.len(), worst_case_len(200));
+        assert_eq!(
+            out.capacity(),
+            worst_case_len(200),
+            "reserved once, never grown"
+        );
     }
 }

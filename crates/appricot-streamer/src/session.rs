@@ -85,6 +85,10 @@ pub enum SessionEnd<B> {
     /// The session is over (a `Bye` was exchanged, or the display died); the backend was
     /// dropped with it and nothing can be served again.
     Ended,
+    /// The handshake was refused — a bad token, an unsupported version, or no `Hello` at all —
+    /// so no session ever existed and nothing was claimed. The caller puts the backend back and
+    /// the next client may try again: a mistyped token costs a retry, not the process.
+    Refused(Start<B>),
 }
 
 /// A session that outlives its socket, waiting out the resume grace.
@@ -175,7 +179,9 @@ where
     };
 
     match handshake(&mut sink, &mut stream, &config, &mut pump).await {
-        Handshake::Rejected => SessionEnd::Ended,
+        // Nothing was claimed: the session begins with an accepted `Hello`, so a refused
+        // handshake hands the backend straight back (see `SessionEnd::Refused`).
+        Handshake::Rejected => SessionEnd::Refused(unclaim(pump)),
         Handshake::Accepted {
             resume_serial,
             session_id,
@@ -212,6 +218,30 @@ struct Pump<B> {
     /// The instant this pump started; every monotonic millisecond handed to the session is
     /// measured from here.
     started: tokio::time::Instant,
+}
+
+/// Hands an unclaimed backend back after a refused handshake.
+///
+/// A fresh backend is still fresh — no session ever touched it. A parked session is still
+/// parked, and its session state is untouched: the refusal happened before the authenticated
+/// `Hello` that is the only thing able to change it. The grace is re-armed in full, so a
+/// client that keeps refusing handshakes extends a parked session by one window per attempt;
+/// that is bounded by the same rate as any other request and buys the retry that matters.
+fn unclaim<B>(pump: Pump<B>) -> Start<B>
+where
+    B: CaptureBackend + InputSink + Send + 'static,
+{
+    if pump.parked_resume_serial == 0 {
+        Start::Fresh(pump.backend)
+    } else {
+        Start::Resume(ParkedSession {
+            session: pump.session,
+            backend: pump.backend,
+            resume_serial: pump.parked_resume_serial,
+            grace: Duration::from_millis(u64::from(crate::config::resume_grace_ms())),
+            fatal: pump.parked_fatal,
+        })
+    }
 }
 
 /// The outcome of the auth gate.
@@ -347,6 +377,38 @@ async fn handshake(
     }
 }
 
+/// Applies one feed item: events into the session, then whatever frames they call for.
+///
+/// [`Flow::Stop`] means the session is over — the display died, or the wire failed.
+async fn apply_feed<B>(
+    feed: Option<Feed>,
+    sink: &mut WsSink,
+    pump: &mut Pump<B>,
+    session_id: &str,
+) -> Flow
+where
+    B: CaptureBackend + InputSink + Send + 'static,
+{
+    match feed {
+        // The display died: nothing can be served again (no park; the backend is gone).
+        None | Some(Feed::Fatal(_)) => {
+            let _ = send_bye(sink, ByeReason::ByeServerShutdown, "the display died").await;
+            tracing::error!(session = %session_id, "display dead; session ended");
+            Flow::Stop
+        }
+        Some(Feed::Events(events)) => {
+            let mut out = Vec::new();
+            for event in events {
+                pump.session.apply_event(event, &mut out);
+            }
+            if emit_events(sink, pump, &out).await == Flow::Stop {
+                return Flow::Stop;
+            }
+            pump_frames(sink, pump).await
+        }
+    }
+}
+
 /// The steady state: one select over the socket and the backend's feed.
 async fn steady<B>(
     sink: &mut WsSink,
@@ -360,33 +422,31 @@ where
 {
     tracing::info!(session = %session_id, "session started");
     loop {
+        // The display gets a look on every iteration, before the socket: the `biased` select
+        // below polls the socket first, and a client that talks without pause — a pointer
+        // being moved — leaves it ready every time, so the feed starved and the stream
+        // collapsed to about one frame per second while the pointer moved, catching up only
+        // in the pauses (measured 2026-09-22: 169 pointer moves in 1.5 s produced 2 frames,
+        // trailing lag 168 ms). That is the delay a user feels as a lagging pointer. A feed
+        // batch is finite, so the socket is served as soon as the batch is applied.
+        let ready = pump.backend.drain_feed();
+        if !ready.is_empty() {
+            for feed in ready {
+                if apply_feed(Some(feed), sink, &mut pump, &session_id).await == Flow::Stop {
+                    return SessionEnd::Ended;
+                }
+            }
+            continue;
+        }
+
         let from_client = tokio::select! {
             biased;
             message = stream.next() => message,
             feed = pump.backend.next_feed() => {
-                match feed {
-                    // The display died: nothing can be served again (no park; the backend
-                    // is gone).
-                    None | Some(Feed::Fatal(_)) => {
-                        let _ =
-                            send_bye(sink, ByeReason::ByeServerShutdown, "the display died").await;
-                        tracing::error!(session = %session_id, "display dead; session ended");
-                        return SessionEnd::Ended;
-                    }
-                    Some(Feed::Events(events)) => {
-                        let mut out = Vec::new();
-                        for event in events {
-                            pump.session.apply_event(event, &mut out);
-                        }
-                        if emit_events(sink, &mut pump, &out).await == Flow::Stop {
-                            return SessionEnd::Ended;
-                        }
-                        if pump_frames(sink, &mut pump).await == Flow::Stop {
-                            return SessionEnd::Ended;
-                        }
-                        continue;
-                    }
+                if apply_feed(feed, sink, &mut pump, &session_id).await == Flow::Stop {
+                    return SessionEnd::Ended;
                 }
+                continue;
             }
         };
 

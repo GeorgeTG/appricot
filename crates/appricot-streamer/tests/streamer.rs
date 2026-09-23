@@ -234,6 +234,39 @@ async fn a_wrong_token_closes_with_bye_auth_failed() {
 }
 
 #[tokio::test]
+async fn a_refused_handshake_does_not_consume_the_session() {
+    let server = spawn_server().await;
+    server.state.set_ready();
+
+    // A mistyped token first: the server answers BYE_AUTH_FAILED and closes the socket.
+    let mut wrong = connect(&server).await;
+    let typo = envelope(Body::Hello(Hello {
+        protocol_version: 0,
+        client_name: "integration-test".into(),
+        stream_token: b"not-the-token".to_vec(),
+        codecs: vec![],
+        resume_serial: None,
+    }));
+    send(&mut wrong, &typo).await;
+    match read_body(&mut wrong).await {
+        Body::Bye(b) => assert_eq!(b.reason, ByeReason::ByeAuthFailed as i32),
+        other => panic!("expected Bye BYE_AUTH_FAILED, got {other:?}"),
+    }
+    drop(wrong);
+
+    // The refusal claimed nothing — the session belongs to an authenticated Hello — so the
+    // retry with the right token is served. Before this rule held the upgrade alone claimed
+    // the session, and one typo left the process refusing every later upgrade with 503
+    // (measured 2026-09-21).
+    let mut retry = connect_with_retry(&server).await;
+    send(&mut retry, &hello(vec![], None)).await;
+    let Body::HelloReply(reply) = read_body(&mut retry).await else {
+        panic!("expected a HelloReply, not a refusal");
+    };
+    assert!(!reply.resumed, "the retry is a fresh session, not a resume");
+}
+
+#[tokio::test]
 async fn an_unsupported_version_closes_with_bye_protocol_version() {
     let server = spawn_server().await;
     server.state.set_ready();

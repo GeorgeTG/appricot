@@ -14,6 +14,11 @@
 //! end or an expired grace the backend is torn down and every further upgrade is refused: the
 //! display connection belongs to the one session this process serves.
 //!
+//! The session is claimed by an **authenticated `Hello`**, not by the upgrade. The slot is taken
+//! before the upgrade only so two upgraders cannot both proceed; a handshake the server refuses
+//! (a bad token, an unsupported version, no `Hello` at all) hands it straight back, so a
+//! mistyped token costs a retry rather than the process, and a probe cannot brick the streamer.
+//!
 //! The server binds `127.0.0.1` or a unix socket, nothing else; [`crate::config::parse_bind`]
 //! enforces that before any listener exists.
 
@@ -105,7 +110,8 @@ async fn session_upgrade<B>(
 where
     B: CaptureBackend + InputSink + Send + 'static,
 {
-    // Take the slot before the upgrade: whoever wins the mutex owns the one session.
+    // Take the slot before the upgrade: whoever wins the mutex owns the one session. A
+    // handshake the server then refuses hands it back (see `SessionEnd::Refused`).
     let taken = {
         let mut slot = state.slot.lock().expect("the session slot is not poisoned");
         if matches!(*slot, Slot::Idle(_) | Slot::Parked(_)) {
@@ -165,6 +171,19 @@ where
         session::SessionEnd::Ended => {
             *slot = Slot::Dead;
         }
+        // No session was ever claimed: put the backend back where it came from, so the next
+        // client is served instead of meeting a dead process. Without this, the upgrade alone
+        // claimed the one session — a mistyped token, a port scan or a probe bricked the
+        // streamer for good (measured 2026-09-21).
+        session::SessionEnd::Refused(start) => match start {
+            Start::Fresh(backend) => *slot = Slot::Idle(backend),
+            Start::Resume(parked) => {
+                let grace = parked.grace;
+                *slot = Slot::Parked(parked);
+                drop(slot);
+                tokio::spawn(grace_keeper::<B>(Arc::clone(state), grace));
+            }
+        },
     }
 }
 

@@ -22,7 +22,14 @@ const portArg = Number(process.env['APPRICOT_DEMO_PORT'] ?? DEFAULT_PORT);
 const port = Number.isInteger(portArg) && portArg >= 0 && portArg <= 65535 ? portArg : DEFAULT_PORT;
 
 try {
-  const running = await startDemoServer({ port, host: '0.0.0.0' });
+  const running = await startDemoServer({
+    port,
+    host: '0.0.0.0',
+    // The proxy's per-session lines are the demo's only eye on streamer refusals (the
+    // streamer itself logs nothing per connection); without this they were silently
+    // swallowed (measured 2026-09-21).
+    onLog: (line) => console.log(`[demo] ${line}`),
+  });
   console.log(
     `appricot demo: http://127.0.0.1:${running.port}/ ` +
       '(token from the page input field; streamer proxied on 127.0.0.1:8391)',

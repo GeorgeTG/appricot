@@ -4,10 +4,11 @@
 
   Runs under a strict CSP with no 'unsafe-inline' and no 'unsafe-eval' in script-src
   (ADR-0003 §3), so: no inline styles, no inline scripts, no inline event handlers — the
-  stylesheet is external, the one script is external, and all wiring happens through
-  addEventListener in src/main.ts. The <script type="importmap"> block below is data, not
-  code: the browser parses it as a resolution table and never executes it, so it is not a
-  CSP concern.
+  stylesheet is external, the page's script is external, and all wiring happens through
+  addEventListener in src/main.ts. Not even an import map: Chromium applies script-src to
+  inline import maps (measured 2026-09-21 — a plain 'self' policy blocks the map and no
+  page script runs), so the server rewrites the page modules' one bare specifier,
+  '@appricot/client', to the /client/index.js URL it serves (see src/server.ts).
 -->
 <html lang="en">
   <head>
@@ -15,13 +16,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>APPricot demo</title>
     <link rel="stylesheet" href="/styles.css" />
-    <script type="importmap">
-      {
-        "imports": {
-          "@appricot/client": "/client/index.js"
-        }
-      }
-    </script>
     <script type="module" src="/dist/main.js"></script>
   </head>
   <body>

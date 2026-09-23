@@ -12,32 +12,40 @@
  *   /dist/*      -> packages/demo/dist       (the page's own modules)
  *   /client/*    -> packages/client/dist     (@appricot/client, ESM)
  *   /react/*     -> packages/react/dist      (@appricot/react, ESM)
- *   /vendor/*    -> the import map's node_modules files (see VENDOR_FILES — empty, measured)
+ *   /vendor/*    -> node_modules files an import map would have named (see VENDOR_FILES —
+ *                   empty, measured; the map itself is gone, see sendDistModule)
  *   /session     -> proxied to 127.0.0.1:8391 (WebSocket upgrade AND plain requests)
  *   /readyz      -> proxied to 127.0.0.1:8391
  *
  * Every response this server emits — static hits, 404s, 405s, proxied replies and the 101 of a
  * proxied WebSocket upgrade — carries the strict CSP of ADR-0003 §3: no 'unsafe-inline', no
- * 'unsafe-eval', so the page's styles live in a .css file and its scripts are external.
+ * 'unsafe-eval', so the page's styles live in a .css file, its scripts are external, and even
+ * the import map is gone — the page's modules get their bare specifier rewritten at serve
+ * time (see sendDistModule), because nothing inline may stay inline.
  */
 
 import { Agent, createServer, request as httpRequest } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
-import { createReadStream, existsSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync } from 'node:fs';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** The Content-Security-Policy every response carries (ADR-0003 §3). */
+/** The Content-Security-Policy every response carries (ADR-0003 §3): no 'unsafe-inline',
+ *  no 'unsafe-eval' — and nothing inline to allow. The page's stylesheet, scripts and the
+ *  modules those import are all same-origin URLs; the one bare specifier its modules use
+ *  is rewritten at serve time (see `sendDistModule`), so no import map exists. */
 export const CSP =
   "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; " +
   "img-src 'self' data: blob:; frame-ancestors 'none'";
 
 /**
- * The exact node_modules files the page's import map would name. EMPTY, on a measurement:
+ * The exact node_modules files an import map would have named. EMPTY, on a measurement:
  * react 19.3.0, react-dom 19.3.0 and scheduler 0.28.0 (pnpm-lock) ship CommonJS only — no
  * .mjs, no ESM entries — and a browser cannot execute `module.exports` under
- * `script-src 'self'` without a require() shim nobody should hand-write. The demo therefore
- * runs client-only (@appricot/client via the import map); @appricot/react stays a declared
+ * `script-src 'self'` without a require() shim nobody should hand-write. The import map
+ * itself was later removed outright (see `sendDistModule`): the page's modules get their
+ * bare specifier rewritten at serve time instead, so nothing inline remains. The demo
+ * runs client-only (@appricot/client under /client/); @appricot/react stays a declared
  * dependency and is served under /react/ for a later bundler-backed showcase, but the page
  * never imports it. If an ESM-capable runtime lands, list the exact files here.
  */
@@ -245,6 +253,30 @@ function sendFile(res: ServerResponse, resolved: ResolvedStatic, method: string)
   stream.pipe(res);
 }
 
+/** The one bare specifier the page's own modules import the client under, single- or
+ *  double-quoted. Rewritten to the URL this server serves it under; a rewrite, not an
+ *  import map, because Chromium applies script-src to inline import maps (measured
+ *  2026-09-21: under a plain 'self' policy the map is blocked, `@appricot/client` then
+ *  fails to resolve and no page script runs at all, and neither the block's sha256 nor a
+ *  per-response nonce made this browser accept it). The rewrite keeps the source — and
+ *  its tests, which mock '@appricot/client' by name — on the workspace name. */
+const CLIENT_SPECIFIER = /(['"])@appricot\/client\1/g;
+
+/** Sends one of the page's own modules (/dist/*.js) with its bare client specifier
+ *  rewritten to the served URL. Plain text in, plain text out; HEAD gets no body. */
+function sendDistModule(res: ServerResponse, resolved: ResolvedStatic, method: string): void {
+  const body = readFileSync(resolved.file, 'utf8').replace(
+    CLIENT_SPECIFIER,
+    '$1/client/index.js$1',
+  );
+  res.writeHead(200, {
+    ...securityHeaders(),
+    'content-type': resolved.contentType,
+    'content-length': String(Buffer.byteLength(body)),
+  });
+  res.end(method === 'HEAD' ? undefined : body);
+}
+
 /** The proxied paths: the WebSocket session and the streamer's readiness probe. */
 function isProxied(pathname: string): boolean {
   return pathname === '/session' || pathname === '/readyz';
@@ -336,8 +368,12 @@ function proxyUpgrade(
     onLog('session websocket proxied');
   });
   // The streamer answered the upgrade with a plain response: relay its head, then end both
-  // sides — nothing sensible can follow a refused upgrade.
+  // sides — nothing sensible can follow a refused upgrade. The status is logged because the
+  // streamer itself is silent per connection: a refused upgrade is the only place the demo's
+  // log shows what the session endpoint said (measured 2026-09-21: this line was the missing
+  // eye on the one-shot 503s).
   upstream.on('response', (upRes) => {
+    onLog(`session websocket upgrade refused with ${upRes.statusCode ?? '?'}`);
     const lines = [`HTTP/1.1 ${upRes.statusCode ?? 502} ${upRes.statusMessage ?? ''}`.trimEnd()];
     for (const [name, value] of Object.entries(upRes.headers)) {
       if (value !== undefined) {
@@ -401,6 +437,10 @@ export function createDemoServer(options: DemoServerOptions = {}): Server {
     const resolved = resolveStatic(roots, pathname);
     if (resolved === null) {
       sendText(res, 404, 'not found', method);
+      return;
+    }
+    if (pathname.startsWith('/dist/') && extname(resolved.file) === '.js') {
+      sendDistModule(res, resolved, method);
       return;
     }
     sendFile(res, resolved, method);

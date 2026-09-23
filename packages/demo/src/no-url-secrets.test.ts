@@ -78,7 +78,9 @@ describe('the demo page never consults its URL or cookies for the token', () => 
     // whitespace keeps ordinary attributes ('content=') out of the match.
     expect(/\son[a-z]+\s*=/i.test(html)).toBe(false);
     expect(/\sstyle\s*=/i.test(html)).toBe(false);
-    // The only script tags allowed are the external module and the (non-executed) import map.
-    expect(/<script(?![^>]*type=["'](module|importmap)["'])[^>]*>/i.test(html)).toBe(false);
+    // The only script tag allowed is the external module — not even an import map:
+    // Chromium applies script-src to inline import maps (measured 2026-09-21), and this
+    // page keeps its CSP at plain 'self' with nothing inline at all.
+    expect(/<script(?![^>]*type=["']module["'])[^>]*>/i.test(html)).toBe(false);
   });
 });

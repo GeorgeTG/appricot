@@ -43,7 +43,7 @@ beforeAll(async () => {
   mkdirSync(roots.reactDist, { recursive: true });
   writeFileSync(join(roots.demoRoot, 'index.html'), '<!doctype html><title>fixture page</title>');
   writeFileSync(join(roots.demoRoot, 'styles.css'), 'body { margin: 0 }');
-  writeFileSync(join(roots.demoDist, 'main.js'), 'export const MAIN = 1;\n');
+  writeFileSync(join(roots.demoDist, 'main.js'), "import { CLIENT } from '@appricot/client';\nexport const MAIN = 1;\n");
   mkdirSync(join(roots.demoDist, 'wm'), { recursive: true });
   writeFileSync(join(roots.demoDist, 'wm', 'windows.js'), 'export const WINDOWS = 2;\n');
   writeFileSync(join(roots.clientDist, 'index.js'), 'export const CLIENT = 3;\n');
@@ -151,6 +151,17 @@ describe('the static path mapping table', () => {
     const res = await fetch(url('/dist/wm/windows'));
     expect(res.status).toBe(200);
     expect(await res.text()).toContain('WINDOWS');
+  });
+
+  it("rewrites the page modules' bare client specifier to the served URL", async () => {
+    // No import map exists (Chromium blocks inline maps under a plain 'self' CSP — measured
+    // 2026-09-21), so /dist/*.js is served with '@appricot/client' spelled as /client/index.js.
+    const res = await fetch(url('/dist/main.js'));
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).not.toContain('@appricot/client');
+    expect(text).toContain("from '/client/index.js'");
+    expect(text).toContain('export const MAIN = 1;');
   });
 
   it('rejects any traversal segment the resolver itself can see', () => {

@@ -49,6 +49,9 @@ services:
         # checks Debian's signatures, so a mirror cannot forge a package.
         DEBIAN_MIRROR: ${APPRICOT_DEBIAN_MIRROR:-deb.debian.org}
     image: appricot-dev:local
+    # The image is amd64-only (docker/dev/Dockerfile says why). This applies to the build and
+    # to every run, so an arm64 host builds and runs it under emulation.
+    platform: linux/amd64
     # tini as PID 1: it forwards Ctrl-C to the command and reaps Xvfb and test children.
     init: true
     working_dir: /work

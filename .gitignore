@@ -9,3 +9,15 @@ coverage/
 
 # Local secrets and overrides. Never commit them.
 .env
+.env.*
+
+# Manual end-to-end artefacts: screenshots and captures. Write them under artifacts/; the
+# e2e-shot-*.png pattern covers the ones already taken at the root.
+/artifacts/
+/e2e-shot-*.png
+
+# Logs and OS clutter. Editor and tool directories belong in your global excludes file
+# (git config core.excludesFile), not here.
+*.log
+.DS_Store
+Thumbs.db

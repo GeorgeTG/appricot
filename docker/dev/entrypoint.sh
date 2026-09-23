@@ -21,7 +21,8 @@
 #
 #   -e APPRICOT_XVFB=0    no X server at all. DISPLAY is left exactly as it arrived, which
 #                         for a plain `docker compose run` means unset. That is how you prove
-#                         the X11 test fails loudly instead of skipping.
+#                         the X11 test fails loudly instead of skipping; `just display-levers`
+#                         proves it, and both levers, on every `just check`.
 #   -e DISPLAY=<value>    the caller names the display. No Xvfb is started and DISPLAY is used
 #                         as given, empty included. Passing an empty DISPLAY is the same as
 #                         asking for no X server.

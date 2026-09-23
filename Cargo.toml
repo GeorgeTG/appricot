@@ -60,7 +60,7 @@ appricot-x11 = { path = "crates/appricot-x11" }
 # `composite` and `damage` pull in `xfixes`; `xfixes` pulls in `render` and `shape`.
 # The S1 backend will also need `shm` (pixels fetched through shared memory rather than the
 # socket), `randr` (screen geometry) and `xkb` (the keymap); they are added when code uses them.
-x11rb = { version = "=0.14.0", features = ["composite", "damage", "xfixes", "xtest", "randr"] }
+x11rb = { version = "=0.14.0", features = ["composite", "damage", "xfixes", "xtest"] }
 
 # --- wire protocol (protobuf) and the streamer server ---------------------------------------
 # Versions below are resolved by `just lock` and gated by `just deny` (the permissive allow
@@ -138,3 +138,17 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# ---------------------------------------------------------------------------
+# Release profile: overflow checks stay ON. Cargo's release default is `overflow-checks = false`
+# (https://doc.rust-lang.org/cargo/reference/profiles.html, checked 2026-09-23), and then an
+# overflow wraps silently where the tests, built with the dev profile, would have panicked.
+# Sizes and counts here come from X clients and from the wire, both untrusted, so in release a
+# wrapped size could pass a bounds check that the tests see fail. With the checks on, release
+# fails the way the tests do: a panic, never a wrong number. The crates already use checked,
+# saturating or wrapping arithmetic where overflow is expected; this setting covers the
+# arithmetic nobody expected to overflow. Turn it off only when a measurement shows it costs,
+# and say so here.
+# ---------------------------------------------------------------------------
+[profile.release]
+overflow-checks = true

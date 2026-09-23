@@ -191,7 +191,8 @@ page under a strict CSP; the hostile-server fixture; decoder fuzz tests on both 
 - L2 and L3 are written down
   ([architecture](docs/architecture.md), [roadmap](docs/roadmap.md)) and deliberately not
   scaffolded: write them down first.
-- There is no npm licence gate yet; ADR-0002 §2 asks for one.
+- The npm licence gate covers the production graph only. Whether devDependencies are gated too
+  is open; ADR-0002 would need an amendment first.
 
 ## Licence
 

@@ -1,4 +1,4 @@
-# The npm workspace: @appricot/client and @appricot/react.
+# The npm workspace: @appricot/client, @appricot/react and the dev-only @appricot/demo.
 # Versions are pinned exactly in each package.json, checked on registry.npmjs.org on
 # 2026-09-19. Since pnpm 10.0.0, "Lifecycle scripts of dependencies are not executed during
 # installation by default" (https://github.com/pnpm/pnpm/releases/tag/v10.0.0, checked

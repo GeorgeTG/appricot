@@ -11,8 +11,9 @@
 # (https://crates.io/api/v1/crates/cargo-deny, checked 2026-09-19).
 # Schema reference: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
 #
-# The npm graph needs its own licence gate (ADR-0002 §2: "Both graphs are gated"). This file
-# does not cover it.
+# The npm graph has its own licence gate (ADR-0002 §2: "Both graphs are gated"):
+# scripts/web-licences.mjs, run by `just web-licences`. Its Tier A list must equal `allow`
+# below; scripts/web-licences.test.mjs fails when the two drift apart.
 #
 # Add a dated line here each time the check is run against a changed graph. Do not quote an
 # old line as evidence for a graph it predates.
@@ -68,9 +69,9 @@ allow = [
     "ISC",
     # Reached through unicode-ident, which any proc-macro user pulls in: it declares
     # "(MIT OR Apache-2.0) AND Unicode-3.0", and the AND makes Unicode-3.0 mandatory, not a
-    # choice. This graph does not reach it yet; it stays because ADR-0002 lists it. Verified
-    # 2026-09-20: cargo-deny 0.20.2 answers a listed licence no crate uses with
-    # `warning[license-not-encountered]`, not an error, so an entry kept ahead of need is free.
+    # choice. unicode-ident is in Cargo.lock, so this graph reaches it. A listed licence no crate
+    # uses costs nothing: cargo-deny 0.20.2 answers it with `warning[license-not-encountered]`,
+    # not an error (verified 2026-09-20).
     "Unicode-3.0",
     "Zlib",
     "0BSD",

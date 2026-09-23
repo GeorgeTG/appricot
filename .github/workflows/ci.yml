@@ -1,8 +1,8 @@
 # CI runs exactly what a developer runs: the same dev image, the same `just` recipes.
 # Nothing is installed on the runner except Docker, which GitHub's ubuntu images already have.
 #
-# LOCAL ONLY at bootstrap: this repository has no remote, so nothing here has ever run. It is
-# committed so the gates are written down in one place, and so the first push is green.
+# It runs on the repository's GitHub remote: on every push to main, on every pull request,
+# nightly, and by hand.
 #
 # The runner's checkout is owned by the runner's own uid, not 1000, and the container writes
 # into the bind mount, so each job builds the image for the uid it is running as. The uid is
@@ -10,7 +10,13 @@
 # job do not agree on it.
 #
 # actions/checkout v7.0.1 is the newest release
-# (https://github.com/actions/checkout/releases/tag/v7.0.1, 2026-07-20, checked 2026-09-19).
+# (https://github.com/actions/checkout/releases/tag/v7.0.1, 2026-07-20, checked 2026-09-23).
+# The `uses:` lines pin it by commit, resolved with
+# `gh api repos/actions/checkout/commits/v7.0.1` (checked 2026-09-23), because a tag can be
+# moved. Dependabot (.github/dependabot.yml) bumps the commit and its trailing version comment
+# together.
+# `persist-credentials: false`: the checkout is bind-mounted into the dev container, where build
+# scripts, proc macros and test dependencies run, so the token is not left in .git/config.
 
 name: ci
 
@@ -24,10 +30,12 @@ on:
     - cron: "17 5 * * *"
   workflow_dispatch:
 
-# A second push to the same branch cancels the first: the older answer is about older code.
+# A second push to the same pull request cancels the first: the older answer is about older
+# code. Runs on main are never cancelled or superseded: every push there gets its own verdict,
+# and the nightly run does not cancel a push. So only a pull request shares a group.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -38,7 +46,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Match the container uid to the checkout owner
         run: |
@@ -61,8 +71,9 @@ jobs:
           test "$(id -u)" = "${container_uid}"
 
       - name: just check
-        # fmt-check, clippy, test (the X11 integration test included, on the image's Xvfb),
-        # doc, deny, then the TypeScript gates.
+        # pins, fmt-check, clippy, test (the X11 integration test included, on the image's
+        # Xvfb), display-levers (that test must fail without a display), doc, deny, then the
+        # TypeScript gates, the npm licence gate included.
         run: docker compose run --rm dev just check
 
   deny:
@@ -70,7 +81,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Match the container uid to the checkout owner
         run: |
@@ -88,3 +101,29 @@ jobs:
         # schedule is for, and a licence or advisory failure is then a red job whose name says
         # which gate broke.
         run: docker compose run --rm dev just deny
+
+  msrv:
+    name: MSRV (rust-version)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Match the container uid to the checkout owner
+        run: |
+          set -euo pipefail
+          {
+            echo "APPRICOT_UID=$(id -u)"
+            echo "APPRICOT_GID=$(id -g)"
+          } >> "$GITHUB_ENV"
+
+      - name: Build the dev image
+        run: docker compose build dev
+
+      - name: cargo check on the declared MSRV
+        # Cargo.toml's rust-version is a promise to a host that builds these crates in its own
+        # workspace. Every other job builds with the newer pinned toolchain
+        # (rust-toolchain.toml), so only a build on that exact version keeps the promise.
+        run: docker compose run --rm dev just msrv

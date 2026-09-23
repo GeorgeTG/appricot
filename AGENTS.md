@@ -54,16 +54,21 @@ is `--locked` / `--frozen-lockfile` and fails loudly on a stale lockfile instead
 
 ## The gates
 
-`just check` = `fmt-check clippy test doc deny web-check`, and `web-check` in turn is
-`web-install web-build web-typecheck web-lint web-test`. Run them one at a time while iterating:
+`just check` = `pins fmt-check clippy test display-levers doc deny web-check`, and `web-check` in
+turn is `web-install web-licences web-build web-typecheck web-lint web-test`. Run them one at a
+time while iterating:
 
 | Recipe | What it runs |
 |---|---|
+| `just pins` | fails when rust-toolchain.toml and the dev image's base, or package.json's `packageManager` and the image's pnpm, name different versions |
 | `just fmt` / `fmt-check` | `cargo fmt --all` / `--check` |
 | `just clippy` | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` |
 | `just test` | `cargo test --workspace --all-features --locked` |
+| `just display-levers` | proves both entrypoint levers hold and that the X11 test fails, by a panic, without a display |
 | `just doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked` |
 | `just deny` | `cargo deny check advisories bans licenses sources` — **needs network** (it clones the RustSec database) |
+| `just msrv` | `cargo +<rust-version> check --workspace --all-targets --all-features --locked` on Cargo.toml's declared MSRV — **needs network** (rustup fetches that toolchain); a CI job, not part of `check` |
+| `just web-licences` | the npm licence gate: `scripts/web-licences.mjs` and its tests |
 | `just web-typecheck` / `web-lint` / `web-test` / `web-build` | `pnpm -r typecheck` / `lint` / `test` / `build` |
 | `just run-streamer` | prints the streamer's version line and exits 0 |
 | `just demo` | builds the web packages and serves the demo host page on container port 8390 |
@@ -75,7 +80,8 @@ The X server: the container entrypoint starts `Xvfb :99 -screen 0 1400x900x24 -n
 -noreset` and waits until it answers. `crates/appricot-x11/tests/extensions.rs` asserts Composite,
 Damage, XTEST and XFixes are present, and it **panics rather than skips** when there is no display.
 Two levers, both honoured: `-e APPRICOT_XVFB=0` starts no X server and leaves `DISPLAY` as it
-arrived; `-e DISPLAY=<value>` uses the caller's display and starts nothing.
+arrived; `-e DISPLAY=<value>` uses the caller's display and starts nothing. `just display-levers`
+checks both, and the panic, in every `just check`.
 
 ## Ports
 
@@ -123,8 +129,10 @@ The linked core graph is **Tier A only**: MIT, Apache-2.0, Apache-2.0 WITH LLVM-
 BSD-2-Clause, BSD-3-Clause, ISC, Unicode-3.0, Zlib, 0BSD. `deny.toml` has no deny list —
 anything not on the allow list is denied, including unknown licences — and `exceptions = []`.
 Adding a dependency under GPL, LGPL, AGPL, MPL-2.0, EPL or a source-available licence needs an
-**amendment to ADR-0002 first**, not a `deny.toml` edit. `just deny` is the gate. (There is no
-npm licence gate yet; ADR-0002 §2 asks for one.)
+**amendment to ADR-0002 first**, not a `deny.toml` edit. `just deny` is the gate for the Rust
+graph. `just web-licences` is the gate for the npm graph: every package in the production graph
+must be Tier A, and every workspace package must declare `MIT OR Apache-2.0`. devDependencies are
+not gated, because they are never bundled; the gate lists the ones outside Tier A.
 
 ## The window model
 

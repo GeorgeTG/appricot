@@ -13,10 +13,27 @@
 # Dev only. This image is never pushed and never conveyed, so the licences of the tools in it
 # (just is CC0-1.0) are not part of the linked graph that docs/adr/0002-licence.md gates.
 #
-# Every download below is pinned to a version and a SHA-256. A mismatch fails the build.
+# What is pinned, and how:
+#
+# - The base image by tag AND digest. A tag can be rebuilt in place, and then two builds a week
+#   apart would start from different layers, with nothing checked. The digest is the
+#   multi-arch index of rust:1.94.1-slim-bookworm (`docker buildx imagetools inspect`, checked
+#   2026-09-23). Bump the tag and the digest together with rust-toolchain.toml; `just pins`
+#   fails when the two versions differ.
+# - The node, just and cargo-deny downloads by version and SHA-256. A mismatch fails the build.
+# - pnpm by version, fetched by corepack, which checks its integrity by default (the
+#   `COREPACK_INTEGRITY_KEYS` entry of https://github.com/nodejs/corepack, checked 2026-09-23).
+# - Debian packages are NOT pinned by version: apt checks Debian's signatures instead.
+#
+# linux/amd64 only: the node, just and cargo-deny downloads are x86_64 builds with one SHA-256
+# each. compose.yml declares `platform: linux/amd64` for building and running, so an arm64 host
+# builds and runs the amd64 image under emulation, where the host provides it, instead of
+# failing at `node --version` with an error that never names the architecture. A plain
+# `docker build` outside compose needs `--platform linux/amd64` for the same reason. (A constant
+# `FROM --platform=` would do it here too, but BuildKit warns on it in every build:
+# FromPlatformFlagConstDisallowed, measured 2026-09-23.)
 
-ARG RUST_IMAGE=rust:1.94.1-slim-bookworm
-FROM ${RUST_IMAGE}
+FROM rust:1.94.1-slim-bookworm@sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2
 
 # The uid/gid the container runs as. 1000 matches Docker Desktop's bind-mount view on Windows.
 # CI passes its runner's uid (compose.yml: APPRICOT_UID/APPRICOT_GID) so the checkout stays

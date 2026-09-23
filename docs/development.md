@@ -11,10 +11,13 @@ test, docs, licence gate, the demo — runs in the `dev` service of [compose.yml
 built from [docker/dev/Dockerfile](../docker/dev/Dockerfile). Three reasons:
 
 - **The toolchain is pinned and the image is the only place it is guaranteed.** The image is
-  `rust:1.94.1-slim-bookworm` (rust-toolchain.toml pins 1.94.1, with rustfmt and clippy
-  preinstalled so a gate never stalls downloading components), node 22.23.2 (tarball pinned to a
-  SHA-256), pnpm 10.33.0 through corepack, `just` 1.58.0 and cargo-deny 0.20.2 — every download
-  version-pinned and hash-checked.
+  `rust:1.94.1-slim-bookworm`, pinned by tag and digest (rust-toolchain.toml pins 1.94.1, with
+  rustfmt and clippy preinstalled so a gate never stalls downloading components), node 22.23.2,
+  `just` 1.58.0 and cargo-deny 0.20.2 (each tarball pinned to a version and a SHA-256), and
+  pnpm 10.33.0 through corepack, which checks its integrity. Debian packages are not pinned by
+  version; apt checks their signatures. `just pins` fails when the Rust or pnpm version in the
+  image drifts from rust-toolchain.toml or package.json. The image is linux/amd64 only;
+  compose.yml declares it, so an arm64 host runs it under emulation.
 - **The X11 integration test needs a display server.**
   `crates/appricot-x11/tests/extensions.rs` asserts Composite, Damage, XTEST and XFixes are on
   `$DISPLAY`, and it panics rather than skips when there is none. The container's entrypoint
@@ -36,24 +39,31 @@ docker compose run --rm dev bash            # a shell, with Xvfb already up on :
 
 `scripts/dev.sh <cmd...>` (Git Bash) and `scripts/dev.ps1 <cmd...>` (PowerShell) are thin
 wrappers around `docker compose run --rm dev <cmd...>`. They do not build the image, and they
-return the command's own exit code. With no arguments they list the recipes.
+return the command's own exit code. With no arguments they list the recipes. PowerShell swallows
+the first bare `--` of a script's arguments; `dev.ps1` reads its own invocation and puts it back,
+so `.\scripts\dev.ps1 cargo test -- --nocapture` works. Where it cannot do that safely (a splatted
+array after the `--`), it stops and asks for a quoted `'--'`, which always passes through.
 
 ## 2. The gates
 
-`just check` = `fmt-check clippy test doc deny web-check`, and `web-check` in turn is
-`web-install web-build web-typecheck web-lint web-test`. The recipes (see
+`just check` = `pins fmt-check clippy test display-levers doc deny web-check`, and `web-check`
+in turn is `web-install web-licences web-build web-typecheck web-lint web-test`. The recipes (see
 [justfile](../justfile)):
 
 | Recipe | What it runs |
 |---|---|
+| `just pins` | fails when rust-toolchain.toml and the dev image's base, or package.json's `packageManager` and the image's pnpm, name different versions |
 | `just fmt` / `fmt-check` | `cargo fmt --all` / `--check` |
 | `just clippy` | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` |
 | `just test` | `cargo test --workspace --all-features --locked` |
+| `just display-levers` | proves both entrypoint levers hold and that the X11 test fails, by a panic, without a display (§4) |
 | `just doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked` |
 | `just deny` | `cargo deny check advisories bans licenses sources` — **needs network** (it clones the RustSec database; the image carries git for exactly this) |
+| `just msrv` | `cargo +<rust-version> check --workspace --all-targets --all-features --locked` on Cargo.toml's declared MSRV — **needs network** (rustup fetches that toolchain); a CI job, not part of `check` |
+| `just web-licences` | the npm licence gate (§7): `scripts/web-licences.mjs` and its tests |
 | `just web-typecheck` / `web-lint` / `web-test` / `web-build` | `pnpm -r typecheck` / `lint` / `test` / `build` |
 | `just run-streamer` | prints the streamer's version line and exits 0 |
-| `just demo` | builds the web packages and serves the demo host page on container port 8390 |
+| `just demo` | builds the web packages and the streamer, starts the streamer, and serves the demo host page on container port 8390 once the streamer is ready |
 
 `web-build` runs before `web-typecheck`/`web-test` inside `web-check` on purpose:
 `@appricot/react` resolves `@appricot/client` through its exports map, which points at `dist/`,
@@ -74,9 +84,9 @@ actually touching — it is faster and its failure is the only signal you want:
   `web-lint`, `web-test`.
 - `just deny` needs network and is slow; run it when dependencies move, not on every edit.
 
-On a fresh clone, before the lockfiles have ever resolved: `just lock web-lock` once (see §5) —
-in practice they are committed, so `web-install` alone brings `node_modules` in exactly as
-pinned.
+On a fresh clone the lockfiles are already there (see §5), so `web-install` alone brings
+`node_modules` in exactly as pinned. Do not run `just lock web-lock` to start: it resolves the
+whole graph again, to the newest versions of everything.
 
 ## 4. The dev image and its volumes
 
@@ -100,7 +110,9 @@ and a reset between two binaries wipes the window manager's state out from under
 binary's tests (measured 2026-09-20). Two levers, both honoured rather than silently
 overridden: `-e APPRICOT_XVFB=0` starts no X server and leaves `DISPLAY` as it arrived (that is
 how you prove the X11 test fails loudly instead of skipping), and `-e DISPLAY=<value>` uses the
-caller's display and starts nothing.
+caller's display and starts nothing. `just display-levers`, part of `just check`, makes that proof
+on every run: it calls the repository's `docker/dev/entrypoint.sh` with each lever and requires
+`DISPLAY` to come through as asked and the X11 test to fail by a panic.
 
 The volumes (compose.yml narrates each one):
 
@@ -140,7 +152,11 @@ docker compose run --rm -p "127.0.0.1:${APPRICOT_DEMO_HOST_PORT:-8390}:8390" dev
 ```
 
 then open `http://127.0.0.1:8390` and paste the token (printed by the recipe, or set
-`APPRICOT_DEMO_TOKEN`). Ctrl-C stops both processes.
+`APPRICOT_DEMO_TOKEN`). Ctrl-C stops both processes. The recipe builds the streamer before it
+starts anything, so a compile error fails it at once. It serves the page only after the
+streamer's `/readyz` answers 200, and when either process exits it stops the other and exits
+with that status. A streamer that cannot start, for example with no display, fails the recipe
+instead of leaving a page whose every WebSocket fails.
 
 Port 8390 is the repository's **one** published port, loopback-only, overridable through
 `APPRICOT_DEMO_HOST_PORT`. The streamer itself is never published: the demo's in-container
@@ -168,9 +184,19 @@ list is denied, including unknown licences — and `exceptions = []`. Concretely
 3. Anything under GPL, LGPL, AGPL, MPL-2.0, EPL or a source-available licence needs an
    **amendment to ADR-0002 first** — not a `deny.toml` edit.
 
-The Rust rules are gated; the npm side is not yet: ADR-0002 §2 asks for an npm licence gate
-that does not exist today, so a new runtime dependency in `packages/*` is checked by hand
-against the same list until it does.
+The npm side has its own gate, `just web-licences` (part of `web-check`), in
+[scripts/web-licences.mjs](../scripts/web-licences.mjs):
+
+- Every package in the production graph (`pnpm licenses list --prod`) must have a licence
+  expression that Tier A satisfies. The rules are cargo-deny's: an `OR` needs one side, an `AND`
+  needs both, and an unknown, missing or unparseable licence fails.
+- Every workspace package must declare exactly `MIT OR Apache-2.0` (ADR-0002 §1).
+- Its Tier A list must equal `deny.toml`'s `allow` list. Its own tests fail when the two drift.
+- devDependencies are not gated. ADR-0002 governs the linked graph, and they are never bundled
+  or conveyed. The gate still prints those outside Tier A, so the gap stays visible. Gating them
+  too would need an amendment to ADR-0002.
+
+It reads the installed `node_modules` and needs no network, so run it after `web-install`.
 
 ## 8. The untrusted-server rules
 

@@ -40,6 +40,8 @@ pub(crate) struct Atoms {
     pub clipboard: Atom,
     /// `TARGETS`: the selection target that lists targets.
     pub targets: Atom,
+    /// `TIMESTAMP`: the selection target that asks when the owner took the selection.
+    pub timestamp: Atom,
     /// `UTF8_STRING`: the UTF-8 text selection target.
     pub utf8_string: Atom,
     /// `TEXT`: the Latin-1-ish text selection target.
@@ -79,6 +81,7 @@ impl Atoms {
             net_supported => "_NET_SUPPORTED",
             clipboard => "CLIPBOARD",
             targets => "TARGETS",
+            timestamp => "TIMESTAMP",
             utf8_string => "UTF8_STRING",
             text => "TEXT",
             string => "STRING",

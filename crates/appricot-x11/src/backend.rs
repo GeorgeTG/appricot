@@ -1,8 +1,8 @@
 //! [`X11Backend`]: the `CaptureBackend` and `InputSink` implementation on X11.
 
 use appricot_core::{
-    CaptureBackend, InputSink, KeyEvent, PixelBuffer, Point, PointerButton, PressState, Rect, Role,
-    Size, SurfaceEvent, SurfaceId,
+    CaptureBackend, InputSink, KeyCode, KeyEvent, PixelBuffer, Point, PointerButton, PressState,
+    Rect, Role, Size, SurfaceEvent, SurfaceId,
 };
 use x11rb::connection::Connection as _;
 use x11rb::cookie::VoidCookie;
@@ -24,8 +24,8 @@ use crate::capture::{convert_zpixmap, place_in, zeroed};
 use crate::clipboard::{Clipboard, latin1_decode, latin1_encode};
 use crate::cursor::cursor_image;
 use crate::error::BackendError;
-use crate::input::{HeldInput, VecPresses};
-use crate::keymap::{Keymap, XK_SHIFT_L, resolve_pressable};
+use crate::input::{HeldInput, KeyId, KeyPress, NoShiftKey, Stroke};
+use crate::keymap::{KeyKind, Keymap, XK_CAPS_LOCK, XK_SHIFT_L, key_kind, resolve_pressable};
 use crate::wm::{
     MAX_SURFACE_HEIGHT, MAX_SURFACE_WIDTH, SizeHints, TrackedWindow, WindowKind, WindowTable,
     bounded_size, decode_utf8_cut, place_toplevel, size_bound,
@@ -33,9 +33,11 @@ use crate::wm::{
 use crate::{MappedWindow, ParentCandidate, classify};
 
 // Predefined atoms named by value (the X protocol fixes them): `AnyPropertyType`, `ATOM`,
-// `WINDOW`, and the `PointerRoot` window. Everything else is interned through [`Atoms`].
+// `INTEGER`, `WINDOW`, and the `PointerRoot` window. Everything else is interned through
+// [`Atoms`].
 const XA_ANY: u32 = 0;
 const XA_ATOM: u32 = 4;
+const XA_INTEGER: u32 = 19;
 const XA_WINDOW: u32 = 33;
 const POINTER_ROOT_WINDOW: u32 = 1;
 
@@ -54,6 +56,10 @@ const WHEEL_UP: u8 = 4;
 const WHEEL_DOWN: u8 = 5;
 const WHEEL_LEFT: u8 = 6;
 const WHEEL_RIGHT: u8 = 7;
+
+/// The most wheel steps one `pointer_axis` call sends per axis; more are dropped.
+// mirrors appricot_proto::limits::MAX_POINTER_AXIS_STEPS
+const MAX_POINTER_AXIS_STEPS: u32 = 64;
 
 /// The ICCCM `WM_STATE` value of a normal (not iconified) window.
 const WM_STATE_NORMAL: u32 = 1;
@@ -111,11 +117,23 @@ pub struct X11Backend {
     clipboard: Clipboard,
     held: HeldInput,
     keymap: Keymap,
-    /// The toplevel the host last focused, if any.
+    /// The toplevel input last went to: the host's focus, or the pointer's surface since. A
+    /// popup that names no parent is given this one. It never moves the keyboard.
     focused: Option<SurfaceId>,
-    /// The surface pointer input was last aimed at, so raise-and-focus runs once per
-    /// target change rather than once per motion.
+    /// The surface pointer input last raised, so motion raises once per target change
+    /// rather than once per event.
     ensured: Option<SurfaceId>,
+    /// The next surface id when `ensured` was raised: a window tracked since may sit above
+    /// it, so the next motion raises again.
+    raised_at: SurfaceId,
+    /// The toplevel keys go to: the one the host last focused, or a focused popup's parent.
+    /// Only `focus` sets it, and `blur` keeps it: the next key after a blur goes back there.
+    host_focused: Option<SurfaceId>,
+    /// The toplevel this backend last gave the X keyboard focus to; `None` after a blur.
+    keyboard: Option<SurfaceId>,
+    /// Where the backend last put the X pointer: the surface, the local point, the root
+    /// point.
+    pointer_at: Option<(SurfaceId, Point, Point)>,
     root_size: Size,
     /// The bytes per pixel the server stores a pixmap of each depth at, from its
     /// pixmap-format table: depth 24 is 32bpp on most servers, Xvfb included.
@@ -182,11 +200,16 @@ impl X11Backend {
             keymap,
             focused: None,
             ensured: None,
+            raised_at: SurfaceId::new(0),
+            host_focused: None,
+            keyboard: None,
+            pointer_at: None,
             root_size,
             pixel_bpp,
             pending: Vec::new(),
         };
         backend.adopt_existing()?;
+        backend.release_input_left_down(true)?;
         Ok(backend)
     }
 
@@ -689,6 +712,9 @@ impl X11Backend {
                 if e.selection == self.atoms.clipboard && e.owner != self.owner_window {
                     // Another client took the selection; the host's text is stale.
                     self.clipboard.text = None;
+                } else if e.selection == self.atoms.clipboard {
+                    // The backend took it: the time the server recorded answers TIMESTAMP.
+                    self.clipboard.acquired = e.selection_timestamp;
                 }
                 Ok(())
             }
@@ -977,15 +1003,19 @@ impl X11Backend {
         let answer = if e.selection != atoms.clipboard {
             None
         } else if e.target == atoms.targets {
-            let targets: [u32; 5] = [
+            let targets: [u32; 6] = [
                 atoms.targets,
+                atoms.timestamp,
                 atoms.utf8_string,
                 atoms.text,
                 atoms.string,
                 atoms.text_plain_utf8,
             ];
-            let data: Vec<u8> = targets.iter().flat_map(|a| a.to_ne_bytes()).collect();
-            self.write_property(e.requestor, property, XA_ATOM, &data);
+            self.write_property32(e.requestor, property, XA_ATOM, &targets);
+            Some(property)
+        } else if e.target == atoms.timestamp {
+            let acquired = self.clipboard.acquired;
+            self.write_property32(e.requestor, property, XA_INTEGER, &[acquired]);
             Some(property)
         } else if let Some(text) = self.clipboard.text.clone() {
             let (type_, data) =
@@ -1047,52 +1077,177 @@ impl X11Backend {
         }
     }
 
+    /// Writes a reply property of 32-bit values (`ATOM`, `INTEGER`): format 32, so the
+    /// server byte-swaps it for a requestor of the other byte order. The length is the
+    /// number of values, not of bytes.
+    fn write_property32(
+        &self,
+        requestor: x::Window,
+        property: u32,
+        type_: u32,
+        values: &[u32],
+    ) -> bool {
+        let data: Vec<u8> = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        match self.conn.change_property(
+            x::PropMode::REPLACE,
+            requestor,
+            property,
+            type_,
+            32,
+            u32::try_from(values.len()).unwrap_or(u32::MAX),
+            &data,
+        ) {
+            Ok(cookie) => cookie.check().is_ok(),
+            Err(_) => false,
+        }
+    }
+
     // --- input -----------------------------------------------------------------------------
 
-    /// Makes surface `id` the safe target of the next XTEST event: raised above its
-    /// siblings, holding the keyboard focus. An XTEST click lands on the top window at
-    /// its coordinates and keys reach the focused window (docs/architecture.md §3.2), so
-    /// both are set here, once per target change.
-    fn ensure_target(&mut self, id: SurfaceId) -> Result<(), BackendError> {
-        if self.ensured == Some(id) {
-            return Ok(());
-        }
+    /// The toplevel whose window holds the keyboard for surface `id`: the surface itself, or
+    /// a popup's parent toplevel (a popup takes pointer events itself, but the keyboard
+    /// stays with its parent).
+    fn keyboard_owner(&self, id: SurfaceId) -> Option<SurfaceId> {
+        let tracked = self.table.by_surface(id)?;
+        let owner = match (&tracked.kind, &tracked.role) {
+            (WindowKind::OverrideRedirect, Role::Popup { parent, .. }) => self
+                .table
+                .by_surface(*parent)
+                .filter(|p| p.kind == WindowKind::Managed)
+                .unwrap_or(tracked),
+            _ => tracked,
+        };
+        Some(owner.id)
+    }
+
+    /// Raises surface `id` above its siblings. An XTEST click lands on whichever window is
+    /// on top at its point (docs/architecture.md §3.2), and toplevels can overlap, so the
+    /// target goes on top first. The host decides stacking; this is the only place the
+    /// backend changes it.
+    fn raise(&mut self, id: SurfaceId) -> Result<(), BackendError> {
         let Some(tracked) = self.table.by_surface(id) else {
             return Err(BackendError::UnknownSurface(id));
         };
-        // A popup takes pointer events itself, but the keyboard stays with its parent
-        // toplevel.
-        let focus_tracked = match tracked.kind {
-            WindowKind::Managed => tracked,
-            WindowKind::OverrideRedirect => match &tracked.role {
-                Role::Popup { parent, .. } => self
-                    .table
-                    .by_surface(*parent)
-                    .filter(|p| p.kind == WindowKind::Managed)
-                    .unwrap_or(tracked),
-                Role::Toplevel => tracked,
-            },
-        };
-        let raise_window = tracked.window;
-        let focus_window = focus_tracked.window;
-        let take_focus = focus_tracked.take_focus;
-        let focus_id = focus_tracked.id;
+        // Not checked: requests run in order, so the raise lands before the XTEST event
+        // that follows it, and a window gone meanwhile has nothing left to raise.
+        self.conn
+            .configure_window(
+                tracked.window,
+                &x::ConfigureWindowAux::new().stack_mode(x::StackMode::ABOVE),
+            )?
+            .ignore_error();
+        self.ensured = Some(id);
+        self.raised_at = self.table.peek_next_surface();
+        Ok(())
+    }
 
-        check_gone(self.conn.configure_window(
-            raise_window,
-            &x::ConfigureWindowAux::new().stack_mode(x::StackMode::ABOVE),
-        )?)?;
+    /// Raises surface `id` unless pointer input already raised it and no window has been
+    /// tracked since, which could sit above it.
+    fn raise_if_stale(&mut self, id: SurfaceId) -> Result<(), BackendError> {
+        if self.ensured == Some(id) && self.raised_at == self.table.peek_next_surface() {
+            return Ok(());
+        }
+        self.raise(id)
+    }
+
+    /// Gives toplevel `target` the X keyboard focus, unless this backend already did. Keys
+    /// reach the focused window (docs/architecture.md §3.2).
+    fn give_keyboard(&mut self, target: SurfaceId) -> Result<(), BackendError> {
+        if self.keyboard == Some(target) {
+            return Ok(());
+        }
+        let Some(tracked) = self.table.by_surface(target) else {
+            return Err(BackendError::UnknownSurface(target));
+        };
+        let (window, take_focus) = (tracked.window, tracked.take_focus);
         check_gone(self.conn.set_input_focus(
             x::InputFocus::POINTER_ROOT,
-            focus_window,
+            window,
             CURRENT_TIME,
         )?)?;
         if take_focus {
             // The ICCCM focus handshake for clients that asked for it.
-            self.send_protocols_message(focus_window, self.atoms.wm_take_focus)?;
+            self.send_protocols_message(window, self.atoms.wm_take_focus)?;
         }
-        self.focused = Some(focus_id);
-        self.ensured = Some(id);
+        self.keyboard = Some(target);
+        Ok(())
+    }
+
+    /// Moves the X pointer to local point `local` of surface `id`.
+    fn move_pointer(
+        &mut self,
+        id: SurfaceId,
+        geometry: Rect,
+        local: Point,
+    ) -> Result<(), BackendError> {
+        let root_at = Point::new(
+            geometry.origin.x.saturating_add(local.x),
+            geometry.origin.y.saturating_add(local.y),
+        );
+        self.xtest_motion(root_at)?;
+        self.pointer_at = Some((id, local, root_at));
+        Ok(())
+    }
+
+    /// Puts the X pointer inside surface `id` before a button or wheel event, which carries
+    /// no position and lands wherever the pointer is. The pointer stays where the last
+    /// motion into `id` left it. After motion elsewhere, or none at all (a touch tap sends
+    /// no motion before its press), it goes to the middle of `id`.
+    fn pointer_into(&mut self, id: SurfaceId, geometry: Rect) -> Result<(), BackendError> {
+        let local = match self.pointer_at {
+            Some((at, local, _)) if at == id => clamp_inside(local, geometry.size),
+            _ => Point::new(
+                i32::try_from(geometry.size.width / 2).unwrap_or(0),
+                i32::try_from(geometry.size.height / 2).unwrap_or(0),
+            ),
+        };
+        let root_at = Point::new(
+            geometry.origin.x.saturating_add(local.x),
+            geometry.origin.y.saturating_add(local.y),
+        );
+        if self.pointer_at == Some((id, local, root_at)) {
+            return Ok(());
+        }
+        self.move_pointer(id, geometry, local)
+    }
+
+    /// Releases every key and button the X server reports down. A new backend's tally is
+    /// empty, so nothing else could release what a previous one held when it died; and a
+    /// tally that lost count leaves nothing stuck after a blur either. With `unlock`, a Caps
+    /// Lock left on is turned off too: the backend consumes Caps Lock (see the input
+    /// module), so X's Lock must stay off.
+    fn release_input_left_down(&mut self, unlock: bool) -> Result<(), BackendError> {
+        let keys = self.conn.query_keymap()?;
+        let pointer = self.conn.query_pointer(self.root)?;
+        let keys = keys.reply()?.keys;
+        let mask = pointer.reply()?.mask;
+        for (byte, bits) in (0u8..).zip(keys) {
+            for bit in 0..8u8 {
+                if bits & (1 << bit) != 0 {
+                    self.xtest_key(byte.wrapping_mul(8).wrapping_add(bit), PressState::Released)?;
+                }
+            }
+        }
+        let buttons = [
+            (BUTTON_LEFT, x::KeyButMask::BUTTON1),
+            (BUTTON_MIDDLE, x::KeyButMask::BUTTON2),
+            (BUTTON_RIGHT, x::KeyButMask::BUTTON3),
+            (WHEEL_UP, x::KeyButMask::BUTTON4),
+            (WHEEL_DOWN, x::KeyButMask::BUTTON5),
+        ];
+        for (button, bit) in buttons {
+            if mask.contains(bit) {
+                self.xtest_button(button, PressState::Released)?;
+            }
+        }
+        if unlock
+            && mask.contains(x::KeyButMask::LOCK)
+            && let Some(caps) = self.keymap.resolve(XK_CAPS_LOCK)
+        {
+            self.xtest_key(caps.keycode, PressState::Pressed)?;
+            self.xtest_key(caps.keycode, PressState::Released)?;
+        }
+        self.conn.flush()?;
         Ok(())
     }
 
@@ -1122,6 +1277,11 @@ impl X11Backend {
         Ok(())
     }
 
+    // The XTEST events are written, not waited on: a checked request is a round trip, and
+    // one wheel message used to cost two per step. The caller flushes once at the end.
+    // Requests on one connection run in order, so nothing is reordered; an error the
+    // server answers one with (a keycode outside the keymap) is dropped.
+
     /// One XTEST key event.
     fn xtest_key(&mut self, keycode: u8, state: PressState) -> Result<(), BackendError> {
         let kind = match state {
@@ -1130,8 +1290,16 @@ impl X11Backend {
         };
         self.conn
             .xtest_fake_input(kind, keycode, CURRENT_TIME, self.root, 0, 0, 0)?
-            .check()?;
+            .ignore_error();
         Ok(())
+    }
+
+    /// One XTEST key stroke.
+    fn xtest_stroke(&mut self, stroke: Stroke) -> Result<(), BackendError> {
+        match stroke {
+            Stroke::Down(keycode) => self.xtest_key(keycode, PressState::Pressed),
+            Stroke::Up(keycode) => self.xtest_key(keycode, PressState::Released),
+        }
     }
 
     /// One XTEST button event.
@@ -1142,7 +1310,7 @@ impl X11Backend {
         };
         self.conn
             .xtest_fake_input(kind, button, CURRENT_TIME, self.root, 0, 0, 0)?
-            .check()?;
+            .ignore_error();
         Ok(())
     }
 
@@ -1158,7 +1326,7 @@ impl X11Backend {
                 clamp_i16(at.y),
                 0,
             )?
-            .check()?;
+            .ignore_error();
         Ok(())
     }
 
@@ -1297,18 +1465,16 @@ impl CaptureBackend for X11Backend {
 impl InputSink for X11Backend {
     type Error = BackendError;
 
+    /// Pointer input raises its surface but never moves the keyboard focus: keys follow
+    /// the host's focus alone (docs/protocol/v0.md §4.4).
     fn pointer_motion(&mut self, id: SurfaceId, at: Point) -> Result<(), Self::Error> {
         let Some(tracked) = self.table.by_surface(id) else {
             return Err(BackendError::UnknownSurface(id));
         };
         let geometry = tracked.geometry;
-        self.ensure_target(id)?;
-        let local = clamp_inside(at, geometry.size);
-        let root_at = Point::new(
-            geometry.origin.x.saturating_add(local.x),
-            geometry.origin.y.saturating_add(local.y),
-        );
-        self.xtest_motion(root_at)?;
+        self.raise_if_stale(id)?;
+        self.focused = self.keyboard_owner(id);
+        self.move_pointer(id, geometry, clamp_inside(at, geometry.size))?;
         self.conn.flush()?;
         Ok(())
     }
@@ -1324,9 +1490,21 @@ impl InputSink for X11Backend {
             PointerButton::Middle => BUTTON_MIDDLE,
             PointerButton::Right => BUTTON_RIGHT,
         };
-        self.ensure_target(id)?;
         match state {
-            PressState::Pressed => self.held.button_press(detail),
+            PressState::Pressed => {
+                let Some(tracked) = self.table.by_surface(id) else {
+                    return Err(BackendError::UnknownSurface(id));
+                };
+                let geometry = tracked.geometry;
+                // Every press raises: a window mapped or restacked since the last raise
+                // must not take this click. The release needs neither raise, position nor
+                // even its surface: the press's implicit grab takes it to the same window,
+                // and a window gone mid-drag must not leave the button down.
+                self.raise(id)?;
+                self.pointer_into(id, geometry)?;
+                self.focused = self.keyboard_owner(id);
+                self.held.button_press(detail);
+            }
             PressState::Released => self.held.button_release(detail),
         }
         self.xtest_button(detail, state)?;
@@ -1334,15 +1512,23 @@ impl InputSink for X11Backend {
         Ok(())
     }
 
+    /// At most 64 steps per axis are sent (the wire's `MAX_POINTER_AXIS_STEPS`); the rest
+    /// are dropped.
     fn pointer_axis(&mut self, id: SurfaceId, steps: Point) -> Result<(), Self::Error> {
-        self.ensure_target(id)?;
+        let Some(tracked) = self.table.by_surface(id) else {
+            return Err(BackendError::UnknownSurface(id));
+        };
+        let geometry = tracked.geometry;
+        self.raise_if_stale(id)?;
+        self.pointer_into(id, geometry)?;
+        self.focused = self.keyboard_owner(id);
         let vertical = if steps.y < 0 { WHEEL_UP } else { WHEEL_DOWN };
         let horizontal = if steps.x < 0 { WHEEL_LEFT } else { WHEEL_RIGHT };
-        for _ in 0..steps.y.unsigned_abs() {
+        for _ in 0..steps.y.unsigned_abs().min(MAX_POINTER_AXIS_STEPS) {
             self.xtest_button(vertical, PressState::Pressed)?;
             self.xtest_button(vertical, PressState::Released)?;
         }
-        for _ in 0..steps.x.unsigned_abs() {
+        for _ in 0..steps.x.unsigned_abs().min(MAX_POINTER_AXIS_STEPS) {
             self.xtest_button(horizontal, PressState::Pressed)?;
             self.xtest_button(horizontal, PressState::Released)?;
         }
@@ -1350,42 +1536,82 @@ impl InputSink for X11Backend {
         Ok(())
     }
 
+    /// A press goes to the surface the host focused, and only there; with none focused it
+    /// is dropped. The keysym is authoritative, so the X modifier state is set around each
+    /// press to produce exactly it (see the input module). A release comes off whatever its
+    /// press put down, focus or not.
     fn key(&mut self, key: KeyEvent) -> Result<(), Self::Error> {
-        if let Some(focused) = self.focused {
-            self.ensure_target(focused)?;
+        let keysym = key.keysym.0;
+        let kind = key_kind(keysym);
+        if kind == KeyKind::Consumed {
+            return Ok(());
         }
-        let resolved = resolve_pressable(&self.keymap, key.keysym.0)?;
-        let needs_shift = resolved.column == 1;
-        let shift_keycode = if needs_shift {
-            self.keymap
-                .shift_keycode()
-                .ok_or(BackendError::KeysymUnavailable(XK_SHIFT_L))?
-        } else {
-            resolved.keycode
-        };
-        let presses: VecPresses = match key.state {
-            PressState::Pressed => {
-                self.held
-                    .key_press(resolved.keycode, needs_shift, shift_keycode)
-            }
+        let code = KeyId::usable_code(key.code.as_ref().map(KeyCode::as_str));
+        let strokes = match key.state {
             PressState::Released => {
-                self.held
-                    .key_release(resolved.keycode, needs_shift, shift_keycode)
+                let id = if let Some(code) = code {
+                    KeyId::Code(code.to_owned())
+                } else if let Ok(resolved) = resolve_pressable(&self.keymap, keysym) {
+                    KeyId::Keycode(resolved.keycode)
+                } else {
+                    return Ok(()); // nothing was pressed under it
+                };
+                self.held.release_key(&id)
+            }
+            PressState::Pressed => {
+                let Some(target) = self
+                    .host_focused
+                    .filter(|t| self.table.by_surface(*t).is_some())
+                else {
+                    return Ok(());
+                };
+                self.give_keyboard(target)?;
+                let resolved = resolve_pressable(&self.keymap, keysym)?;
+                let id = code.map_or(KeyId::Keycode(resolved.keycode), |c| {
+                    KeyId::Code(c.to_owned())
+                });
+                if let KeyKind::Modifier(modifier) = kind {
+                    self.held.press_modifier(id, resolved.keycode, modifier)
+                } else {
+                    let press = KeyPress {
+                        keysym,
+                        code,
+                        kind,
+                        keycode: resolved.keycode,
+                        shifted: resolved.column == 1,
+                    };
+                    let shift = self.keymap.shift_keycode();
+                    self.held
+                        .press_key(id, press, shift)
+                        .map_err(|NoShiftKey| BackendError::KeysymUnavailable(XK_SHIFT_L))?
+                }
             }
         };
-        for keycode in presses.as_slice().iter().flatten() {
-            self.xtest_key(*keycode, key.state)?;
+        for stroke in strokes {
+            self.xtest_stroke(stroke)?;
         }
         self.conn.flush()?;
         Ok(())
     }
 
+    /// The host's focus: raises the surface and gives its toplevel (a popup's parent) the
+    /// keyboard. This is the only call that moves the keyboard.
     fn focus(&mut self, id: SurfaceId) -> Result<(), Self::Error> {
-        self.ensure_target(id)?;
+        let Some(target) = self.keyboard_owner(id) else {
+            return Err(BackendError::UnknownSurface(id));
+        };
+        self.raise(id)?;
+        self.host_focused = Some(target);
+        self.focused = Some(target);
+        self.give_keyboard(target)?;
         self.conn.flush()?;
         Ok(())
     }
 
+    /// Releases every key and button held, the modifiers included, then anything else X
+    /// still reports down, and takes the keyboard focus off the app. The streamer calls it
+    /// for `BlurRelease`, and when the socket is lost or the session ends. The next key
+    /// press goes back to the surface the host last focused.
     fn blur(&mut self) -> Result<(), Self::Error> {
         let (keys, buttons) = self.held.release_all();
         for keycode in keys {
@@ -1394,6 +1620,7 @@ impl InputSink for X11Backend {
         for button in buttons {
             self.xtest_button(button, PressState::Released)?;
         }
+        self.release_input_left_down(false)?;
         check_gone(self.conn.set_input_focus(
             x::InputFocus::POINTER_ROOT,
             POINTER_ROOT_WINDOW,
@@ -1401,6 +1628,7 @@ impl InputSink for X11Backend {
         )?)?;
         self.focused = None;
         self.ensured = None;
+        self.keyboard = None;
         self.conn.flush()?;
         Ok(())
     }

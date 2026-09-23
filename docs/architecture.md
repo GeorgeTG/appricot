@@ -185,11 +185,19 @@ never a timer; input flows the other way.*
    from the browser's `paste` event and goes out before the paste chord reaches the app.
 4. The streamer maps it to X. Two facts measured in the benchmark shape this: XTEST keys reach a
    covered window only after the streamer sets X focus on it, and an XTEST click lands on
-   whichever window is on top at that point. So the streamer, as window manager, sets focus and
-   raises the target before it injects pointer events. The S1 backend places toplevels to
-   overlap as little as the root allows ([§4.2](#42-how-x11-maps-into-the-model)), but on the
-   configured root they do overlap from the second realistic window on, so clicks reach the right
-   window because of the raise, not because of the layout.
+   whichever window is on top at that point. So the streamer, as window manager, handles the
+   two apart:
+   - **Keys.** X keyboard focus moves only on the host's `FocusNotify`, to the focused toplevel
+     (a focused popup's parent). Pointer input never moves it.
+   - **Pointer.** Pointer input raises its target instead: before every button press, and
+     before motion or a wheel step when the target changed or a window mapped since. A button
+     or wheel event carries no position, so when the last motion went to another surface (a
+     touch tap sends none), the streamer first moves the pointer to the middle of the target.
+
+   The S1 backend places toplevels to overlap as little as the root allows
+   ([§4.2](#42-how-x11-maps-into-the-model)), but on the configured root they do overlap from the
+   second realistic window on. The raise, not the layout, is what puts a click on the right
+   window.
 5. When the browser window loses focus, the client sends one `BlurRelease` per connection and
    the streamer releases every held key and button. When focus only moves inside the page and
    leaves a canvas, the client releases the keys it pressed there, one by one.
@@ -261,7 +269,7 @@ is an additive wire field carrying a new positioner; it is deferred until a prof
 | sizes | Every size the backend reports, an override-redirect window's included, is cut to the root and to the wire's surface caps. Managed toplevels get a zero border; a popup's border is skipped when it is captured. |
 | title, app id | `_NET_WM_NAME` (UTF-8) or `WM_NAME`; `WM_CLASS` for the app id. Sent as text, capped. |
 | close | `WM_DELETE_WINDOW`. The streamer never kills the client. |
-| focus | `SetInputFocus` or `WM_TAKE_FOCUS`. Focus requests from X clients (`_NET_ACTIVE_WINDOW`) are reported to the host, never obeyed directly. |
+| focus | `SetInputFocus` or `WM_TAKE_FOCUS`, on the host's `FocusNotify` only; pointer input never moves it. Focus requests from X clients (`_NET_ACTIVE_WINDOW`) are reported to the host, never obeyed directly. |
 | cursor | XFixes cursor image (ARGB, hotspot, serial), capped in size. |
 | clipboard | XFixes selection events and `ConvertSelection(UTF8_STRING)`; the streamer owns CLIPBOARD to serve a paste. Text only. |
 

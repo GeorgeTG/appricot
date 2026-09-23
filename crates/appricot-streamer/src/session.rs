@@ -858,9 +858,18 @@ where
             waiting.remove(0);
         }
         waiting.push((core_serial.get(), m.serial));
+        // A proposal of the size the surface already has is acked at once, and the backend
+        // is left alone: its own report of the unchanged size would reach the session later,
+        // after the next proposal was queued, and ack that one with the old size.
+        let acked_at_once = out.iter().any(
+            |e| matches!(e, SessionEvent::ConfigureAcked { serial, .. } if *serial == core_serial),
+        );
         let flow = emit_events(sink, pump, &out).await;
         if flow != Flow::On {
             return flow;
+        }
+        if acked_at_once {
+            return Flow::On;
         }
         if let Err(e) = pump.backend.configure(id, size).await {
             tracing::warn!(surface = id.get(), error = %e, "backend refused a configure");

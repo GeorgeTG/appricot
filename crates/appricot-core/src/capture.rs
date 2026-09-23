@@ -1,9 +1,11 @@
 //! The capture side of a backend: the events it reports, and the pixels it hands back.
 //!
 //! FROZEN INTERFACE of implementation wave 1. `appricot-x11` implements [`CaptureBackend`]
-//! on X11; `appricot-streamer` drives it. Fields and variants may be ADDED (the enums are
-//! `#[non_exhaustive]`, so match with a wildcard arm); an existing signature may not change
-//! without every implementor and every caller changing in the same change.
+//! on X11; `appricot-streamer` drives it. Fields and variants may be ADDED, in the same change
+//! as every match on them: the enums are exhaustive on purpose, inside one unpublished
+//! workspace, so the compiler finds every place a new variant needs a decision. An existing
+//! signature may not change without every implementor and every caller changing in the same
+//! change.
 
 use appricot_proto::limits::{AppId, Title};
 
@@ -14,11 +16,11 @@ use crate::surface::SurfaceId;
 
 /// Something a backend saw happen to a surface, or to the session as a whole.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum SurfaceEvent {
     /// A surface appeared: the app mapped a window.
     Created {
-        /// The new surface.
+        /// The new surface. Ids rise strictly over a backend's life: each `Created` names an
+        /// id above every id it named before, and the session refuses one that does not.
         id: SurfaceId,
         /// What it is for.
         role: Role,
@@ -45,7 +47,9 @@ pub enum SurfaceEvent {
         /// The changed area.
         rect: Rect,
     },
-    /// The app resized its surface, after an ack or on its own.
+    /// The app's surface has this size: after a configure, or on its own. A backend reports
+    /// it for every configure it applies, even when the size did not change (the app
+    /// clamped the proposal back to the size it had), so the configure is answered.
     Resized {
         /// The surface.
         id: SurfaceId,
@@ -85,8 +89,9 @@ pub enum SurfaceEvent {
 ///
 /// `appricot-x11` implements it on X11; a later Wayland backend would too. The calls do not
 /// block: the streamer makes them when the display connection is readable, or when a frame
-/// credit is free. Sizes handed in and out are already clamped to the wire limits by the
-/// caller; a backend clamps again what the display server itself reports.
+/// credit is free. The session cuts every size a backend reports to the wire's surface caps,
+/// and asks for pixels only inside the size it tracks; a backend still clamps what the
+/// display server itself reports to what it can serve.
 pub trait CaptureBackend {
     /// What can go wrong talking to the display server.
     type Error: std::error::Error + Send + Sync + 'static;

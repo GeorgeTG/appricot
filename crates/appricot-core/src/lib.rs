@@ -7,8 +7,8 @@
 //! - Per-surface damage accumulation, bounded.
 //! - Frame pacing by client credits, never by a timer.
 //! - One session's surface set under the wire caps: what the streamer must put on the wire,
-//!   the resume grace window, and the frames planned over per-surface credits
-//!   ([`Session`]).
+//!   the configure queue and its acks, detach and resume, and the frames planned over
+//!   per-surface credits ([`Session`]).
 //! - The traits a capture backend implements: [`CaptureBackend`] and [`InputSink`]. Their
 //!   signatures are the frozen interface of implementation wave 1.
 //!
@@ -42,7 +42,7 @@ pub use input::{InputSink, KeyCode, KeyEvent, Keysym, PointerButton, PressState}
 pub use pixels::{CursorImage, PixelBuffer, PixelFormat};
 pub use role::{Anchor, Positioner, Role};
 pub use session::{
-    FramePlan, GoneReason, MAX_FRAME_CREDITS, MAX_POPUPS_PER_PARENT, MAX_SURFACES, RESUME_GRACE_MS,
-    Session, SessionEvent,
+    FramePlan, GoneReason, MAX_FRAME_CREDITS, MAX_POPUPS_PER_PARENT, MAX_SURFACES, Session,
+    SessionEvent,
 };
-pub use surface::{AckError, ConfigureSerial, Scale, Surface, SurfaceId};
+pub use surface::{ConfigureSerial, MAX_PENDING_CONFIGURES, Scale, Surface, SurfaceId};

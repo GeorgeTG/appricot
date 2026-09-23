@@ -159,7 +159,6 @@ where
             prefer: Encoding::Raw,
             parked_resume_serial: 0,
             parked_fatal: None,
-            started: tokio::time::Instant::now(),
         },
         Start::Resume(parked) => {
             let serial = parked.resume_serial;
@@ -173,7 +172,6 @@ where
                 prefer: Encoding::Raw,
                 parked_resume_serial: serial,
                 parked_fatal: fatal,
-                started: tokio::time::Instant::now(),
             }
         }
     };
@@ -205,9 +203,11 @@ struct Pump<B> {
     /// The living surface ids, in creation order, mirrored from the session's announcements
     /// (the session exposes no iteration, by design: the streamer is the one that talks).
     surfaces: Vec<SurfaceId>,
-    /// Per surface, the core serial of the pending configure and the client serial it must be
-    /// answered with: core mints its own serials, the wire promises the client its own back.
-    configure_acks: HashMap<SurfaceId, (u32, u32)>,
+    /// Per surface, the configures still waiting, oldest first: the core serial of each and
+    /// the client serial it must be answered with. Core mints its own serials, the wire
+    /// promises the client its own back. Bounded like core's queue, by
+    /// [`appricot_core::MAX_PENDING_CONFIGURES`].
+    configure_acks: HashMap<SurfaceId, Vec<(u32, u32)>>,
     /// The codec the encoder prefers this session (RAW is the fallback whatever this says).
     prefer: Encoding,
     /// The serial a parked session was answering with when its socket died; 0 on a fresh
@@ -215,9 +215,6 @@ struct Pump<B> {
     parked_resume_serial: u32,
     /// Set when resuming a session whose display died while parked.
     parked_fatal: Option<BackendError>,
-    /// The instant this pump started; every monotonic millisecond handed to the session is
-    /// measured from here.
-    started: tokio::time::Instant,
 }
 
 /// Hands an unclaimed backend back after a refused handshake.
@@ -453,7 +450,7 @@ where
         match from_client {
             // The socket died without a Bye: park the session for its grace (v0.md §7).
             None | Some(Err(_)) => {
-                pump.session.detach(monotonic_ms(pump.started));
+                pump.session.detach();
                 tracing::info!(session = %session_id, "socket gone; session parked for the grace");
                 return SessionEnd::Parked(ParkedSession {
                     session: pump.session,
@@ -474,7 +471,7 @@ where
                 Message::Close(_) => {
                     // A close frame, not a Bye: the client is gone without a word. Parked,
                     // like any dropped socket — the grace decides what happens next.
-                    pump.session.detach(monotonic_ms(pump.started));
+                    pump.session.detach();
                     tracing::info!(session = %session_id, "socket closed; session parked");
                     return SessionEnd::Parked(ParkedSession {
                         session: pump.session,
@@ -553,8 +550,9 @@ async fn decode_client_message(sink: &mut WsSink, bytes: &[u8]) -> Result<Body, 
 /// Applies the host's configure to the session and the backend.
 ///
 /// An absent size names nothing and is ignored, never fatal. The session names the serial the
-/// ack will carry once the backend reports the size the app took.
-async fn apply_configure<B>(pump: &mut Pump<B>, m: wire::Configure) -> Flow
+/// ack will carry once the backend reports the size the app took — or acks it at once when
+/// the proposal changes nothing, and that ack goes out here.
+async fn apply_configure<B>(sink: &mut WsSink, pump: &mut Pump<B>, m: wire::Configure) -> Flow
 where
     B: CaptureBackend + InputSink + Send + 'static,
 {
@@ -563,9 +561,16 @@ where
         return Flow::On; // absent size names nothing; ignore, never fatal
     };
     let size = Size::new(size.width, size.height);
-    if let Some(core_serial) = pump.session.configure(id, size) {
-        pump.configure_acks
-            .insert(id, (core_serial.get(), m.serial));
+    let mut out = Vec::new();
+    if let Some(core_serial) = pump.session.configure(id, size, &mut out) {
+        let waiting = pump.configure_acks.entry(id).or_default();
+        if waiting.len() >= appricot_core::MAX_PENDING_CONFIGURES {
+            waiting.remove(0);
+        }
+        waiting.push((core_serial.get(), m.serial));
+        if emit_events(sink, pump, &out).await == Flow::Stop {
+            return Flow::Stop;
+        }
         if let Err(e) = pump.backend.configure(id, size).await {
             tracing::warn!(surface = id.get(), error = %e, "backend refused a configure");
         }
@@ -610,7 +615,7 @@ where
         return Flow::Stop;
     };
     match body {
-        Body::Configure(m) => apply_configure(pump, m).await,
+        Body::Configure(m) => apply_configure(sink, pump, m).await,
         Body::FrameAck(m) => {
             pump.session
                 .frame_ack(SurfaceId::new(m.surface_id), m.sequence);
@@ -756,7 +761,10 @@ where
                 pump.surfaces.push(*id);
             }
         }
-        SessionEvent::SurfaceGone { id, .. } => pump.surfaces.retain(|s| s != id),
+        SessionEvent::SurfaceGone { id, .. } => {
+            pump.surfaces.retain(|s| s != id);
+            pump.configure_acks.remove(id);
+        }
         _ => {}
     }
     let body = match event {
@@ -800,17 +808,26 @@ where
         SessionEvent::FocusAsk { id } => Body::FocusAsk(wire::FocusAsk {
             surface_id: id.get(),
         }),
-        // An app's unprompted resize is reported as a resize ask: the host owns sizes
-        // (rule 6), and answering with Configure is how it takes one.
-        SessionEvent::Resized { id, size } | SessionEvent::ResizeAsk { id, size } => {
-            Body::ResizeAsk(ResizeAsk {
-                surface_id: id.get(),
-                size: Some(wire::Size {
-                    width: size.width,
-                    height: size.height,
-                }),
-            })
-        }
+        // A size the app took on its own is a fact, not a request: the frames that follow use
+        // it, so the client learns it first, as an ack under serial 0, which no host serial
+        // ever is (v0.md §4.2).
+        SessionEvent::Resized { id, size } => Body::ConfigureAck(ConfigureAck {
+            surface_id: id.get(),
+            serial: 0,
+            size: Some(wire::Size {
+                width: size.width,
+                height: size.height,
+            }),
+        }),
+        // A resize the app only asked for: the host owns sizes (rule 6), and answering with
+        // Configure is how it grants one.
+        SessionEvent::ResizeAsk { id, size } => Body::ResizeAsk(ResizeAsk {
+            surface_id: id.get(),
+            size: Some(wire::Size {
+                width: size.width,
+                height: size.height,
+            }),
+        }),
         SessionEvent::CursorChanged { cursor } => Body::CursorImage(CursorImage {
             serial: cursor.serial,
             width: cursor.size.width,
@@ -819,31 +836,28 @@ where
             hotspot_y: u32::try_from(cursor.hotspot.y.max(0)).unwrap_or(0),
             argb_premultiplied: cursor.argb.clone(),
         }),
+        SessionEvent::CursorGone => Body::CursorGone(wire::CursorGone {}),
         SessionEvent::ClipboardAsk => Body::ClipboardAsk(wire::ClipboardAsk {}),
         SessionEvent::ConfigureAcked { id, serial, size } => {
-            let client_serial = pump
-                .configure_acks
-                .get(id)
-                .filter(|(core, _)| *core == serial.get())
-                .map(|(_, client)| *client);
-            let Some(client_serial) = client_serial else {
-                // An ack for a configure this client never sent (a leftover from before a
-                // resume, or a replaced proposal): nothing to answer, and never fatal.
-                return Ok(());
-            };
+            // The ack answers the named configure and every older one still waiting: the
+            // client hears the newest serial, and the older ones are done with.
+            let client_serial = pump.configure_acks.get_mut(id).and_then(|waiting| {
+                let at = waiting.iter().position(|(core, _)| *core == serial.get())?;
+                let client = waiting[at].1;
+                waiting.drain(..=at);
+                Some(client)
+            });
             Body::ConfigureAck(ConfigureAck {
                 surface_id: id.get(),
-                serial: client_serial,
+                // No client serial names it (a proposal this connection never sent): the
+                // size is still the surface's from here on, so it goes out like any size
+                // the app took on its own, under serial 0.
+                serial: client_serial.unwrap_or(0),
                 size: Some(wire::Size {
                     width: size.width,
                     height: size.height,
                 }),
             })
-        }
-        // A variant a later core adds carries no wire meaning yet: log it and move on.
-        other => {
-            tracing::debug!(event = ?other, "session event with no wire mapping yet");
-            return Ok(());
         }
     };
     send_body(sink, body).await
@@ -857,10 +871,9 @@ async fn pump_frames<B>(sink: &mut WsSink, pump: &mut Pump<B>) -> Flow
 where
     B: CaptureBackend + InputSink + Send + 'static,
 {
-    let now = monotonic_ms(pump.started);
     let ids: Vec<SurfaceId> = pump.surfaces.clone();
     for id in ids {
-        let Some(plan) = pump.session.plan_frame(id, Some(now)) else {
+        let Some(plan) = pump.session.plan_frame(id) else {
             continue;
         };
         let Some(surface) = pump.session.surface(id) else {
@@ -1004,11 +1017,6 @@ async fn send_error_and_bye(
     send_bye(sink, reason, "").await
 }
 
-/// The session's monotonic milliseconds, from the instant the pump started.
-fn monotonic_ms(started: tokio::time::Instant) -> u64 {
-    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
 /// Maps a model role onto the wire.
 fn wire_role(role: Role) -> i32 {
     match role {
@@ -1018,14 +1026,10 @@ fn wire_role(role: Role) -> i32 {
 }
 
 /// Maps a gone reason onto the wire.
-///
-/// The wildcard arm carries `AppClosed` and any reason a later core adds: an unknown reason is
-/// still a surface going, and the host learns it the way v0 names it.
 fn wire_gone_reason(reason: GoneReason) -> i32 {
     match reason {
+        GoneReason::AppClosed => SurfaceGoneReason::GoneAppClosed as i32,
         GoneReason::ParentGone => SurfaceGoneReason::GoneParentGone as i32,
-        GoneReason::SessionEnd => SurfaceGoneReason::GoneSessionEnd as i32,
-        _ => SurfaceGoneReason::GoneAppClosed as i32,
     }
 }
 

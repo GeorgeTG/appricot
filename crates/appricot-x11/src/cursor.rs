@@ -26,7 +26,7 @@ pub(crate) fn cursor_image(
         full.width.min(MAX_CURSOR_SIDE),
         full.height.min(MAX_CURSOR_SIDE),
     );
-    let mut argb = Vec::with_capacity(CursorImage::byte_len(size));
+    let mut argb = Vec::with_capacity(CursorImage::byte_len(size).unwrap_or(0));
     for y in 0..size.height {
         for x in 0..size.width {
             let packed = pixels[(y * full.width + x) as usize].to_be_bytes();

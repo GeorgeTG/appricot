@@ -289,7 +289,7 @@ message FocusAsk {
 }
 
 /// S -> C. The app asked to resize itself (X11 ConfigureRequest on its own window). The
-/// host decides; it answers with Configure if it agrees.
+/// host decides; it answers with Configure if it agrees. Nothing changes until it does.
 message ResizeAsk {
   uint32 surface_id = 1;
   Size size = 2;
@@ -303,8 +303,10 @@ message Configure {
   Size size = 3;
 }
 
-/// S -> C. The app applied the configure named by the serial — or clamped it to its own
-/// minimum. The size here is the size the app really took; the host sizes its chrome to it.
+/// S -> C. The surface has a new size, sent before any Frame whose tiles use it. A nonzero
+/// serial answers the configure it names and every older one: the app applied it, or
+/// clamped it. Serial 0 answers none: the app changed the size on its own. Either way the
+/// size is the size the app really took, and the host sizes its chrome to it.
 message ConfigureAck {
   uint32 surface_id = 1;
   uint32 serial = 2;

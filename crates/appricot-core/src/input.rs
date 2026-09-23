@@ -19,8 +19,8 @@ pub struct Keysym(pub u32);
 pub struct KeyCode(String);
 
 impl KeyCode {
-    /// The most bytes a key code may carry; `MAX_KEY_CODE_BYTES` on the wire.
-    pub const MAX_BYTES: usize = 16;
+    /// The most bytes a key code may carry: the wire's `MAX_KEY_CODE_BYTES`.
+    pub const MAX_BYTES: usize = appricot_proto::limits::MAX_KEY_CODE_BYTES;
 
     /// Wraps `code` when it is ASCII, non-empty and short enough, else `None`.
     pub fn new(code: &str) -> Option<Self> {
@@ -53,7 +53,6 @@ pub struct KeyEvent {
 
 /// A pointer button.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum PointerButton {
     /// The primary button.
     Left,
@@ -112,7 +111,8 @@ pub trait InputSink {
     /// tells the app, the way its display server expects (on X11, a `ConfigureWindow` plus
     /// a synthetic `ConfigureNotify`). When the app has taken the size — it may clamp to
     /// its own minimum — the backend reports it with
-    /// [`SurfaceEvent::Resized`](crate::SurfaceEvent).
+    /// [`SurfaceEvent::Resized`](crate::SurfaceEvent), even when that size is the one the
+    /// surface already had: the report is what answers the configure.
     fn configure(&mut self, id: SurfaceId, size: Size) -> Result<(), Self::Error>;
 
     /// Asks the app to close surface `id`. It is a request: the app decides, nothing is

@@ -782,6 +782,8 @@ async fn a_dropped_socket_resumes_within_the_grace() {
     let announced = expect_surface_new(&mut second, 7).await;
     let size = announced.size.expect("a size is carried");
     assert_eq!((size.width, size.height), (120, 80));
+    // Then exactly one cursor message (v0.md §7): no cursor was ever seen, so CursorGone.
+    assert!(matches!(read_body(&mut second).await, Body::CursorGone(_)));
     let frame = expect_frame(&mut second, 7).await;
     assert!(frame.full_redraw, "a resume repaints everything");
     assert_eq!(frame.sequence, 1, "the resume restarts the sequences");

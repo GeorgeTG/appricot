@@ -1218,7 +1218,6 @@ impl InputSink for X11Backend {
             PointerButton::Left => BUTTON_LEFT,
             PointerButton::Middle => BUTTON_MIDDLE,
             PointerButton::Right => BUTTON_RIGHT,
-            _ => return Ok(()),
         };
         self.ensure_target(id)?;
         match state {

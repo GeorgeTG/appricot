@@ -20,7 +20,8 @@ owning node. It does not carry frames; an edge router does, by reading the ticke
 
 **Configure / ack.** The two-step size and state handshake. The host proposes a configure with a
 serial; the streamer applies it to the app and sends an ack with the same serial and the size the
-app really took. It follows xdg-shell's `configure` / `ack_configure`. Here the host plays the
+app really took. An ack with serial 0 answers no configure: it reports a size the app took on its
+own. It follows xdg-shell's `configure` / `ack_configure`. Here the host plays the
 compositor, so configure travels from the client library to the streamer.
 
 **Credit.** One frame a surface may have in flight: sent and not yet acked. At most

@@ -1,7 +1,7 @@
 //! Reading pixels out of a window the Composite extension holds for the backend.
 
-use appricot_core::Size;
 use appricot_core::{PixelBuffer, PixelFormat};
+use appricot_core::{Point, Rect, Size};
 
 use crate::BackendError;
 
@@ -87,6 +87,52 @@ fn convert3(data: &[u8], size: Size) -> Result<PixelBuffer, BackendError> {
     })
 }
 
+/// A `BGRX8888` buffer of `size`, every byte zero: what a capture returns for the part of
+/// a rectangle no window pixel covers.
+pub(crate) fn zeroed(size: Size) -> PixelBuffer {
+    let stride = size.width as usize * DEPTH32_BPP;
+    PixelBuffer {
+        size,
+        stride,
+        format: PixelFormat::Bgrx8888,
+        data: vec![0; stride * size.height as usize],
+    }
+}
+
+/// Puts `part`, whose top-left pixel is at `at`, into a buffer covering exactly `rect`,
+/// zeros around it. `part` must lie inside `rect`; whatever does not is cut off.
+///
+/// This is how a capture keeps its contract (C2): the buffer always has the size of the
+/// rectangle asked for, even when the window no longer covers all of it.
+pub(crate) fn place_in(part: PixelBuffer, rect: Rect, at: Point) -> PixelBuffer {
+    if part.size == rect.size && at == rect.origin {
+        return part;
+    }
+    let mut out = zeroed(rect.size);
+    let Some(shared) = Rect::new(at.x, at.y, part.size.width, part.size.height).intersection(rect)
+    else {
+        return out;
+    };
+    // Offsets are non-negative: `shared` lies inside both rectangles.
+    let offset = |v: i32| usize::try_from(v).unwrap_or(0);
+    let row_bytes = shared.size.width as usize * DEPTH32_BPP;
+    for row in 0..shared.size.height as usize {
+        let src_x = offset(shared.origin.x - at.x) * DEPTH32_BPP;
+        let src_y = offset(shared.origin.y - at.y) + row;
+        let dst_x = offset(shared.origin.x - rect.origin.x) * DEPTH32_BPP;
+        let dst_y = offset(shared.origin.y - rect.origin.y) + row;
+        let src = src_y * part.stride + src_x;
+        let dst = dst_y * out.stride + dst_x;
+        if let (Some(from), Some(to)) = (
+            part.data.get(src..src + row_bytes),
+            out.data.get_mut(dst..dst + row_bytes),
+        ) {
+            to.copy_from_slice(from);
+        }
+    }
+    out
+}
+
 /// A 4-byte-per-pixel image copied row by row.
 fn copy4(data: &[u8], size: Size) -> Result<PixelBuffer, BackendError> {
     let width = size.width as usize;
@@ -112,10 +158,85 @@ fn copy4(data: &[u8], size: Size) -> Result<PixelBuffer, BackendError> {
 
 #[cfg(test)]
 mod tests {
-    use appricot_core::Size;
+    use appricot_core::{PixelBuffer, PixelFormat, Point, Rect, Size};
 
-    use super::convert_zpixmap;
+    use super::{convert_zpixmap, place_in, zeroed};
     use crate::BackendError;
+
+    /// A `width` x `height` buffer whose pixel `(x, y)` is `[x, y, 0xaa, 0xff]`.
+    fn pattern(width: u32, height: u32) -> PixelBuffer {
+        let mut data = Vec::new();
+        for y in 0..height {
+            for x in 0..width {
+                data.extend_from_slice(&[
+                    u8::try_from(x).unwrap_or(0),
+                    u8::try_from(y).unwrap_or(0),
+                    0xaa,
+                    0xff,
+                ]);
+            }
+        }
+        PixelBuffer {
+            size: Size::new(width, height),
+            stride: width as usize * 4,
+            format: PixelFormat::Bgrx8888,
+            data,
+        }
+    }
+
+    fn pixel(buffer: &PixelBuffer, x: usize, y: usize) -> [u8; 4] {
+        let at = y * buffer.stride + x * 4;
+        buffer.data[at..at + 4].try_into().expect("four bytes")
+    }
+
+    #[test]
+    fn a_zeroed_buffer_has_the_full_size_and_stride() {
+        let buffer = zeroed(Size::new(3, 2));
+        assert_eq!(buffer.size, Size::new(3, 2));
+        assert_eq!(buffer.stride, 12);
+        assert_eq!(buffer.data, vec![0; 24]);
+        // An empty rectangle still reports its size, with no bytes.
+        let empty = zeroed(Size::new(5, 0));
+        assert_eq!(empty.size, Size::new(5, 0));
+        assert!(empty.data.is_empty());
+    }
+
+    #[test]
+    fn a_part_that_fills_the_rect_is_returned_as_is() {
+        let part = pattern(4, 3);
+        let placed = place_in(part.clone(), Rect::new(8, 8, 4, 3), Point::new(8, 8));
+        assert_eq!(placed, part);
+    }
+
+    #[test]
+    fn a_part_covering_the_top_left_is_padded_with_zeros() {
+        // The window shrank to 2x2 inside a 4x3 tile at the surface origin.
+        let placed = place_in(pattern(2, 2), Rect::new(0, 0, 4, 3), Point::new(0, 0));
+        assert_eq!(placed.size, Size::new(4, 3));
+        assert_eq!(placed.stride, 16);
+        assert_eq!(placed.data.len(), 48);
+        assert_eq!(pixel(&placed, 0, 0), [0, 0, 0xaa, 0xff]);
+        assert_eq!(pixel(&placed, 1, 1), [1, 1, 0xaa, 0xff]);
+        assert_eq!(pixel(&placed, 2, 0), [0; 4]);
+        assert_eq!(pixel(&placed, 0, 2), [0; 4]);
+        assert_eq!(pixel(&placed, 3, 2), [0; 4]);
+    }
+
+    #[test]
+    fn a_part_inside_the_rect_lands_at_its_offset() {
+        // The tile starts at (10, 20); the window's pixels cover (11, 21) to (12, 22).
+        let placed = place_in(pattern(2, 2), Rect::new(10, 20, 4, 4), Point::new(11, 21));
+        assert_eq!(pixel(&placed, 0, 0), [0; 4]);
+        assert_eq!(pixel(&placed, 1, 1), [0, 0, 0xaa, 0xff]);
+        assert_eq!(pixel(&placed, 2, 2), [1, 1, 0xaa, 0xff]);
+        assert_eq!(pixel(&placed, 3, 3), [0; 4]);
+    }
+
+    #[test]
+    fn a_part_outside_the_rect_leaves_only_zeros() {
+        let placed = place_in(pattern(2, 2), Rect::new(0, 0, 2, 2), Point::new(50, 50));
+        assert_eq!(placed, zeroed(Size::new(2, 2)));
+    }
 
     #[test]
     fn depth_24_pixels_become_bgrx() {

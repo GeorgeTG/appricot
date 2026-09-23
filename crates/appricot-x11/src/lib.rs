@@ -13,15 +13,20 @@
 //! - Map X windows into the `appricot-core` model. An override-redirect window becomes a
 //!   popup, and `WM_TRANSIENT_FOR` names a parent (see [`classify`]).
 //!
-//! The backend itself is [`X11Backend::connect`]; the layout decision that shapes its
-//! window management — toplevels kept apart in a large root — is documented in the `wm`
-//! module.
+//! The backend itself is [`X11Backend::connect`]. Its layout — toplevels placed where they
+//! overlap least, with nothing relying on it — is documented in the `wm` module.
+//!
+//! Every size the backend reports is cut to the root and to the wire's surface caps, the
+//! size of an override-redirect window included: the X server lets a window be any size,
+//! and one the wire cannot carry would end the session.
 //!
 //! # Not its responsibility
 //!
 //! - The wire protocol, encoding, networking and window chrome.
-//! - Trusting the app. A stacking, focus or size request from an X client is reported and
-//!   clamped, then decided by the host, never obeyed as it comes (docs/adr/0003, §5).
+//! - Trusting the app. A focus or size request from an X client is reported and clamped,
+//!   then decided by the host, never obeyed as it comes (docs/adr/0003, §5). Position and
+//!   stacking requests are never granted. The one exception is a toplevel the host has not
+//!   seen yet: its own size request is granted, clamped, while its toolkit builds it.
 //!
 //! The connection is x11rb's `RustConnection`, which is pure Rust: no libxcb, and no unsafe
 //! code unless x11rb's `allow-unsafe-code` feature is on, which this workspace does not turn

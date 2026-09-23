@@ -1,10 +1,8 @@
 //! [`X11Backend`]: the `CaptureBackend` and `InputSink` implementation on X11.
 
-use std::collections::HashSet;
-
 use appricot_core::{
-    CaptureBackend, InputSink, KeyEvent, PixelBuffer, PixelFormat, Point, PointerButton,
-    PressState, Rect, Role, Size, SurfaceEvent, SurfaceId,
+    CaptureBackend, InputSink, KeyEvent, PixelBuffer, Point, PointerButton, PressState, Rect, Role,
+    Size, SurfaceEvent, SurfaceId,
 };
 use x11rb::connection::Connection as _;
 use x11rb::cookie::VoidCookie;
@@ -22,13 +20,16 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::{COPY_DEPTH_FROM_PARENT, COPY_FROM_PARENT, CURRENT_TIME, NONE};
 
 use crate::atoms::Atoms;
-use crate::capture::convert_zpixmap;
+use crate::capture::{convert_zpixmap, place_in, zeroed};
 use crate::clipboard::{Clipboard, latin1_decode, latin1_encode};
 use crate::cursor::cursor_image;
 use crate::error::BackendError;
 use crate::input::{HeldInput, VecPresses};
 use crate::keymap::{Keymap, XK_SHIFT_L, resolve_pressable};
-use crate::wm::{Layout, SizeHints, TrackedWindow, WindowKind, WindowTable};
+use crate::wm::{
+    MAX_SURFACE_HEIGHT, MAX_SURFACE_WIDTH, SizeHints, TrackedWindow, WindowKind, WindowTable,
+    bounded_size, decode_utf8_cut, place_toplevel, size_bound,
+};
 use crate::{MappedWindow, ParentCandidate, classify};
 
 // Predefined atoms named by value (the X protocol fixes them): `AnyPropertyType`, `ATOM`,
@@ -57,6 +58,13 @@ const WHEEL_RIGHT: u8 = 7;
 /// The ICCCM `WM_STATE` value of a normal (not iconified) window.
 const WM_STATE_NORMAL: u32 = 1;
 
+/// The ICCCM `WM_STATE` value of a window its client withdrew.
+const WM_STATE_WITHDRAWN: u32 = 0;
+
+/// The most X events one `drain_events` call handles. An app that floods damage cannot
+/// keep the call looping; what is left stays queued for the next call.
+const MAX_EVENTS_PER_DRAIN: usize = 512;
+
 /// The byte cap a title is cut to, mirroring `appricot-proto`'s `MAX_TITLE_BYTES` (512,
 /// provisional until the wire spec task fixes it).
 const TITLE_CAP: usize = 512;
@@ -82,12 +90,16 @@ struct WindowState {
 /// The S1 backend: window manager, capture and input on one X connection.
 ///
 /// Build it with [`X11Backend::connect`] and drive it through the `CaptureBackend` and
-/// `InputSink` traits. No call blocks: the streamer drains events when the connection is
-/// readable, and spends input and frame credits when it has them.
+/// `InputSink` traits. No call waits for an event: the streamer drains what is ready when
+/// it polls, and spends input and frame credits when it has them. One `drain_events` call
+/// handles a bounded number of events. Calls do make X round trips (reading properties and
+/// images, checked requests), and nothing times them out: an X server that stalls, for
+/// example under a client's `GrabServer`, stalls the calling thread with it.
 ///
 /// The backend is the only window manager on the display — it takes `SubstructureRedirect`
-/// on the root at connect and fails when anyone else holds it. Its layout keeps toplevels
-/// apart inside the root; the wm module (private) documents that decision.
+/// on the root at connect and fails when anyone else holds it. Its layout places toplevels
+/// where they overlap least, but they do overlap on a small root; the wm module (private)
+/// documents why nothing relies on the layout.
 #[derive(Debug)]
 pub struct X11Backend {
     conn: RustConnection,
@@ -96,7 +108,6 @@ pub struct X11Backend {
     /// The invisible window that owns the CLIPBOARD selection for the backend.
     owner_window: x::Window,
     table: WindowTable,
-    layout: Layout,
     clipboard: Clipboard,
     held: HeldInput,
     keymap: Keymap,
@@ -109,11 +120,8 @@ pub struct X11Backend {
     /// The bytes per pixel the server stores a pixmap of each depth at, from its
     /// pixmap-format table: depth 24 is 32bpp on most servers, Xvfb included.
     pixel_bpp: Vec<(u8, usize)>,
-    /// Override-redirect windows seen at creation, waiting to map.
-    or_pending: HashSet<x::Window>,
-    /// Override-redirect windows that mapped with no parentable ancestor and are not shown.
-    orphaned: HashSet<x::Window>,
-    /// Events produced at connect (adoption), drained before live ones.
+    /// Events produced outside a drain (adoption at connect, a configure that changed
+    /// nothing), drained before live ones.
     pending: Vec<SurfaceEvent>,
 }
 
@@ -169,7 +177,6 @@ impl X11Backend {
             atoms,
             owner_window,
             table: WindowTable::new(),
-            layout: Layout::new(),
             clipboard: Clipboard::default(),
             held: HeldInput::new(),
             keymap,
@@ -177,26 +184,34 @@ impl X11Backend {
             ensured: None,
             root_size,
             pixel_bpp,
-            or_pending: HashSet::new(),
-            orphaned: HashSet::new(),
             pending: Vec::new(),
         };
         backend.adopt_existing()?;
         Ok(backend)
     }
 
-    /// Adopts every mapped toplevel that predates the connection.
+    /// Adopts every mapped window that predates the connection: the toplevels first, then
+    /// the override-redirect windows as popups of the toplevels `WM_TRANSIENT_FOR` names.
     fn adopt_existing(&mut self) -> Result<(), BackendError> {
         let children = self.conn.query_tree(self.root)?.reply()?.children;
         let mut adopted = Vec::new();
+        let mut popups = Vec::new();
         for window in children {
             // A gone window answers with an error; there is nothing to adopt.
             let Ok(attrs) = self.conn.get_window_attributes(window)?.reply() else {
                 continue;
             };
-            if attrs.map_state == x::MapState::VIEWABLE && !attrs.override_redirect {
+            if attrs.map_state != x::MapState::VIEWABLE {
+                continue;
+            }
+            if attrs.override_redirect {
+                popups.push(window);
+            } else {
                 self.manage_window(window, false, &mut adopted)?;
             }
+        }
+        for window in popups {
+            self.show_popup(window, &mut adopted)?;
         }
         self.pending.append(&mut adopted);
         Ok(())
@@ -204,14 +219,18 @@ impl X11Backend {
 
     // --- reading the server ----------------------------------------------------------------
 
-    /// The window's geometry in root coordinates, or `None` when it is already gone.
-    fn window_geometry(&self, window: x::Window) -> Result<Option<Rect>, BackendError> {
+    /// The window's geometry — its outer corner in root coordinates and its inside size —
+    /// and its border width, or `None` when it is already gone.
+    fn window_geometry(&self, window: x::Window) -> Result<Option<(Rect, u16)>, BackendError> {
         match self.conn.get_geometry(window)?.reply() {
-            Ok(geo) => Ok(Some(Rect::new(
-                i32::from(geo.x),
-                i32::from(geo.y),
-                u32::from(geo.width),
-                u32::from(geo.height),
+            Ok(geo) => Ok(Some((
+                Rect::new(
+                    i32::from(geo.x),
+                    i32::from(geo.y),
+                    u32::from(geo.width),
+                    u32::from(geo.height),
+                ),
+                geo.border_width,
             ))),
             // Only a gone window answers a geometry query with an error.
             Err(_) => Ok(None),
@@ -282,14 +301,16 @@ impl X11Backend {
                 .chunks_exact(4)
                 .any(|w| u32::from_ne_bytes([w[0], w[1], w[2], w[3]]) == atom)
         };
+        // The reads stop at a byte count, which can split the last character: the decode
+        // drops that tail instead of the whole title.
         let title_net = c_net_name
             .reply()
             .ok()
             .filter(|r| r.type_ == atoms.utf8_string)
-            .and_then(|r| String::from_utf8(r.value).ok());
+            .map(|r| decode_utf8_cut(&r.value));
         let title_name = c_name.reply().ok().map(|r| {
             if r.type_ == atoms.utf8_string {
-                String::from_utf8(r.value).ok().unwrap_or_default()
+                decode_utf8_cut(&r.value)
             } else {
                 latin1_decode(&r.value)
             }
@@ -362,9 +383,9 @@ impl X11Backend {
 
     // --- window management -----------------------------------------------------------------
 
-    /// Manages a toplevel: places it inside the root, configures it, watches its
-    /// properties and damage, maps it when `map`, and reports `Created` — with the
-    /// toplevel parent `WM_TRANSIENT_FOR` names, when it names one this backend manages.
+    /// Manages a toplevel: places it inside the root with no border, configures it,
+    /// watches its properties and damage, maps it when `map`, and reports `Created` — with
+    /// the toplevel parent `WM_TRANSIENT_FOR` names, when it names one this backend manages.
     ///
     /// A client that destroys its window mid-map leaves nothing behind and reports
     /// nothing: every step tolerates the window vanishing under it.
@@ -377,7 +398,7 @@ impl X11Backend {
         if self.table.contains(window) {
             return Ok(());
         }
-        let Some(geometry) = self.window_geometry(window)? else {
+        let Some((geometry, _border)) = self.window_geometry(window)? else {
             return Ok(());
         };
         let state = self.read_window_state(window)?;
@@ -392,15 +413,18 @@ impl X11Backend {
             .and_then(|owner| self.table.get(owner))
             .filter(|owner| owner.kind == WindowKind::Managed)
             .map(|owner| owner.id);
-        let placed = self.layout.place(
-            state.hints.clamp(geometry.size, self.root_size),
+        let placed = place_toplevel(
+            state.hints.clamp(geometry.size, size_bound(self.root_size)),
             self.root_size,
+            &self.table.managed_geometries(),
         );
 
         check_gone(self.conn.change_window_attributes(
             window,
             &x::ChangeWindowAttributesAux::new().event_mask(x::EventMask::PROPERTY_CHANGE),
         )?)?;
+        // The border goes: the named pixmap would include it and shift every pixel and
+        // pointer coordinate by its width.
         check_gone(
             self.conn.configure_window(
                 window,
@@ -408,10 +432,11 @@ impl X11Backend {
                     .x(placed.origin.x)
                     .y(placed.origin.y)
                     .width(placed.size.width)
-                    .height(placed.size.height),
+                    .height(placed.size.height)
+                    .border_width(0),
             )?,
         )?;
-        self.set_wm_state(window);
+        self.set_wm_state(window, WM_STATE_NORMAL);
         if map {
             check_gone(self.conn.map_window(window)?)?;
         }
@@ -423,6 +448,7 @@ impl X11Backend {
             kind: WindowKind::Managed,
             role: Role::Toplevel,
             geometry: placed,
+            border: 0,
             hints: state.hints,
             has_delete: state.has_delete,
             take_focus: state.take_focus,
@@ -439,12 +465,16 @@ impl X11Backend {
             size: placed.size,
             parent,
         });
-        self.report_metadata(window, out);
+        self.report_metadata(window, false, out);
         Ok(())
     }
 
     /// Shows a mapped override-redirect window as a popup, when a parent can be named for
-    /// it; a parentless one is not shown.
+    /// it. A parentless one is not shown; it is looked at again the next time it maps.
+    ///
+    /// The window keeps its own size and border — the WM does not configure what it does
+    /// not manage — but the size it is reported at is cut to the root and the wire's
+    /// caps, and its position is its inside corner.
     fn show_popup(
         &mut self,
         window: x::Window,
@@ -453,35 +483,31 @@ impl X11Backend {
         if self.table.contains(window) {
             return Ok(());
         }
-        let Some(geometry) = self.window_geometry(window)? else {
+        let Some((outer, border)) = self.window_geometry(window)? else {
             return Ok(());
         };
+        let geometry = inner_geometry(outer, border);
+        let size = bounded_size(geometry.size, size_bound(self.root_size));
         let transient = self.read_transient_candidate(window)?;
         let focused = self.focused_candidate();
         let Some(role) = classify(
             MappedWindow {
                 override_redirect: true,
                 origin: geometry.origin,
-                size: geometry.size,
+                size,
             },
             transient,
             focused,
         ) else {
-            self.orphaned.insert(window);
             return Ok(());
         };
-        let size = popup_size(&role);
         let damage = self.create_damage(window);
         let tracked = TrackedWindow {
             id: self.table.peek_next_surface(),
             window,
             kind: WindowKind::OverrideRedirect,
-            geometry: Rect::new(
-                geometry.origin.x,
-                geometry.origin.y,
-                size.width,
-                size.height,
-            ),
+            geometry,
+            border,
             hints: SizeHints::default(),
             has_delete: false,
             take_focus: false,
@@ -505,8 +531,6 @@ impl X11Backend {
 
     /// Frees every server resource a window held and reports it gone.
     fn destroy_window(&mut self, window: x::Window, out: &mut Vec<SurfaceEvent>) {
-        self.or_pending.remove(&window);
-        self.orphaned.remove(&window);
         if let Some(tracked) = self.table.remove(window) {
             if let Some(damage) = tracked.damage
                 && let Ok(cookie) = self.conn.damage_destroy(damage)
@@ -528,10 +552,12 @@ impl X11Backend {
         }
     }
 
-    /// Maintains the ICCCM `WM_STATE` property; toolkits read it to see a real window
-    /// manager is present.
-    fn set_wm_state(&mut self, window: x::Window) {
-        let data: Vec<u8> = [WM_STATE_NORMAL, NONE]
+    /// Maintains the ICCCM `WM_STATE` property: normal while managed, withdrawn when the
+    /// client unmaps. Toolkits read it to see a real window manager is present, and some
+    /// wait for the withdrawn state before they show a window again. The request is not
+    /// waited on: a window gone meanwhile has no state left to keep.
+    fn set_wm_state(&mut self, window: x::Window, state: u32) {
+        let data: Vec<u8> = [state, NONE]
             .iter()
             .flat_map(|word| word.to_ne_bytes())
             .collect();
@@ -544,17 +570,18 @@ impl X11Backend {
             2,
             &data,
         ) {
-            let _ = cookie.check();
+            cookie.ignore_error();
         }
     }
 
-    /// Reports the window's current title and app id, when it has either.
-    fn report_metadata(&self, window: x::Window, out: &mut Vec<SurfaceEvent>) {
+    /// Reports the window's current title and app id: always when `always`, else only when
+    /// it has either.
+    fn report_metadata(&self, window: x::Window, always: bool, out: &mut Vec<SurfaceEvent>) {
         let Some(tracked) = self.table.get(window) else {
             return;
         };
         let title = tracked.title();
-        if title.is_empty() && tracked.app_id.is_empty() {
+        if !always && title.is_empty() && tracked.app_id.is_empty() {
             return;
         }
         let id = tracked.id;
@@ -568,7 +595,7 @@ impl X11Backend {
 
     /// Creates a Damage object on a window, watching every raw rectangle. `RawRectangles`
     /// reports at damage time, so nothing is lost between a notification and the subtract
-    /// that clears the server-side region (see the `DamageNotify` handler).
+    /// that clears the server-side region (see `drain_events`).
     fn create_damage(&mut self, window: x::Window) -> Option<damage::Damage> {
         let damage = self.conn.generate_id().ok()?;
         match self
@@ -591,19 +618,22 @@ impl X11Backend {
         event: Event,
         out: &mut Vec<SurfaceEvent>,
     ) -> Result<(), BackendError> {
+        // Any client can SendEvent to the root with the masks the backend selects there.
+        // Only what ICCCM has clients send is believed: the synthetic UnmapNotify of a
+        // withdrawal, and client messages. A forged ConfigureNotify must not move
+        // root_size, the bound every clamp uses; a forged DestroyNotify must not drop a
+        // live window.
+        if event.sent_event() && !matches!(event, Event::UnmapNotify(_) | Event::ClientMessage(_)) {
+            return Ok(());
+        }
         match event {
             Event::MapRequest(e) => self.manage_window(e.window, true, out),
-            Event::CreateNotify(e) => {
-                // An override-redirect window is remembered at creation and classified
-                // when it maps: WM_TRANSIENT_FOR is set after creation, so classifying at
-                // CreateNotify would race the client's own property write.
-                if e.override_redirect {
-                    self.or_pending.insert(e.window);
-                }
-                Ok(())
-            }
             Event::MapNotify(e) => {
-                if self.or_pending.remove(&e.window) {
+                // Decided from the map itself, not from creation: toolkits map and unmap
+                // one menu window many times, a window may predate the connection, and
+                // override_redirect may be set after creation. WM_TRANSIENT_FOR is read
+                // now, after the client's own writes.
+                if e.override_redirect {
                     self.show_popup(e.window, out)
                 } else {
                     Ok(())
@@ -613,6 +643,13 @@ impl X11Backend {
                 // A popup unmapping is the popup going away; a managed toplevel
                 // unmapping is its surface going away too — a remap arrives as a new
                 // MapRequest and a new surface.
+                if self
+                    .table
+                    .get(e.window)
+                    .is_some_and(|t| t.kind == WindowKind::Managed)
+                {
+                    self.set_wm_state(e.window, WM_STATE_WITHDRAWN);
+                }
                 self.destroy_window(e.window, out);
                 Ok(())
             }
@@ -674,82 +711,125 @@ impl X11Backend {
         }
     }
 
-    /// A tracked window's geometry changed; a size change is a `Resized`.
+    /// A tracked window's geometry changed. A size change frees the stale named pixmap, and
+    /// a change of the size the surface is reported at is a `Resized`.
     fn configure_notify(&mut self, e: x::ConfigureNotifyEvent, out: &mut Vec<SurfaceEvent>) {
         if e.window == self.root {
+            // Only a server-generated event gets here (see handle_event).
             self.root_size = Size::new(u32::from(e.width), u32::from(e.height));
             return;
         }
+        let bound = size_bound(self.root_size);
         let Some(tracked) = self.table.get_mut(e.window) else {
             return;
         };
         let new_size = Size::new(u32::from(e.width), u32::from(e.height));
+        let old_size = tracked.geometry.size;
         let resized = tracked.size_changed(new_size);
-        tracked.geometry = Rect::new(
-            i32::from(e.x),
-            i32::from(e.y),
-            new_size.width,
-            new_size.height,
+        tracked.border = e.border_width;
+        tracked.geometry = inner_geometry(
+            Rect::new(
+                i32::from(e.x),
+                i32::from(e.y),
+                new_size.width,
+                new_size.height,
+            ),
+            e.border_width,
         );
-        if resized {
-            // The named pixmap was named at the old size; it is named again at the next
-            // capture.
-            tracked.pixmap = None;
-            let root = self.root_size;
-            let id = tracked.id;
-            let size = Size::new(
-                new_size.width.min(root.width).max(1),
-                new_size.height.min(root.height).max(1),
-            );
-            out.push(SurfaceEvent::Resized { id, size });
+        if resized
+            && let Some((pixmap, _)) = tracked.pixmap.take()
+            && let Ok(cookie) = self.conn.free_pixmap(pixmap)
+        {
+            // The window has a new backing pixmap now. The named one keeps the old one
+            // alive until it is freed (Composite), so it is freed here, without waiting,
+            // and named again at the next capture.
+            cookie.ignore_error();
+        }
+        let reported = bounded_size(new_size, bound);
+        if reported != bounded_size(old_size, bound) {
+            out.push(SurfaceEvent::Resized {
+                id: tracked.id,
+                size: reported,
+            });
         }
     }
 
-    /// A client asking to reconfigure its own toplevel: granted clamped, and reported.
+    /// A client asking to move, resize, restack or re-border its own toplevel.
+    ///
+    /// The host decides size, position and stacking (ADR-0003 §5). Before the window is
+    /// announced — no surface was created for it yet, so the host has seen nothing — its
+    /// size is granted, cut to the root and the wire's caps: the toolkit is still building
+    /// the window. After that, nothing is applied. The app hears its unchanged geometry in
+    /// the ICCCM synthetic `ConfigureNotify`, and a request that names a width or height
+    /// different from the current size is reported as `ResizeRequested`, for the host to
+    /// answer with a configure or not at all. Position and stacking are never granted.
     fn configure_request(
         &mut self,
         e: x::ConfigureRequestEvent,
         out: &mut Vec<SurfaceEvent>,
     ) -> Result<(), BackendError> {
         let wants = |bit: x::ConfigWindow| e.value_mask & bit == bit;
+        let bound = size_bound(self.root_size);
         let Some(tracked) = self.table.get(e.window) else {
-            // Nothing we manage asked; grant the size clamped to the root.
-            let width = u32::from(e.width).min(self.root_size.width).max(1);
-            let height = u32::from(e.height).min(self.root_size.height).max(1);
-            check_gone(self.conn.configure_window(
-                e.window,
-                &x::ConfigureWindowAux::new().width(width).height(height),
-            )?)?;
+            // Not announced: the size only, bounded, and never a border.
+            let mut aux = x::ConfigureWindowAux::new().border_width(0);
+            if wants(x::ConfigWindow::WIDTH) {
+                aux = aux.width(u32::from(e.width).min(bound.width).max(1));
+            }
+            if wants(x::ConfigWindow::HEIGHT) {
+                aux = aux.height(u32::from(e.height).min(bound.height).max(1));
+            }
+            check_gone(self.conn.configure_window(e.window, &aux)?)?;
             return Ok(());
         };
 
-        let width = if wants(x::ConfigWindow::WIDTH) {
-            u32::from(e.width)
-        } else {
-            tracked.geometry.size.width
-        };
-        let height = if wants(x::ConfigWindow::HEIGHT) {
-            u32::from(e.height)
-        } else {
-            tracked.geometry.size.height
-        };
-        let root = self.root_size;
-        let size = tracked.hints.clamp(Size::new(width, height), root);
         let id = tracked.id;
-        let (x_pos, y_pos) = (tracked.geometry.origin.x, tracked.geometry.origin.y);
-        out.push(SurfaceEvent::ResizeRequested { id, size });
-        // The WM keeps its placement: only the size is granted, plus the stacking the
-        // client asked for (harmless under the kept-apart layout).
-        let mut aux = x::ConfigureWindowAux::new()
-            .x(x_pos)
-            .y(y_pos)
-            .width(size.width)
-            .height(size.height);
-        if wants(x::ConfigWindow::STACK_MODE) {
-            aux = aux.stack_mode(e.stack_mode);
+        let geometry = tracked.geometry;
+        let asked = Size::new(
+            if wants(x::ConfigWindow::WIDTH) {
+                u32::from(e.width)
+            } else {
+                geometry.size.width
+            },
+            if wants(x::ConfigWindow::HEIGHT) {
+                u32::from(e.height)
+            } else {
+                geometry.size.height
+            },
+        );
+        let size = tracked.hints.clamp(asked, bound);
+        self.send_synthetic_configure(e.window, geometry)?;
+        let asks_size = wants(x::ConfigWindow::WIDTH) || wants(x::ConfigWindow::HEIGHT);
+        if asks_size && size != geometry.size {
+            out.push(SurfaceEvent::ResizeRequested { id, size });
         }
-        check_gone(self.conn.configure_window(e.window, &aux)?)?;
         Ok(())
+    }
+
+    /// Sends the ICCCM synthetic `ConfigureNotify` naming `geometry`, which some clients
+    /// wait for: after a host configure, and after a request the WM did not apply.
+    fn send_synthetic_configure(
+        &self,
+        window: x::Window,
+        geometry: Rect,
+    ) -> Result<(), BackendError> {
+        let notify = x::ConfigureNotifyEvent {
+            response_type: x::CONFIGURE_NOTIFY_EVENT,
+            sequence: 0,
+            event: window,
+            window,
+            above_sibling: NONE,
+            x: clamp_i16(geometry.origin.x),
+            y: clamp_i16(geometry.origin.y),
+            width: clamp_u16(geometry.size.width),
+            height: clamp_u16(geometry.size.height),
+            border_width: 0,
+            override_redirect: false,
+        };
+        check_gone(
+            self.conn
+                .send_event(false, window, x::EventMask::STRUCTURE_NOTIFY, notify)?,
+        )
     }
 
     /// Titles, app ids, protocols, size hints and the EWMH active window, read on change.
@@ -788,15 +868,19 @@ impl X11Backend {
         // keeps whatever map time saw.
         let atom = e.atom;
         if atom == atoms.net_wm_name || atom == atoms.wm_name || atom == atoms.wm_class {
-            // Re-read the trio so a Metadata event carries both fields coherently.
-            let _ = tracked;
+            // Re-read the trio so a Metadata event carries both fields coherently. A change
+            // is reported even when it empties both: the host must drop the old title.
+            let before = (tracked.title(), tracked.app_id.clone());
             let state = self.read_window_state(e.window)?;
-            if let Some(tracked) = self.table.get_mut(e.window) {
-                tracked.title_net = state.title_net;
-                tracked.title_name = state.title_name;
-                tracked.app_id = state.app_id;
+            let Some(tracked) = self.table.get_mut(e.window) else {
+                return Ok(());
+            };
+            tracked.title_net = state.title_net;
+            tracked.title_name = state.title_name;
+            tracked.app_id = state.app_id;
+            if (tracked.title(), tracked.app_id.clone()) != before {
+                self.report_metadata(e.window, true, out);
             }
-            self.report_metadata(e.window, out);
             return Ok(());
         }
         let is_protocols = atom == atoms.wm_protocols;
@@ -850,8 +934,8 @@ impl X11Backend {
         }
     }
 
-    /// Damage happened on a tracked window: report it clamped, and clear the server-side
-    /// region.
+    /// Damage happened on a tracked window: report it clipped to the size the surface is
+    /// reported at. `drain_events` clears the server-side region afterwards.
     fn damage_notify(&mut self, e: damage::NotifyEvent, out: &mut Vec<SurfaceEvent>) {
         let rect = Rect::new(
             i32::from(e.area.x),
@@ -859,26 +943,14 @@ impl X11Backend {
             u32::from(e.area.width),
             u32::from(e.area.height),
         );
-        let damage = self.table.get(e.drawable).and_then(|t| t.damage);
+        let bound = size_bound(self.root_size);
         if let Some(tracked) = self.table.get_mut(e.drawable) {
-            let bounds = Rect::new(
-                0,
-                0,
-                tracked.geometry.size.width,
-                tracked.geometry.size.height,
-            );
+            let size = bounded_size(tracked.geometry.size, bound);
+            let bounds = Rect::new(0, 0, size.width, size.height);
             if let Some(inside) = rect.intersection(bounds) {
                 let id = tracked.id;
                 out.push(SurfaceEvent::Damaged { id, rect: inside });
             }
-        }
-        // Clear the region so it cannot grow without bound. New damage still reports:
-        // RawRectangles events were generated when the damage happened, not when the
-        // region empties.
-        if let Some(damage) = damage
-            && let Ok(cookie) = self.conn.damage_subtract(damage, NONE, NONE)
-        {
-            let _ = cookie.check();
         }
     }
 
@@ -1130,12 +1202,34 @@ impl X11Backend {
 impl CaptureBackend for X11Backend {
     type Error = BackendError;
 
+    /// Moves what is ready into `out`: at most 512 X events per call, so a flood cannot
+    /// keep the caller from its other work. The rest stays queued for the next call.
     fn drain_events(&mut self, out: &mut Vec<SurfaceEvent>) -> Result<(), Self::Error> {
         out.append(&mut self.pending);
         self.conn.flush()?;
-        while let Some(event) = self.conn.poll_for_event()? {
+        let mut damaged: Vec<damage::Damage> = Vec::new();
+        for _ in 0..MAX_EVENTS_PER_DRAIN {
+            let Some(event) = self.conn.poll_for_event()? else {
+                break;
+            };
+            if let Event::DamageNotify(e) = &event
+                && !event.sent_event()
+                && !damaged.contains(&e.damage)
+            {
+                damaged.push(e.damage);
+            }
             self.handle_event(event, out)?;
         }
+        // Clear each reporting damage object's server-side region, once per drain and
+        // without waiting, so it cannot grow without bound. New damage still reports:
+        // RawRectangles events are generated when the damage happens, not when the region
+        // empties. The error for a window destroyed meanwhile is dropped.
+        for damage in damaged {
+            self.conn
+                .damage_subtract(damage, NONE, NONE)?
+                .ignore_error();
+        }
+        self.conn.flush()?;
         Ok(())
     }
 
@@ -1143,21 +1237,30 @@ impl CaptureBackend for X11Backend {
         Ok(self.root_size)
     }
 
+    /// Copies `rect` of surface `id`. The buffer is always exactly `rect.size` (C2): the
+    /// part of `rect` outside the window's current geometry — a tile planned before a
+    /// shrink reached the session — is zeros. A `rect` past the wire's surface caps breaks
+    /// the trait contract (it is at most one tile) and is cut to them, which keeps the
+    /// zero fill bounded.
     fn capture(&mut self, id: SurfaceId, rect: Rect) -> Result<PixelBuffer, Self::Error> {
         let Some(tracked) = self.table.by_surface(id) else {
             return Err(BackendError::UnknownSurface(id));
         };
+        let rect = Rect::new(
+            rect.origin.x,
+            rect.origin.y,
+            rect.size.width.min(MAX_SURFACE_WIDTH),
+            rect.size.height.min(MAX_SURFACE_HEIGHT),
+        );
         let window = tracked.window;
+        let border = i32::from(tracked.border);
         let surface_size = tracked.geometry.size;
         let bounds = Rect::new(0, 0, surface_size.width, surface_size.height);
         let Some(clamped) = rect.intersection(bounds) else {
-            return Ok(empty_buffer(rect.size));
+            return Ok(zeroed(rect.size));
         };
-        if clamped.is_empty() {
-            return Ok(empty_buffer(clamped.size));
-        }
 
-        // The named pixmap tracks the window's size; a resize dropped it, so name again.
+        // The named pixmap tracks the window's size; a resize freed it, so name again.
         let current = self
             .table
             .get(window)
@@ -1172,20 +1275,22 @@ impl CaptureBackend for X11Backend {
             pixmap
         };
 
+        // The named pixmap includes the border; the surface starts inside it.
         let reply = self
             .conn
             .get_image(
                 x::ImageFormat::Z_PIXMAP,
                 pixmap,
-                clamp_i16(clamped.origin.x),
-                clamp_i16(clamped.origin.y),
+                clamp_i16(clamped.origin.x.saturating_add(border)),
+                clamp_i16(clamped.origin.y.saturating_add(border)),
                 clamp_u16(clamped.size.width),
                 clamp_u16(clamped.size.height),
                 !0,
             )?
             .reply()?;
         let bpp = self.bpp_for_depth(reply.depth);
-        convert_zpixmap(reply.depth, &reply.data, clamped.size, bpp)
+        let part = convert_zpixmap(reply.depth, &reply.data, clamped.size, bpp)?;
+        Ok(place_in(part, rect, clamped.origin))
     }
 }
 
@@ -1300,13 +1405,19 @@ impl InputSink for X11Backend {
         Ok(())
     }
 
+    /// Applies the host's configure, clamped to the size hints, the root and the wire's
+    /// caps. When that leaves the reported size as it is, the X server reports nothing, so
+    /// the backend reports `Resized` with the size the window has itself, and the host's
+    /// configure is answered all the same (C1).
     fn configure(&mut self, id: SurfaceId, size: Size) -> Result<(), Self::Error> {
-        let Some(tracked) = self.table.by_surface_mut(id) else {
+        let bound = size_bound(self.root_size);
+        let Some(tracked) = self.table.by_surface(id) else {
             return Err(BackendError::UnknownSurface(id));
         };
-        let size = tracked.hints.clamp(size, self.root_size);
+        let size = tracked.hints.clamp(size, bound);
         let window = tracked.window;
-        let (x_pos, y_pos) = (tracked.geometry.origin.x, tracked.geometry.origin.y);
+        let origin = tracked.geometry.origin;
+        let unchanged = size == bounded_size(tracked.geometry.size, bound);
         check_gone(
             self.conn.configure_window(
                 window,
@@ -1318,22 +1429,13 @@ impl InputSink for X11Backend {
         // The synthetic ICCCM ConfigureNotify: some clients only react to it. The size it
         // names is the one applied; a following server ConfigureNotify reports what the
         // app actually took.
-        let notify = x::ConfigureNotifyEvent {
-            response_type: x::CONFIGURE_NOTIFY_EVENT,
-            sequence: 0,
-            event: window,
+        self.send_synthetic_configure(
             window,
-            above_sibling: NONE,
-            x: clamp_i16(x_pos),
-            y: clamp_i16(y_pos),
-            width: clamp_u16(size.width),
-            height: clamp_u16(size.height),
-            border_width: 0,
-            override_redirect: false,
-        };
-        self.conn
-            .send_event(false, window, x::EventMask::STRUCTURE_NOTIFY, notify)?
-            .check()?;
+            Rect::new(origin.x, origin.y, size.width, size.height),
+        )?;
+        if unchanged {
+            self.pending.push(SurfaceEvent::Resized { id, size });
+        }
         self.conn.flush()?;
         Ok(())
     }
@@ -1428,22 +1530,29 @@ fn select_xfixes(
 }
 
 /// Writes the minimum EWMH presence, so apps can tell a window manager exists.
+///
+/// The check window names itself in `_NET_SUPPORTING_WM_CHECK` too, as EWMH requires:
+/// toolkits compare the two before they believe the root's. `_NET_SUPPORTED` lists what the
+/// backend acts on: the check, `_NET_WM_NAME` titles, and `_NET_ACTIVE_WINDOW` requests,
+/// which it reports to the host rather than obeys.
 fn announce_ewmh(
     conn: &RustConnection,
     root: x::Window,
     owner: x::Window,
     atoms: &Atoms,
 ) -> Result<(), BackendError> {
-    conn.change_property(
-        x::PropMode::REPLACE,
-        root,
-        atoms.net_supporting_wm_check,
-        XA_WINDOW,
-        32,
-        1,
-        &owner.to_ne_bytes(),
-    )?
-    .check()?;
+    for window in [root, owner] {
+        conn.change_property(
+            x::PropMode::REPLACE,
+            window,
+            atoms.net_supporting_wm_check,
+            XA_WINDOW,
+            32,
+            1,
+            &owner.to_ne_bytes(),
+        )?
+        .check()?;
+    }
     conn.change_property(
         x::PropMode::REPLACE,
         owner,
@@ -1454,14 +1563,22 @@ fn announce_ewmh(
         b"appricot",
     )?
     .check()?;
+    let supported = [
+        atoms.net_supported,
+        atoms.net_supporting_wm_check,
+        atoms.net_wm_name,
+        atoms.net_active_window,
+    ];
+    let data: Vec<u8> = supported.iter().flat_map(|a| a.to_ne_bytes()).collect();
     conn.change_property(
         x::PropMode::REPLACE,
         root,
         atoms.net_supported,
         XA_ATOM,
         32,
-        0,
-        &[],
+        // Format 32 counts elements, not bytes.
+        u32::try_from(supported.len()).unwrap_or(0),
+        &data,
     )?
     .check()?;
     Ok(())
@@ -1513,12 +1630,16 @@ fn wm_class_res_class(raw: &[u8]) -> String {
     parts.next().map(latin1_decode).unwrap_or_default()
 }
 
-/// The size a role places a surface at.
-fn popup_size(role: &Role) -> Size {
-    match role {
-        Role::Popup { positioner, .. } => positioner.size,
-        Role::Toplevel => Size::default(),
-    }
+/// A window's inside geometry from its outer one: the origin moves past the border; X
+/// already reports the size without it.
+fn inner_geometry(outer: Rect, border: u16) -> Rect {
+    let border = i32::from(border);
+    Rect::new(
+        outer.origin.x.saturating_add(border),
+        outer.origin.y.saturating_add(border),
+        outer.size.width,
+        outer.size.height,
+    )
 }
 
 /// Builds one of the bounded strings a `SurfaceEvent` field carries.
@@ -1540,16 +1661,6 @@ where
     match T::try_from(&text[..end]) {
         Ok(value) => value,
         Err(_) => T::try_from("").unwrap_or_else(|_| panic!("the empty string must fit every cap")),
-    }
-}
-
-/// The buffer a capture of nothing returns.
-fn empty_buffer(size: Size) -> PixelBuffer {
-    PixelBuffer {
-        size,
-        stride: 0,
-        format: PixelFormat::Bgrx8888,
-        data: Vec::new(),
     }
 }
 

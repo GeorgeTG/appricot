@@ -63,10 +63,10 @@ Qt6/xcb X11 application on Debian 12 under Docker, no GPU, compared across sever
 transport paths. Every number quoted in these documents says it comes from there, with the method
 in a clause. A number with no such attribution and no checked URL is marked **(unverified)**.
 
-**Kept-apart layout.** The S1 backend's placement rule: X toplevels never overlap — they sit
-left to right in rows in a large root, 16 pixels apart, wrapping, restarting at the origin when
-full — so an XTEST click at a point lands on the window visible there by construction
-(`crates/appricot-x11/src/wm.rs`; the spike may revisit it).
+**Least-overlap layout.** The S1 backend's placement rule: each new X toplevel goes where it
+overlaps the live toplevels least, 16 pixels from its neighbours when there is room. On the
+1400x900 root realistic windows still overlap, so nothing relies on the layout: the input path
+raises its target before a press (`crates/appricot-x11/src/wm.rs`; the spike may revisit it).
 
 **Limits table.** The 24 caps — every length, count and dimension on the wire — that both peers
 check before allocating or looping. Its authoritative home is `wire.proto`; the Rust codec, the

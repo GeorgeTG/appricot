@@ -1,21 +1,18 @@
 # Architecture
 
-**Status: as-built for L1** (refreshed 2026-09-21). Layer 1 — the wire protocol, the five Rust
+**Status: as-built for L1** (refreshed 2026-09-24). Layer 1 — the wire protocol, the five Rust
 crates, the streamer binary and the TypeScript client — is implemented and its gates pass. The
-X11 capture spike has not run: every measurement the spike owns is still open, and each such
-place says so. L2 and L3 remain described here only, so that L1 does not paint them into a
-corner. Anything marked "open" is decided in the task named next to it (see
+X11 capture spike has run and M1 is closed (2026-09-24): its measurements are in
+[spike/findings-2026-09-23.md](spike/findings-2026-09-23.md), and each place below that they
+answer points to it. L2 and L3 remain described here only, so that L1 does not paint them into
+a corner. Anything still marked "open" is decided in the task or milestone named next to it (see
 [roadmap.md](roadmap.md)).
 
-**Update 2026-09-23.** The spike's harness has landed and its first runs are written up in
-[spike/findings-2026-09-23.md](spike/findings-2026-09-23.md): the pilot application before it
-connects to a device, and one run connected to one. The places below that those runs answer point
-to it; the rest stay open.
-
 The three layers, the Wayland-shaped window model and the backend order come from
-[ADR-0004](adr/0004-layers-window-model-and-first-backend.md); the client's rules for server
-data come from [ADR-0003](adr/0003-untrusted-server-client.md). Both are still Proposed, not
-accepted: the landed code follows them, and the user has not adopted them as decisions. The
+[ADR-0004](adr/0004-layers-window-model-and-first-backend.md), which the user accepted on
+2026-09-24 after the spike. The client's rules for server data come from
+[ADR-0003](adr/0003-untrusted-server-client.md), which is still Proposed: the landed code
+follows it, and the user has not adopted it as a decision. The
 licence is decided: APPricot is **MIT OR Apache-2.0**
 ([ADR-0002](adr/0002-licence.md)), and the permissive-only rule for dependencies comes with it.
 If the user amends an ADR, this document follows it.
@@ -86,9 +83,12 @@ code at run time.
 
 *The code map: every crate and package, what each owns, and the one-way edges between them.*
 
-**Open (l1-spike-x11-capture):** who starts Xvfb and the app, and who ends the container when the
-app's last process exits. In the pilot deployment a small in-image supervisor does this. Here it
-may become a streamer mode or a sibling binary. (The dev container's entrypoint starts Xvfb for
+**Open (L2, M4; moved there when M1 closed on 2026-09-24):** who starts Xvfb and the app, and who
+ends the container when the app's last process exits. The spike found that the pilot
+application opens each extra window as a new process, so "the app's last process" is a set, not
+one pid ([spike findings §8](spike/findings-2026-09-23.md#8-connected-to-a-device)). In the
+pilot deployment a small in-image supervisor does this. Here it may become a streamer mode or a
+sibling binary. (The dev container's entrypoint starts Xvfb for
 the integration tests; that is a development convenience, not this decision.)
 
 ### 2.2 L2 node (documented, not scaffolded)
@@ -230,11 +230,11 @@ never a timer; input flows the other way.*
 ## 4. The window model
 
 The model is shaped after Wayland's xdg-shell, whatever the backend is; the decision is
-[ADR-0004](adr/0004-layers-window-model-and-first-backend.md) (Proposed, and followed by the
-landed code). The reasons are in the ADR. In short: Wayland already names the right concepts
-(surfaces with roles, damage per surface, popups placed relative to a parent, per-surface
-scale, explicit configure and ack), and a later Wayland backend should need no change
-to the wire or the client.
+[ADR-0004](adr/0004-layers-window-model-and-first-backend.md) (Accepted 2026-09-24, and
+followed by the landed code). The reasons are in the ADR. In short: Wayland already names the
+right concepts (surfaces with roles, damage per surface, popups placed relative to a parent,
+per-surface scale, explicit configure and ack), and a later Wayland backend should need no
+change to the wire or the client.
 
 ### 4.1 Concepts
 
@@ -297,8 +297,8 @@ realistic windows apart: two 800x600 toplevels, or a 1200x700 window and a 400x3
 overlap whatever the placement. So overlap is the normal case, and **input correctness does not
 depend on the layout**: the input path raises its target before a press (§3.2). A larger root
 keeps more windows apart and lets a toplevel reach the wire's 1920x1200 cap, which the
-1400x900 root never allows; it is a deployment choice, not a requirement. The spike logs how
-the pilot application's override-redirect windows actually place and may flip the choice (the
+1400x900 root never allows; it is a deployment choice, not a requirement. The M1 spike found no
+override-redirect window in the pilot application at all, so nothing flips the choice (the
 decision is documented at the top of `crates/appricot-x11/src/wm.rs`).
 
 For the pilot application the choice matters less than it might. Its menus and its settings panel
@@ -368,7 +368,7 @@ shapes.
 | X11 window-manager work | ours | still needed (smithay's `X11Wm`) for every X11 app | xpra's |
 | Key dependency | x11rb 0.14.0, MIT OR Apache-2.0, 2026-07-16 ([crates.io](https://crates.io/api/v1/crates/x11rb)) | smithay: last crates.io release 0.7.0 on 2025-06-24, MIT ([crates.io](https://crates.io/api/v1/crates/smithay/versions)) | xpra, "GPLv2+" in its `setup.py` ([source](https://raw.githubusercontent.com/Xpra-org/xpra/master/setup.py)); run unmodified, not linked; its wire format is not ours |
 | What it buys | the cheapest measured display stack; direct control | future Wayland-native apps | the least Rust to write |
-| Status here (proposed, ADR-0004) | **first** (M1-M3) | **later** (M6), only for Wayland-native apps; the pilot application does not need it | **open alternative**, priced by the M1 spike |
+| Status here (ADR-0004, accepted 2026-09-24) | **chosen** for M2 and M3, after the M1 spike | **later** (M6), only for Wayland-native apps; the pilot application does not need it | **open alternative, not pursued**: S1 met every need the spike measured, so the spike did not price S3 beyond the figures above |
 
 Reference points. The incumbent this replaces, a KasmVNC session: 304 MiB summed RSS, 62 MiB
 display side, 2.16 % CPU. Xvfb's licence text in Debian is X.Org's MIT variant, with no GPL in the
@@ -381,8 +381,9 @@ How to read the numbers:
   against a single X server. The cgroup's anon + shmem is the better "cost of one more session".
 - The S1 and S2 columns are display stacks only. Neither holds a streamer: the Composite redirect
   holder was left out of the S1 sums, and headless weston exports nothing. The KasmVNC reference
-  and the S3 column include their whole streaming server. The streamer's own cost is unmeasured
-  until the M1 spike.
+  and the S3 column include their whole streaming server. The M1 spike measured the streamer's
+  own cost: about 6-7 MiB RSS and 2-3 MiB anon + shmem
+  ([spike findings §3](spike/findings-2026-09-23.md#3-memory-and-cpu-with-the-streamer-in-the-session)).
 - The S3 column comes from the benchmark's X11 pass (Debian 12, a busy host, CPU from the
   container cgroup, ±1 point). Compare it with that pass's own KasmVNC session, not with the
   Wayland pass's rows: 316 MiB with no client, 334 MiB and 3.3 % CPU with a client after the first
@@ -391,9 +392,10 @@ How to read the numbers:
 - In the Wayland pass the idle CPU is mostly the application retrying an update check with no
   network. It is the same in each of those rows and cancels out.
 - Damage size may dominate the encode cost. Over remote X11 the application's default GL path
-  repainted the whole window for each caret blink (see [§3](#3-the-data-path)). Whether that shows
-  up as whole-window Damage rectangles under Xvfb, where Composite and Damage are local, is
-  **open (l1-spike-x11-capture)**.
+  repainted the whole window for each caret blink (see [§3](#3-the-data-path)). Under Xvfb it
+  does too: the M1 spike logged every repaint of the OpenGL path as one whole-window Damage
+  event, two a second for the caret alone
+  ([spike findings §2](spike/findings-2026-09-23.md#2-the-scene-graph-and-what-it-damages)).
 
 **What dominates the cost is the application, not the transport.** Per session, measured:
 
@@ -461,13 +463,14 @@ attacks:
 
 | Question | Decided in |
 |---|---|
-| Codec for motion (the lossless pair, RAW and in-house QOI, is decided for v0, [protocol/v0.md §11](protocol/v0.md#11-tile-codecs)) | l1-spike-x11-capture. On the login screen QOI is 2 % of RAW at 90 µs per tile; the cost is that an OpenGL app damages its whole window on every repaint ([spike findings §2, §4](spike/findings-2026-09-23.md#2-the-scene-graph-and-what-it-damages)) |
-| X root equals the viewport, or toplevels spread over the root | landed as least-overlap placement in the root (§4.2); l1-spike-x11-capture revisits it against real popups |
-| Who supervises Xvfb and the app inside the container | l1-spike-x11-capture |
-| Does the streamer run under a different uid from the app | l1-spike-x11-capture (and L2's egress design) |
+| Codec for motion (the lossless pair, RAW and in-house QOI, is decided for v0, [protocol/v0.md §11](protocol/v0.md#11-tile-codecs)) | answered by the M1 spike for v0: QOI is 2 % of RAW at 90 µs per tile on the pilot's UI, so no new codec is needed; the cost is that an OpenGL app damages its whole window on every repaint ([spike findings §2, §4](spike/findings-2026-09-23.md#2-the-scene-graph-and-what-it-damages)). Skipping tiles unchanged since the last frame is proposed for M2 |
+| X root equals the viewport, or toplevels spread over the root | least-overlap placement in the root (§4.2) stands: the pilot maps no override-redirect window at all, before or after it connects ([spike findings §1, §8](spike/findings-2026-09-23.md#1-the-window-inventory)) |
+| Who supervises Xvfb and the app inside the container | L2 (M4); moved there when M1 closed, 2026-09-24 |
+| Does the streamer run under a different uid from the app | L2 (M4), with its egress design; moved there when M1 closed, 2026-09-24 |
 | The pilot application's full window inventory once it connects to a back end | logged in one connected run: no X window besides the main windows, each from its own process ([spike findings §8](spike/findings-2026-09-23.md#8-connected-to-a-device)) |
-| S1 versus S3 | l1-spike-x11-capture |
-| The streamer's own memory and CPU cost, next to the reference figures of §6 | measured on the login screen: about 6 MiB RSS, 2 MiB anon, 0.4-1.4 % of a core idle ([spike findings §3](spike/findings-2026-09-23.md#3-memory-and-cpu-with-the-streamer-in-the-session)); the connected UI is still to measure |
-| Keysyms beyond the keymap's first group and two levels (Greek next to US, AltGr, dead-key accents) | the X11 backend, before M2; measured failing in [spike findings §5](spike/findings-2026-09-23.md#5-the-keyboard-check) |
+| S1 versus S3 | **S1**, decided 2026-09-24 by the user, with [ADR-0004](adr/0004-layers-window-model-and-first-backend.md) accepted; S3 stays an alternative that is not pursued |
+| The streamer's own memory and CPU cost, next to the reference figures of §6 | measured: about 6-7 MiB RSS and 2-3 MiB anon, 0.4-3.6 % of a core, on the login screen and connected ([spike findings §3, §8](spike/findings-2026-09-23.md#3-memory-and-cpu-with-the-streamer-in-the-session)) |
+| Keysyms beyond the keymap's first group and two levels (Greek next to US, AltGr, dead-key accents) | the X11 backend, in M2, whose exit criteria require them; measured failing in [spike findings §5](spike/findings-2026-09-23.md#5-the-keyboard-check) |
+| A per-session cap on windows or memory: each extra window of the pilot is a new process of about 110 MiB | L2 (M4), in the app profile ([spike findings §8](spike/findings-2026-09-23.md#8-connected-to-a-device)) |
 | IME composition input: the client has no composition listener, so text composed in an IME does not reach the app | not scheduled; needed before a host serves CJK input |
 | Copy from the app to the host: v0 has no server-to-client message that carries clipboard text | a new message under [ADR-0003](adr/0003-untrusted-server-client.md) §7, before v0 is accepted; not scheduled |

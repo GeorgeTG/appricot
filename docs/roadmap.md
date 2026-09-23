@@ -2,7 +2,8 @@
 
 Written 2026-09-19. Milestones are ordered by dependency. Each one lists the task that tracks it
 and the exit criteria that close it. A milestone is done when every exit criterion is met, not
-when its code exists. The "where it stands" notes are dated 2026-09-21.
+when its code exists, unless the user closes it by a recorded decision. The "where it stands"
+notes are dated 2026-09-21 unless they carry their own date.
 
 The effort estimates are one senior engineer's own figures from the September 2026 research, with
 no external source: about 8-12 engineer-weeks to an S1 MVP and 20-28 to parity with a mature
@@ -90,21 +91,34 @@ Xvfb, using `appricot-x11` as the window manager.
 M1 is done when both tasks are done and the spec has been revised with what the spike measured.
 Decision point: S1 or S3 for M2. If neither lands within the estimates, stop and say so.
 
-Where it stands (2026-09-21): the code side of `l1-wire-spec-v0` has landed — `appricot-proto`
-encodes and decodes all 24 v0 messages, refuses any input that breaks a limit before it
-allocates, generates the test vectors, and the TypeScript mirror in `@appricot/client` passes
-them; both decoders are fuzzed.
+**Where it stands (2026-09-24): closed by the user's decision, with two criteria moved rather
+than met (the keyboard check and S3, below).**
 
-`l1-spike-x11-capture` (2026-09-23): the harness has landed ([spike/README.md](spike/README.md))
-and its first runs cover the pilot application before and after it connects
-([spike/findings-2026-09-23.md](spike/findings-2026-09-23.md)): the start-up inventory, the
-scene graph and its damage with and without the software scene graph (which fails its visual
-check), memory and CPU with the streamer in the session, the codec, the keyboard check (it
-fails beyond one layout's first two levels), capture under a covering window, and one run
-connected to a device (every window of the connected UI is drawn inside its main window; each
-extra window is a new process of about 110 MiB). Still open: wire figures of the connected UI,
-a click on a covered window, S3, and the fixes the keyboard check calls for. v0 stays a draft
-until the spike is done.
+`l1-wire-spec-v0`: `appricot-proto` encodes and decodes all 24 v0 messages, refuses any input
+that breaks a limit before it allocates, generates the test vectors, and the TypeScript mirror in
+`@appricot/client` passes them; both decoders are fuzzed. The spec is revised with what the spike
+measured, and the spike moved nothing on the wire ([protocol/v0.md](protocol/v0.md)).
+
+`l1-spike-x11-capture`: the harness is [spike/README.md](spike/README.md), the results
+[spike/findings-2026-09-23.md](spike/findings-2026-09-23.md). Criterion by criterion:
+
+| Criterion | Outcome |
+|---|---|
+| Every window logged, before and after connecting | met: one X window per main window, each from its own process; every popup is drawn inside its window |
+| Scene graph and damage, with and without the software scene graph | met for OpenGL: every repaint, tables and scrolls of the connected run included, is a whole-window Damage event. The software scene graph was measured on the login screen only (it damages only what changed) and fails its visual check there |
+| Capture under a covering window | met |
+| The keyboard check | **not met**: Greek next to US, AltGr and dead-key accents do not arrive. Moved to M2, whose exit criteria require them |
+| A click on a covered window | met: the streamer raised the window and the click opened its combo box |
+| Every knob recorded with a visual check | met: the software scene graph fails its check (popups lose their background) and stays out of profiles |
+| Encode time and bytes | met: QOI is 2 % of RAW at 90 µs per tile |
+| RSS and cgroup with the streamer | met: the streamer is about 6-7 MiB RSS and 2-3 MiB anon |
+| S3 priced | **not done**, by decision: S1 met every need the spike measured |
+| The architecture's open questions | answered where the spike could; the supervisor and the uid moved to M4 |
+
+Decision point: **S1**, decided by the user on 2026-09-24, with
+[ADR-0004](adr/0004-layers-window-model-and-first-backend.md) accepted. Carried forward: the
+keysym delivery fix and the proposal to skip unchanged tiles to M2; the supervisor, the
+streamer's uid and a per-session cap on windows or memory to M4.
 
 ## M2: Client MVP
 
@@ -137,6 +151,13 @@ application on a real device. The clipboard criterion is met in one direction on
 from the host into the app, and the app can ask for a paste, but v0 has no message that carries
 the app's selection to the browser. Copy from the app needs a new server-to-client message under
 ADR-0003 §7's gesture and policy rules, before v0 is accepted.
+
+Carried from M1 (2026-09-24), with the measurements in
+[spike/findings-2026-09-23.md](spike/findings-2026-09-23.md): the X11 backend delivers a keysym
+that is not on the keymap's first group and two levels (Greek next to US, AltGr, dead-key
+accents; findings §5), which the input criterion above needs; and, as a proposal, the streamer
+skips tiles unchanged since the last frame, because an OpenGL application damages its whole
+window on every repaint (findings §2).
 
 ## M3: First host integration behind a flag
 
@@ -195,6 +216,11 @@ Exit criteria:
 - Audit rows for open and close.
 - The first host application can switch its sessions to the L2 node and drop its own copies of
   this machinery, if it chooses to.
+
+Carried from M1 (2026-09-24): who supervises Xvfb and the application, and whether the streamer
+runs under its own uid ([architecture.md §8](architecture.md#8-open-questions)); and a per-session
+cap on windows or memory, since each extra window of the pilot application is a new process of
+about 110 MiB ([spike findings §8](spike/findings-2026-09-23.md#8-connected-to-a-device)).
 
 ## M5: L3 broker
 

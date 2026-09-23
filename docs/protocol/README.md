@@ -18,8 +18,9 @@ purpose-built protocol worth the work are in
 
 Every v0 message must follow these rules. A proposed message that breaks one needs an ADR.
 Rules 3, 4, 6, 7 and 8 carry [ADR-0003](../adr/0003-untrusted-server-client.md) and the handshake
-of [ADR-0004](../adr/0004-layers-window-model-and-first-backend.md) into the wire. Both ADRs are
-still Proposed; if the user amends them, these rules change with them.
+of [ADR-0004](../adr/0004-layers-window-model-and-first-backend.md) into the wire. ADR-0004 was
+accepted on 2026-09-24; ADR-0003 is still Proposed. If the user amends either, these rules change
+with it.
 
 1. **Versioned.** The first messages negotiate a protocol version. A peer refuses a version it
    does not support and closes; it never guesses. Within a major version, changes only add.

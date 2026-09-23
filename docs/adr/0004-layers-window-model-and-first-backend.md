@@ -1,9 +1,13 @@
 # ADR-0004 — Three layers, a Wayland-shaped window model, and X11 first
 
-**Status**: Proposed (2026-09-19). Already decided by the user, and not re-opened here: a
-first-party per-window streamer, in its own repository ([ADR-0001](0001-separate-repository.md)).
-This ADR proposes how it is layered, which window model it uses, and which display backend comes
-first.
+**Status**: **Accepted** (2026-09-24, the user), after the M1 capture spike measured S1 against
+the pilot application ([spike findings](../spike/findings-2026-09-23.md)): S1 is the backend for
+M2, and S3 stays an open alternative that is not pursued. Proposed 2026-09-19. Already decided
+by the user, and not re-opened here: a first-party per-window streamer, in its own repository
+([ADR-0001](0001-separate-repository.md)).
+This ADR decides how it is layered, which window model it uses, and which display backend comes
+first. The Context below is as it was proposed; the spike's answers to its open lines are in the
+findings linked above.
 
 ## Context
 
@@ -75,7 +79,7 @@ Three shapes for the streamer were compared. **S1**: X11 through x11rb, with our
 manager. **S2**: a smithay headless compositor with Xwayland. **S3**, added during verification:
 an unmodified xpra server with our own client.
 
-## Decision (proposed)
+## Decision
 
 ### 1. Three layers
 

@@ -3,7 +3,7 @@
 Words this project uses, in the sense it uses them. Where a word comes from Wayland or X11, the
 entry says so. The window-model words follow Wayland's xdg-shell
 ([wayland.app/protocols/xdg-shell](https://wayland.app/protocols/xdg-shell)) whatever the backend
-is, as proposed in [ADR-0004](adr/0004-layers-window-model-and-first-backend.md).
+is, as decided in [ADR-0004](adr/0004-layers-window-model-and-first-backend.md).
 
 **App profile.** The preconfigured recipe for one application: container image, launch command,
 environment, mounts, resource caps, egress policy, clipboard policy and scale policy. A session

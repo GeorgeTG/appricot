@@ -13,7 +13,7 @@ host embeds.
 
 | Layer | What it is | State |
 |---|---|---|
-| **L1 streamer** | The wire protocol, `appricot-streamer` (per-window capture and input, inside the app container next to a headless display server), and the embeddable browser client. | implemented; the spike's measurements are still open |
+| **L1 streamer** | The wire protocol, `appricot-streamer` (per-window capture and input, inside the app container next to a headless display server), and the embeddable browser client. | implemented; M1, the capture spike included, closed 2026-09-24 |
 | **L2 node** | Single-node session manager: app profiles, a container per session, warm pool, readiness gate, reaper, per-session egress scoping, audit, session-ticket API. | documented, not scaffolded |
 | **L3 broker** | Multi-node placement and session-affine routing. A ticket names the owning node; a stateful stream cannot migrate. | documented, not scaffolded |
 
@@ -148,7 +148,7 @@ and MPL-2.0 (ADR-0002, Amendment 1); anything else fails there too.
 
 The model is Wayland-shaped whatever the backend
 ([docs/architecture.md §4](docs/architecture.md#4-the-window-model),
-[ADR-0004](docs/adr/0004-layers-window-model-and-first-backend.md), Proposed): surfaces each with
+[ADR-0004](docs/adr/0004-layers-window-model-and-first-backend.md), Accepted): surfaces each with
 their own damage; the roles `toplevel` and `popup`; popups placed by a positioner relative to
 their parent; per-surface scale; explicit configure/ack. The host plays the compositor — it
 decides size, position, stacking and focus — and the streamed app plays the Wayland client.

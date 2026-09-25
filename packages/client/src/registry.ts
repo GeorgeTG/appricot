@@ -79,6 +79,12 @@ export interface RegistryEvents {
    */
   'configure-acked': { surfaceId: number; serial: number; size: Size };
   'clipboard-ask': undefined;
+  /**
+   * The app copied: the UTF-8 text the streamer fetched from the new CLIPBOARD owner, as
+   * untrusted text (ADR-0003 §1/§7). The SDK writes nothing and touches no system clipboard;
+   * the host decides what to do with the string, inside its own user gesture.
+   */
+  'clipboard-text': { text: string };
 }
 
 /** ROLE_POPUP of the wire Role enum. */
@@ -218,6 +224,11 @@ export class SurfaceRegistry {
       }
       case 'clipboardAsk': {
         this.events.emit('clipboard-ask', undefined);
+        return;
+      }
+      case 'clipboardText': {
+        // Untrusted text as data, nothing else: the host's own gesture is the only writer.
+        this.events.emit('clipboard-text', { text: e.clipboardText.text });
         return;
       }
       default:

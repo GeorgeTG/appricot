@@ -13,7 +13,12 @@
 //!   property) and reported once as [`appricot_core::SurfaceEvent::ClipboardRequested`] —
 //!   the host's policy is the only thing that can answer it;
 //! - `COMPOUND_TEXT`, `MULTIPLE` and `INCR` are refused (`None` property) without disturbing
-//!   the text the host set.
+//!   the text the host set;
+//! - an app copy (the client taking the selection) makes the backend fetch the new owner's
+//!   `UTF8_STRING` and report it as [`appricot_core::SurfaceEvent::ClipboardText`]: the
+//!   same text from the same owner is not re-fetched, a host paste re-arms the fetch, a
+//!   text over `MAX_CLIPBOARD_BYTES` or a type that is not `UTF8_STRING` reports nothing,
+//!   and an owner that never answers costs the backend its fetch deadline and nothing else.
 //!
 //! As `tests/backend.rs`: a running X server is required and never skipped past, the tests
 //! serialize on the root slot (`SubstructureRedirect` is exclusive), and each test destroys
@@ -22,7 +27,7 @@
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-use appricot_core::{CaptureBackend, InputSink, Role, Size, SurfaceEvent};
+use appricot_core::{CaptureBackend, InputSink, MAX_CLIPBOARD_BYTES, Role, Size, SurfaceEvent};
 use appricot_x11::X11Backend;
 use x11rb::connection::Connection as _;
 use x11rb::protocol::Event;
@@ -72,6 +77,8 @@ struct TestClient {
     incr: u32,
     /// A private atom the selection replies land in.
     selection_property: u32,
+    /// The text a `copy` armed, served to the backend's fetch.
+    copied: Option<Vec<u8>>,
     /// Every window this test made, destroyed on drop.
     windows: Vec<x::Window>,
 }
@@ -97,6 +104,7 @@ impl TestClient {
             multiple: atom("MULTIPLE"),
             incr: atom("INCR"),
             selection_property: atom("APPRICOT_TEST_CLIPBOARD_REPLY"),
+            copied: None,
             root,
             conn,
             windows: Vec::new(),
@@ -205,6 +213,106 @@ impl TestClient {
             .expect("change_property")
             .check()
             .expect("change_property reply");
+    }
+
+    /// The app copies: takes the CLIPBOARD selection on its window, ready to serve `text`.
+    fn copy(&mut self, text: &[u8]) {
+        self.conn
+            .set_selection_owner(self.windows[0], self.clipboard, CURRENT_TIME)
+            .expect("set_selection_owner")
+            .check()
+            .expect("set_selection_owner reply");
+        self.conn.flush().expect("flush");
+        self.copied = Some(text.to_vec());
+    }
+
+    /// Answers one `SelectionRequest` the backend's fetch made, as a selection owner must:
+    /// the text written to the requestor's named property (when `serve` says so), then the
+    /// `SelectionNotify`.
+    fn answer_fetch(&self, request: &x::SelectionRequestEvent, serve: bool, type_: u32) {
+        let property = if request.property == NONE {
+            request.target
+        } else {
+            request.property
+        };
+        if serve {
+            let data = self.copied.clone().unwrap_or_default();
+            self.conn
+                .change_property(
+                    x::PropMode::REPLACE,
+                    request.requestor,
+                    property,
+                    type_,
+                    8,
+                    u32::try_from(data.len()).expect("small text"),
+                    &data,
+                )
+                .expect("change_property on the requestor")
+                .check()
+                .expect("change_property reply");
+        }
+        let notify = x::SelectionNotifyEvent {
+            response_type: x::SELECTION_NOTIFY_EVENT,
+            sequence: 0,
+            requestor: request.requestor,
+            selection: request.selection,
+            target: request.target,
+            property: if serve { property } else { NONE },
+            time: request.time,
+        };
+        self.conn
+            .send_event(false, request.requestor, x::EventMask::NO_EVENT, notify)
+            .expect("send_event")
+            .check()
+            .expect("send_event reply");
+        self.conn.flush().expect("flush");
+    }
+
+    /// Pumps backend and client together until the backend reports a `ClipboardText`, and
+    /// returns it with every other surface event drained on the way. The client answers
+    /// the backend's fetch itself, playing the app's toolkit.
+    fn pump_until_clipboard_text(
+        &self,
+        backend: &mut X11Backend,
+    ) -> Option<(String, Vec<SurfaceEvent>)> {
+        let deadline = Instant::now() + TIMEOUT;
+        let mut seen = Vec::new();
+        while Instant::now() < deadline {
+            let mut batch = Vec::new();
+            backend.drain_events(&mut batch).expect("drain_events");
+            seen.extend(batch);
+            while let Some(event) = self.conn.poll_for_event().expect("poll_for_event") {
+                if let Event::SelectionRequest(request) = event {
+                    // The backend's own fetch: serve the copied text as UTF8_STRING.
+                    self.answer_fetch(&request, true, self.utf8_string);
+                }
+            }
+            let found = seen.iter().find_map(|e| match e {
+                SurfaceEvent::ClipboardText { text } => Some(text.clone()),
+                _ => None,
+            });
+            if let Some(text) = found {
+                return Some((text, seen));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        None
+    }
+
+    /// Pumps both sides for `wait`, answering nothing, and returns every surface event seen.
+    /// An owner that never answers is the hostile shape: the backend must stay quiet and
+    /// alive, whatever it queued.
+    fn pump_silently(&self, backend: &mut X11Backend, wait: Duration) -> Vec<SurfaceEvent> {
+        let deadline = Instant::now() + wait;
+        let mut seen = Vec::new();
+        while Instant::now() < deadline {
+            let mut batch = Vec::new();
+            backend.drain_events(&mut batch).expect("drain_events");
+            seen.extend(batch);
+            let _ = self.conn.poll_for_event();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        seen
     }
 }
 
@@ -404,4 +512,139 @@ fn compound_text_multiple_and_incr_are_refused_without_disturbing_the_text() {
         b"stable apricot text",
         "the owned text survived every refusal"
     );
+}
+
+// -------------------------------------------------------------------------------------------
+// App to host: the app copies, the backend fetches
+// -------------------------------------------------------------------------------------------
+
+/// How long a silent owner is pumped past the fetch deadline before the test believes it:
+/// the backend's own 1 s timeout plus slack.
+const PAST_DEADLINE: Duration = Duration::from_millis(1_300);
+
+#[test]
+fn an_app_copy_is_fetched_and_reported_once_as_clipboard_text() {
+    let (_guard, mut backend, mut client) = backend_and_client();
+    let window = client.toplevel(200, 150);
+    client.map_and_settle(&mut backend, window, 200, 150);
+
+    // The app copies Greek text; the backend asks the new owner and reports what it got.
+    client.copy("αντιγραμμένο στην εφαρμογή".as_bytes());
+    let (text, _) = client
+        .pump_until_clipboard_text(&mut backend)
+        .expect("the copy reaches the host");
+    assert_eq!(text, "αντιγραμμένο στην εφαρμογή");
+
+    // The same text copied again by the same flow is a new fetch, but the SESSION the
+    // backend reports to keeps the not-twice rule; here only that exactly one event came
+    // per copy is asserted (the dedup itself is appricot-core's, tested there).
+    client.copy("δεύτερο αντίγραφο".as_bytes());
+    let (second, _) = client
+        .pump_until_clipboard_text(&mut backend)
+        .expect("the second copy reaches the host too");
+    assert_eq!(second, "δεύτερο αντίγραφο");
+}
+
+#[test]
+fn a_host_paste_re_arms_the_fetch_so_the_next_copy_reports_again() {
+    let (_guard, mut backend, mut client) = backend_and_client();
+    let window = client.toplevel(200, 150);
+    client.map_and_settle(&mut backend, window, 200, 150);
+
+    client.copy("same".as_bytes());
+    let (first, _) = client
+        .pump_until_clipboard_text(&mut backend)
+        .expect("the copy reaches the host");
+    assert_eq!(first, "same");
+
+    // The host pastes: the backend owns the selection again and serves the app.
+    backend.clipboard_set("pasted").expect("clipboard_set");
+    client.paste(client.utf8_string);
+    let (notify, _) = pump_until_selection_reply(&mut backend, &client);
+    assert_eq!(
+        notify.property, client.selection_property,
+        "the paste is served"
+    );
+
+    // The app copies the very same text: the fetch re-triggers, and the event leaves again
+    // (the session's not-twice memory was reset by the paste; the fetch itself is fresh).
+    client.copy("same".as_bytes());
+    let (again, _) = client
+        .pump_until_clipboard_text(&mut backend)
+        .expect("the copy after a paste reaches the host");
+    assert_eq!(again, "same");
+}
+
+#[test]
+fn a_text_over_the_cap_and_a_non_utf8_type_report_nothing() {
+    let (_guard, mut backend, mut client) = backend_and_client();
+    let window = client.toplevel(200, 150);
+    client.map_and_settle(&mut backend, window, 200, 150);
+
+    // MAX_CLIPBOARD_BYTES + 1 bytes: the wire cannot carry it, so no event, no hang.
+    let oversized = vec![b'x'; MAX_CLIPBOARD_BYTES + 1];
+    client.copy(&oversized);
+    assert!(
+        client.pump_until_clipboard_text(&mut backend).is_none(),
+        "an over-cap text is fetched and reported as nothing"
+    );
+
+    // The same copy answered in a type that is not UTF8_STRING (an INCR, say) is nothing.
+    client.copy(b"not utf8 typed");
+    let deadline = Instant::now() + TIMEOUT;
+    let mut answered = false;
+    while Instant::now() < deadline {
+        let mut batch = Vec::new();
+        backend.drain_events(&mut batch).expect("drain_events");
+        assert!(
+            !batch
+                .iter()
+                .any(|e| matches!(e, SurfaceEvent::ClipboardText { .. })),
+            "a wrongly typed fetch reports nothing: {batch:?}"
+        );
+        while let Some(event) = client.conn.poll_for_event().expect("poll_for_event") {
+            if let Event::SelectionRequest(request) = event {
+                client.answer_fetch(&request, true, client.string);
+                answered = true;
+            }
+        }
+        if answered {
+            // The wrongly typed answer is in; one more drain proves it changed nothing.
+            let mut after = Vec::new();
+            backend.drain_events(&mut after).expect("drain_events");
+            assert!(
+                !after
+                    .iter()
+                    .any(|e| matches!(e, SurfaceEvent::ClipboardText { .. })),
+                "the wrongly typed answer is dropped: {after:?}"
+            );
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("the backend never asked for the typed copy within {TIMEOUT:?}");
+}
+
+#[test]
+fn a_silent_owner_costs_the_deadline_and_nothing_else() {
+    let (_guard, mut backend, mut client) = backend_and_client();
+    let window = client.toplevel(200, 150);
+    client.map_and_settle(&mut backend, window, 200, 150);
+
+    // The app takes the selection and never answers the fetch.
+    client.copy(b"never served");
+    let seen = client.pump_silently(&mut backend, PAST_DEADLINE);
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e, SurfaceEvent::ClipboardText { .. })),
+        "a fetch past its deadline reports nothing: {seen:?}"
+    );
+
+    // The backend is alive: the very next real copy is fetched and reported whole.
+    client.copy("after the silence".as_bytes());
+    let (text, _) = client
+        .pump_until_clipboard_text(&mut backend)
+        .expect("the backend still fetches after giving one up");
+    assert_eq!(text, "after the silence");
 }

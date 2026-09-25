@@ -334,6 +334,11 @@ function feedCorpus(envelopes: readonly Envelope[]): {
     } else if (e.kind === 'helloReply') {
       setTextOnly(status, e.helloReply.sessionId);
       shown.set(status, e.helloReply.sessionId);
+    } else if (e.kind === 'clipboardText') {
+      // The host's copy pattern: the event's string lands as text in the host's own chrome,
+      // and the actual clipboard write happens only in the host's user gesture - never here.
+      setTextOnly(status, e.clipboardText.text);
+      shown.set(status, e.clipboardText.text);
     }
   }
   return { container, shown };
@@ -378,6 +383,8 @@ describe('M2 hostile row (a): markup in every string cannot put markup into the 
         strings.push(env.bye.text);
       } else if (env.kind === 'serverError') {
         strings.push(env.serverError.text);
+      } else if (env.kind === 'clipboardText') {
+        strings.push(env.clipboardText.text);
       }
       for (const s of strings) {
         if (s.includes('<')) {
@@ -388,6 +395,35 @@ describe('M2 hostile row (a): markup in every string cannot put markup into the 
     }
     expect(parsedElements).toBeGreaterThan(0);
     expect(canary()).toBeUndefined(); // parsing executed nothing
+  });
+
+  it('an app copy with markup in it surfaces as a plain string and writes nothing', () => {
+    const registry = new SurfaceRegistry();
+    const texts: string[] = [];
+    registry.events.on('clipboard-text', (payload) => texts.push(payload.text));
+
+    // What a hostile streamer sends: the copied "text" is markup, over and over, typed and
+    // as wire bytes. The SDK exposes each one as a string and touches no DOM anywhere.
+    for (const c of markupEnvelopes()) {
+      if (c.envelope.kind === 'clipboardText') {
+        registry.apply(c.envelope);
+        registry.apply(decodeEnvelope(encodeEnvelope(c.envelope)));
+      }
+    }
+
+    expect(texts.length).toBeGreaterThanOrEqual(10); // the corpus's clipboard rows, twice
+    for (const text of texts) {
+      expect(typeof text).toBe('string'); // data, never markup: the type is the guarantee
+    }
+    expect(document.body.children).toHaveLength(0); // the registry wrote nothing anywhere
+    assertPageClean(document.body);
+
+    // And the host's own gesture is what renders it: text in, text out.
+    const element = document.createElement('p');
+    document.body.appendChild(element);
+    setTextOnly(element, texts[0] ?? '');
+    assertShownAsText(element, texts[0] ?? '');
+    assertPageClean(document.body);
   });
 });
 

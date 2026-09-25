@@ -14,10 +14,21 @@
 //! "Target Atoms", <https://xorg.freedesktop.org/archive/X11R7.6/doc/xorg-docs/specs/ICCCM/icccm.html>,
 //! checked 2026-09-23). `COMPOUND_TEXT` and `MULTIPLE` are refused rather
 //! than half-served; `INCR` is never advertised, so a requester that needs it falls back or
-//! fails on a small transfer. When another client takes the selection (the app copying
-//! something), the backend drops its text and stops serving until the host sets new text.
+//! fails on a small transfer.
+//!
+//! The other direction is the fetch: when another client takes the selection (the app
+//! copying something), the backend becomes a requestor of the very selection it used to own,
+//! asking the new owner for `UTF8_STRING` into the `APPRICOT_CLIPBOARD_FETCH` property of
+//! its window. The answer, when it arrives in time, is one `ClipboardText` surface event.
+//! The fetch is bounded in both directions: the reply property is read at
+//! [`MAX_CLIPBOARD_BYTES`] plus one long, and a fetch that hears nothing by its deadline is
+//! dropped, so a hostile app cannot stall the backend on a conversion that never comes.
 
-/// The clipboard the backend serves: just the text, or nothing.
+use std::time::Instant;
+
+use appricot_core::MAX_CLIPBOARD_BYTES;
+
+/// The clipboard the backend serves and fetches: the text, or nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Clipboard {
     /// The text the host last set, served to every requester.
@@ -25,7 +36,23 @@ pub(crate) struct Clipboard {
     /// The server time the backend last took the selection at, from XFixes; 0 until the
     /// first notification says (the selection taken at connect reports none).
     pub acquired: u32,
+    /// The fetch of the app's `UTF8_STRING` in flight, if one is.
+    pub fetch: Option<ClipboardFetch>,
 }
+
+/// A fetch of the new owner's `UTF8_STRING`, started when the app took the selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClipboardFetch {
+    /// When the fetch gives up. The backend never blocks on the answer; this bounds how
+    /// long a late one is still believed to belong to a live fetch.
+    pub deadline: Instant,
+}
+
+/// Reads at most this many 32-bit longs of a fetched reply: one byte past
+/// [`MAX_CLIPBOARD_BYTES`], which is all it takes to tell a carriable text from one the wire
+/// refuses — without ever reading the rest of a hostile owner's property.
+#[allow(clippy::cast_possible_truncation)] // a const: try_from is not const-callable, and the cap (65536) fits a u32 by construction
+pub(crate) const CLIPBOARD_FETCH_LONGS: u32 = (MAX_CLIPBOARD_BYTES / 4) as u32 + 1;
 
 /// Decodes Latin-1 bytes (an X `STRING` property) into a `String`. Every byte is a
 /// codepoint in Latin-1, so this cannot fail.
@@ -65,5 +92,6 @@ mod tests {
     #[test]
     fn an_empty_clipboard_holds_nothing() {
         assert_eq!(Clipboard::default().text, None);
+        assert!(Clipboard::default().fetch.is_none());
     }
 }

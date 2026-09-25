@@ -71,8 +71,11 @@ pub(crate) struct KeyPress<'a> {
     pub kind: KeyKind,
     /// The keycode to press.
     pub keycode: u8,
-    /// True when the keysym sits in column 1 and needs Shift.
+    /// True when the keysym sits in a shifted column and needs Shift.
     pub shifted: bool,
+    /// The level-3 shift keycode to hold around the press, when the keysym sits in a
+    /// column the first two do not name (an AltGr level or a further group).
+    pub level3: Option<u8>,
 }
 
 /// A press needs Shift and the keymap has no Shift key to press.
@@ -112,6 +115,12 @@ impl HeldInput {
     /// True while the physical key `id` is held.
     fn is_held(&self, id: &KeyId) -> bool {
         self.keys.iter().any(|k| k.id == *id)
+    }
+
+    /// True while some held key is down on `keycode`: two keys can share one, and a
+    /// keycode nobody holds is where a rebind may end.
+    pub(crate) fn holds_keycode(&self, keycode: u8) -> bool {
+        self.keys.iter().any(|k| k.keycode == keycode)
     }
 
     /// Records a modifier key press and returns what to send: the keycode down, or nothing
@@ -166,10 +175,16 @@ impl HeldInput {
             lift.extend(self.modifier_keycodes(&[Modifier::Shift]));
         }
 
+        // The level-3 key brackets the press like the added Shift does: down before,
+        // up right after. It is never one of the wire's held keys (the level shifts are
+        // consumed), so the bracket never collides with the tally.
+        let level3 = press.level3;
         let mut strokes: Vec<Stroke> = lift.iter().map(|k| Stroke::Up(*k)).collect();
+        strokes.extend(level3.map(Stroke::Down));
         strokes.extend(add.map(Stroke::Down));
         strokes.push(Stroke::Down(press.keycode));
         strokes.extend(add.map(Stroke::Up));
+        strokes.extend(level3.map(Stroke::Up));
         strokes.extend(lift.iter().rev().map(|k| Stroke::Down(*k)));
         self.keys.push(HeldKey {
             id,
@@ -261,6 +276,7 @@ mod tests {
             kind: KeyKind::Character,
             keycode,
             shifted,
+            level3: None,
         }
     }
 
@@ -313,6 +329,7 @@ mod tests {
             kind: KeyKind::Named,
             keycode: KEY_END,
             shifted: false,
+            level3: None,
         };
         assert_eq!(press(&mut held, "End", end), [Stroke::Down(KEY_END)]);
     }
@@ -405,6 +422,29 @@ mod tests {
             press(&mut held, "Digit2", character(0x40, "Digit2", KEY_2, true)),
             [Stroke::Down(KEY_2)]
         );
+    }
+
+    #[test]
+    fn an_altgr_column_holds_the_level_three_key_around_the_press() {
+        // The Euro sign on a Greek layout: level 3 of the E key, reached by holding the
+        // map's ISO_Level3_Shift key (an AltGr) around the press.
+        let mut held = HeldInput::new();
+        assert_eq!(
+            press(
+                &mut held,
+                "KeyE",
+                KeyPress {
+                    keysym: 0x0100_20ac,
+                    code: Some("KeyE"),
+                    kind: KeyKind::Character,
+                    keycode: KEY_2,
+                    shifted: false,
+                    level3: Some(ALT_R),
+                }
+            ),
+            [Stroke::Down(ALT_R), Stroke::Down(KEY_2), Stroke::Up(ALT_R)]
+        );
+        assert_eq!(held.release_key(&code("KeyE")), [Stroke::Up(KEY_2)]);
     }
 
     #[test]

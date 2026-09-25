@@ -34,7 +34,7 @@ mod role;
 mod session;
 mod surface;
 
-pub use capture::{CaptureBackend, SurfaceEvent};
+pub use capture::{CaptureBackend, MAX_CLIPBOARD_BYTES, SurfaceEvent};
 pub use damage::{Damage, MAX_DAMAGE_RECTS};
 pub use frame::FrameCredits;
 pub use geometry::{Point, Rect, Size};

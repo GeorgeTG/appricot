@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { MAX_SURFACES } from './protocol.js';
+import { MAX_SURFACES, decodeEnvelope, encodeEnvelope } from './protocol.js';
 import type {
   CursorImage,
   Envelope,
@@ -246,6 +246,29 @@ describe('SurfaceRegistry', () => {
     expect(focusAsk).toHaveBeenCalledWith({ surfaceId: 2 });
     expect(resizeAsk).toHaveBeenCalledWith({ surfaceId: 2, size: { width: 30, height: 20 } });
     expect(clipboardAsk).toHaveBeenCalledWith(undefined);
+  });
+
+  it('surfaces an app copy as one clipboard-text event carrying the plain string', () => {
+    const registry = new SurfaceRegistry();
+    const clipboardText = vi.fn();
+    registry.events.on('clipboard-text', clipboardText);
+
+    // Through the codec, as it arrives on the wire: Greek UTF-8 survives byte for byte.
+    const decoded = decodeEnvelope(
+      encodeEnvelope({
+        kind: 'clipboardText',
+        clipboardText: { text: 'αντιγραμμένο στην εφαρμογή' },
+      }),
+    );
+    registry.apply(decoded);
+
+    expect(clipboardText).toHaveBeenCalledTimes(1);
+    expect(clipboardText).toHaveBeenCalledWith({
+      text: 'αντιγραμμένο στην εφαρμογή',
+    });
+    // The registry is a mirror with a spine: it holds no DOM to write and no clipboard to
+    // read, and the event is data for the host's own gesture.
+    expect(registry.list()).toHaveLength(0);
   });
 });
 

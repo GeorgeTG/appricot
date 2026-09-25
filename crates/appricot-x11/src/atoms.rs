@@ -50,6 +50,9 @@ pub(crate) struct Atoms {
     pub string: Atom,
     /// `text/plain;charset=utf-8`: the MIME text selection target.
     pub text_plain_utf8: Atom,
+    /// `APPRICOT_CLIPBOARD_FETCH`: the property the backend's own UTF8_STRING request of the
+    /// app's selection lands in.
+    pub clipboard_fetch: Atom,
 }
 
 macro_rules! intern_all {
@@ -86,6 +89,7 @@ impl Atoms {
             text => "TEXT",
             string => "STRING",
             text_plain_utf8 => "text/plain;charset=utf-8",
+            clipboard_fetch => "APPRICOT_CLIPBOARD_FETCH",
         )
     }
 }

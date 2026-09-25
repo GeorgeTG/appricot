@@ -317,6 +317,7 @@ fn check(envelope: &Envelope) -> Result<(), Violation> {
             }
         }
         Body::ClipboardSet(m) => cap_str(&m.text, MAX_CLIPBOARD_BYTES, "clipboard_set.text")?,
+        Body::ClipboardText(m) => cap_str(&m.text, MAX_CLIPBOARD_BYTES, "clipboard_text.text")?,
         // Nothing to check: a bare id, plain numbers, or no fields at all.
         Body::FocusAsk(_)
         | Body::FrameAck(_)
@@ -477,7 +478,7 @@ mod tests {
         })
     }
 
-    /// One valid Envelope per message kind, 24 in all.
+    /// One valid Envelope per message kind, 25 in all.
     fn sample_kinds() -> Vec<Envelope> {
         let mut all = handshake_and_surface_samples();
         all.extend(frame_and_input_samples());
@@ -598,12 +599,15 @@ mod tests {
             })),
             envelope(Body::ClipboardAsk(ClipboardAsk {})),
             envelope(Body::CloseRequest(CloseRequest { surface_id: 1 })),
+            envelope(Body::ClipboardText(ClipboardText {
+                text: "copied in the app".into(),
+            })),
         ]
     }
 
     #[test]
     fn round_trips_every_message_kind() {
-        assert_eq!(sample_kinds().len(), 24);
+        assert_eq!(sample_kinds().len(), 25);
         for env in sample_kinds() {
             let bytes = encode_envelope(&env).expect("sample is valid");
             let back = decode_envelope(&bytes).expect("sample decodes");
@@ -911,6 +915,12 @@ mod tests {
             })),
             "clipboard_set.text",
         );
+        expect_refused(
+            &envelope(Body::ClipboardText(ClipboardText {
+                text: "x".repeat(MAX_CLIPBOARD_BYTES + 1),
+            })),
+            "clipboard_text.text",
+        );
     }
 
     #[test]
@@ -955,6 +965,9 @@ mod tests {
                 modifiers: 0,
             })),
             envelope(Body::ClipboardSet(ClipboardSet {
+                text: "x".repeat(MAX_CLIPBOARD_BYTES),
+            })),
+            envelope(Body::ClipboardText(ClipboardText {
                 text: "x".repeat(MAX_CLIPBOARD_BYTES),
             })),
         ];

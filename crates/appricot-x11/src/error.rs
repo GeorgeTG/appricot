@@ -29,9 +29,10 @@ pub enum BackendError {
     NotWindowManager,
     /// The surface id names no surface this backend tracks: it never existed, or it is gone.
     UnknownSurface(SurfaceId),
-    /// The keymap has no keycode for the keysym, or reaching it needs a modifier level the
-    /// backend does not translate (level 2 and up, AltGr). Greek input needs a Greek layout
-    /// on the server plus the keysym mapping in [`crate`]'s keymap module.
+    /// The keymap holds no keycode for the keysym — or none any modifier state or spare
+    /// keycode can reach — so typing it would type another key. A keysym the layout does
+    /// not know is refused, never approximated; Greek input needs a layout that carries
+    /// the Greek keysyms on the server ([crate]'s keymap module).
     KeysymUnavailable(u32),
     /// `GetImage` returned a depth the backend cannot turn into [`appricot_core::PixelFormat`].
     UnsupportedDepth(u8),

@@ -53,13 +53,14 @@ use appricot_encode::{Encoding, cut_into_tiles, encode_tile_owned};
 use appricot_proto::PROTOCOL_VERSION;
 use appricot_proto::limits::{MAX_FRAME_CREDITS, MAX_TILES_PER_FRAME, codec};
 use appricot_proto::wire::{
-    self, Body, Bye, ByeReason, ConfigureAck, CursorImage, DecodeError, Envelope, Frame,
-    HelloReply, ResizeAsk, ServerError, SurfaceGone, SurfaceGoneReason, SurfaceMetadata,
+    self, Body, Bye, ByeReason, ClipboardText, ConfigureAck, CursorImage, DecodeError, Envelope,
+    Frame, HelloReply, ResizeAsk, ServerError, SurfaceGone, SurfaceGoneReason, SurfaceMetadata,
     SurfaceNew, Tile, decode_envelope, encode_envelope,
 };
 
 use crate::auth::StreamToken;
 use crate::backend::{BackendError, BackendHandle, Feed};
+use crate::sent_tiles::{SentTiles, SentTilesPerSurface};
 
 /// The sink half of the session's WebSocket.
 type WsSink = SplitSink<WebSocket, Message>;
@@ -236,6 +237,7 @@ where
             backend: standby.backend,
             surfaces: Vec::new(),
             configure_acks: HashMap::new(),
+            sent_tiles: HashMap::new(),
             prefer: Encoding::Raw,
             parked: None,
             fatal: standby.fatal,
@@ -247,6 +249,9 @@ where
             // The resume re-announces the window set; the mirror is rebuilt from it.
             surfaces: Vec::new(),
             configure_acks: HashMap::new(),
+            // The comparison cache dies with the connection it served: the resume's full
+            // redraws rebuild it, so no tile of the dead connection is held as sent.
+            sent_tiles: HashMap::new(),
             prefer: Encoding::Raw,
             parked: Some((parked.resume_serial, parked.deadline)),
             fatal: parked.standby.fatal,
@@ -296,6 +301,10 @@ struct Pump<B> {
     /// promises the client its own back. Bounded like core's queue, by
     /// [`appricot_core::MAX_PENDING_CONFIGURES`].
     configure_acks: HashMap<SurfaceId, Vec<(u32, u32)>>,
+    /// Per surface, what the client last received per grid cell ([`crate::sent_tiles`]), so a
+    /// tile identical to it is omitted from the next frame. Connection-scoped: it never
+    /// survives a park, because the resume's full redraws rebuild it.
+    sent_tiles: SentTilesPerSurface,
     /// The codec the encoder prefers this session (RAW is the fallback whatever this says).
     prefer: Encoding,
     /// The park this pump claimed: the serial a resume must name and the grace deadline it
@@ -997,6 +1006,11 @@ where
         Body::ClipboardSet(m) => {
             // The codec already capped the text at MAX_CLIPBOARD_BYTES before this ran. The
             // error is left out of the log: the text is what the user copied.
+            //
+            // The paste re-arms the not-twice rule of the other direction (v0.md §4.4): the
+            // streamer owns the selection again, so the app's next copy is a change to the
+            // host even when its text is identical to the last one fetched.
+            pump.session.note_clipboard_set();
             if pump.backend.clipboard_set(m.text).await.is_err() {
                 delivery_failed(pump, "clipboard", None);
             }
@@ -1069,6 +1083,9 @@ where
 ///
 /// A mapping that cannot be encoded is a bug in this crate: it closes the socket rather than
 /// emit a broken message.
+/// One arm per `SessionEvent`: the mirror of what the session emits. Its length is the
+/// event count, not complexity — one message-shaped arm each.
+#[allow(clippy::too_many_lines)]
 async fn send_session_event<B>(
     sink: &mut WsSink,
     pump: &mut Pump<B>,
@@ -1087,6 +1104,7 @@ where
         SessionEvent::SurfaceGone { id, .. } => {
             pump.surfaces.retain(|s| s != id);
             pump.configure_acks.remove(id);
+            pump.sent_tiles.remove(id);
         }
         _ => {}
     }
@@ -1161,6 +1179,10 @@ where
         }),
         SessionEvent::CursorGone => Body::CursorGone(wire::CursorGone {}),
         SessionEvent::ClipboardAsk => Body::ClipboardAsk(wire::ClipboardAsk {}),
+        // The app copied: untrusted text, already deduplicated and capped by the session.
+        SessionEvent::ClipboardText { text } => {
+            Body::ClipboardText(ClipboardText { text: text.clone() })
+        }
         SessionEvent::ConfigureAcked { id, serial, size } => {
             // The ack answers the named configure and every older one still waiting: the
             // client hears the newest serial, and the older ones are done with.
@@ -1203,16 +1225,18 @@ where
             continue;
         };
         let bounds = surface.size();
-        match build_frame(pump, id, bounds, &plan).await {
+        let cache = pump.sent_tiles.entry(id).or_default();
+        match build_frame(&pump.backend, pump.prefer, cache, id, bounds, &plan).await {
             Ok(Some(frame)) => {
                 if let Err(fault) = send_body(sink, Body::Frame(frame)).await {
                     return fault_flow(sink, fault).await;
                 }
             }
-            // Nothing to send: every tile was skipped (contract C2), or the damage vanished.
-            // A frame with no tile never goes out, and the plan goes back as if it had never
-            // been made: its credit, its sequence (the client sees no gap), its damage and any
-            // full redraw it owed. The next damage or ack plans it again.
+            // Nothing to send: every tile was identical to what the client holds, every
+            // capture failed (contract C2), or the damage vanished. A frame with no tile
+            // never goes out and consumes no sequence number, and the plan goes back as if it
+            // had never been made: its credit, its damage and any full redraw it owed. The
+            // next damage or ack plans it again.
             Ok(None) => {
                 pump.session.abort_frame(id, &plan);
             }
@@ -1228,7 +1252,7 @@ where
     Flow::On
 }
 
-/// Captures and encodes one planned frame.
+/// Captures and encodes one planned frame, omitting tiles the client already holds.
 ///
 /// The plan's rectangles are unioned before cutting: one cut of the union always stays inside
 /// `MAX_TILES_PER_FRAME` (a whole 1920x1200 surface is 40 tiles), where many rectangles cut
@@ -1237,11 +1261,15 @@ where
 /// A tile is skipped, never fatal, when its capture fails (the surface died mid-frame), when
 /// the buffer does not match the tile's rectangle (the surface changed size under the capture,
 /// against the `CaptureBackend` contract), or when the encoder refuses the buffer: a tile on
-/// the wire always carries exactly the pixels its rectangle names (contract C2). The event
-/// that explains the change follows on the feed. `Ok(None)` means no tile is left, and the
+/// the wire always carries exactly the pixels its rectangle names (contract C2). A tile
+/// identical to what the client last received for its grid cell is skipped too (v0.md §4.3):
+/// the client draws frames in sequence order, so its canvas already shows those pixels. The
+/// event that explains a change follows on the feed. `Ok(None)` means no tile is left, and the
 /// caller hands the plan back.
 async fn build_frame<B>(
-    pump: &Pump<B>,
+    backend: &BackendHandle<B>,
+    prefer: Encoding,
+    cache: &mut SentTiles,
     id: SurfaceId,
     bounds: Size,
     plan: &FramePlan,
@@ -1252,9 +1280,16 @@ where
     let Some(all) = plan.rects.iter().copied().reduce(Rect::union) else {
         return Ok(None); // damage vanished between planning and here
     };
+    // A full redraw sends every tile and restarts the comparison; any other frame compares
+    // against what was sent at the surface's current size, which a size change just dropped.
+    if plan.full_redraw {
+        cache.begin_full_redraw(bounds);
+    } else {
+        cache.note_size(bounds);
+    }
     let mut tiles = Vec::new();
     for rect in cut_into_tiles(all, bounds) {
-        let buffer = match pump.backend.capture(id, rect).await {
+        let buffer = match backend.capture(id, rect).await {
             Ok(buffer) => buffer,
             Err(e) => {
                 // A surface can die mid-frame; its surface-gone event follows on the feed.
@@ -1270,13 +1305,19 @@ where
             continue;
         }
         // The buffer is dropped right after: a RAW tile moves its pixels, never copies them.
-        let encoded = match encode_tile_owned(buffer, pump.prefer) {
+        let encoded = match encode_tile_owned(buffer, prefer) {
             Ok(encoded) => encoded,
             Err(e) => {
                 tracing::debug!(surface = id.get(), error = %e, "encoder refused a tile; tile skipped");
                 continue;
             }
         };
+        if !plan.full_redraw && cache.same_as_sent(rect, encoded.codec, &encoded.data) {
+            // The client's canvas already shows this tile's pixels; sending it would change
+            // nothing (v0.md §4.3).
+            continue;
+        }
+        cache.record(rect, encoded.codec, &encoded.data);
         tiles.push(Tile {
             rect: Some(wire::Rect {
                 x: rect.origin.x,
@@ -1430,7 +1471,7 @@ mod tests {
 
     use appricot_core::{PointerButton, PressState};
     use appricot_proto::limits::codec;
-    use appricot_proto::wire::{ByeReason, DecodeError, decode_envelope};
+    use appricot_proto::wire::{Body, ByeReason, DecodeError, decode_envelope};
 
     #[test]
     fn an_empty_offer_means_raw() {
@@ -1466,13 +1507,22 @@ mod tests {
 
     #[test]
     fn an_envelope_naming_no_known_body_closes_without_a_reply() {
-        // Field 25, wire type 2, empty: a message this version does not know.
-        let unknown = decode_envelope(&[0xca, 0x01, 0x00]).expect_err("no body is refused");
+        // Field 26, wire type 2, empty: a message this version does not know. Field 25 was
+        // this test's unknown message until v0 gained `clipboard_text` for it.
+        let unknown = decode_envelope(&[0xd2, 0x01, 0x00]).expect_err("no body is refused");
         assert_eq!(
             refusal_for(&unknown),
             None,
             "v0.md §1: close without a reply"
         );
+        // An empty `clipboard_text` — field 25 with no text — names a known message now, so
+        // it decodes; the streamer answer for a client sending a server-to-client message is
+        // the wrong-direction close (§5), not the no-reply close of an unknown one.
+        let known = decode_envelope(&[0xca, 0x01, 0x00]).expect("field 25 is clipboard_text");
+        let Body::ClipboardText(message) = known.body.expect("a oneof body is present") else {
+            panic!("field 25 decodes as clipboard_text");
+        };
+        assert_eq!(message.text, "");
         let empty = decode_envelope(&[]).expect_err("an empty envelope names no body");
         assert_eq!(refusal_for(&empty), None);
     }

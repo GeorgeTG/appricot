@@ -105,6 +105,11 @@ pub struct MockState {
     capture_faults: VecDeque<CaptureFault>,
     /// Set when the server dropped the backend: the display connection is gone.
     dropped: bool,
+    /// Per surface, the repainted regions and their generations, oldest first: a pixel inside
+    /// one paints with that generation's colours, so a test can change exactly the pixels it
+    /// names without touching the rest. A surface with no entry paints at generation 0, the
+    /// pixels every test relied on before repainting existed.
+    repaints: HashMap<u32, Vec<(Rect, u32)>>,
 }
 
 /// A test's handle to the mock's state.
@@ -183,6 +188,15 @@ impl MockHandle {
     /// Makes the next captures commit `faults`, one per capture, in order.
     pub fn fail_next_captures(&self, faults: &[CaptureFault]) {
         self.lock().capture_faults.extend(faults.iter().copied());
+    }
+
+    /// Paints `rect` of surface `id` with fresh colours: the pixels inside change, everything
+    /// outside stays exactly as it was. Each call changes them again.
+    pub fn repaint(&self, id: u32, rect: Rect) {
+        let mut state = self.lock();
+        let repaints = state.repaints.entry(id).or_default();
+        let generation = u32::try_from(repaints.len()).expect("a test repaints a little") + 1;
+        repaints.push((rect, generation));
     }
 
     /// How many pointer motions arrived so far.
@@ -265,8 +279,9 @@ impl CaptureBackend for MockBackend {
         if !state.surfaces.contains_key(&id.get()) {
             return Err(MockError(format!("no surface {}", id.get())));
         }
+        let repaints = state.repaints.get(&id.get()).cloned().unwrap_or_default();
         Ok(match state.capture_faults.pop_front() {
-            None => paint(id.get(), rect),
+            None => paint(id.get(), rect, &repaints),
             Some(CaptureFault::Narrower) => {
                 let narrower = Size::new(rect.size.width.saturating_sub(1), rect.size.height);
                 paint(
@@ -275,6 +290,7 @@ impl CaptureBackend for MockBackend {
                         size: narrower,
                         ..rect
                     },
+                    &repaints,
                 )
             }
             Some(CaptureFault::Empty) => PixelBuffer {
@@ -300,14 +316,14 @@ impl InputSink for MockBackend {
             // The pause stands for the display round trip; it runs on the backend's thread,
             // as a real one would.
             std::thread::sleep(pause);
-            self.0
-                .lock()
-                .expect("the mock state is not poisoned")
-                .queue
-                .push(SurfaceEvent::Damaged {
-                    id,
-                    rect: Rect::new(0, 0, 16, 16),
-                });
+            let mut state = self.0.lock().expect("the mock state is not poisoned");
+            let rect = Rect::new(0, 0, 16, 16);
+            // An app that redraws under the pointer paints new pixels each time; the mock's
+            // repaint grows a generation so identical damage is never identical pixels.
+            let repaints = state.repaints.entry(id.get()).or_default();
+            let generation = u32::try_from(repaints.len()).expect("a test repaints a little") + 1;
+            repaints.push((rect, generation));
+            state.queue.push(SurfaceEvent::Damaged { id, rect });
         }
         self.record(Input::Motion {
             surface: id.get(),
@@ -391,17 +407,26 @@ impl MockBackend {
 
 /// Paints `rect` of surface `id` with a deterministic pattern.
 ///
-/// Every pixel's blue, green and red are functions of `(id, x, y)`; the unused byte is 0xFF,
-/// which survives every codec round trip.
-fn paint(id: u32, rect: Rect) -> PixelBuffer {
+/// Every pixel's blue, green and red are functions of its **surface** coordinates `(id, x, y)`
+/// and the generation of the newest repaint covering it, so the same region of a surface
+/// always paints the same pixels and two different regions paint different ones; the unused
+/// byte is 0xFF, which survives every codec round trip. A pixel no repaint covers is
+/// generation 0.
+fn paint(id: u32, rect: Rect, repaints: &[(Rect, u32)]) -> PixelBuffer {
     let width = rect.size.width;
     let height = rect.size.height;
     let mut data = Vec::with_capacity(4 * width as usize * height as usize);
     for y in 0..height {
         for x in 0..width {
-            let b = deterministic(id, x, y, 1);
-            let g = deterministic(id, x, y, 2);
-            let r = deterministic(id, x, y, 3);
+            let at = point(rect, x, y);
+            let generation = repaints
+                .iter()
+                .rev()
+                .find_map(|(r, generation)| covers_pixel(r, at.0, at.1).then_some(*generation))
+                .unwrap_or(0);
+            let b = deterministic(id, at.0, at.1, 1, generation);
+            let g = deterministic(id, at.0, at.1, 2, generation);
+            let r = deterministic(id, at.0, at.1, 3, generation);
             data.extend_from_slice(&[b, g, r, 0xFF]);
         }
     }
@@ -413,11 +438,37 @@ fn paint(id: u32, rect: Rect) -> PixelBuffer {
     }
 }
 
-fn deterministic(id: u32, x: u32, y: u32, channel: u32) -> u8 {
+/// The surface coordinates of pixel `(x, y)` of `rect`, as `(u32, u32)` colour-key inputs.
+/// Tiles sit at non-negative surface coordinates (the tile grid is clipped to the surface),
+/// so the conversion cannot fail.
+fn point(rect: Rect, x: u32, y: u32) -> (u32, u32) {
+    let sx = u32::try_from(i64::from(rect.origin.x) + i64::from(x))
+        .expect("tiles sit at non-negative surface coordinates");
+    let sy = u32::try_from(i64::from(rect.origin.y) + i64::from(y))
+        .expect("tiles sit at non-negative surface coordinates");
+    (sx, sy)
+}
+
+/// Whether repaint `r` covers surface pixel `(x, y)`. The comparison runs in `i64`, where no
+/// coordinate of a test-sized surface can overflow.
+fn covers_pixel(r: &Rect, x: u32, y: u32) -> bool {
+    let (x, y) = (i64::from(x), i64::from(y));
+    let left = i64::from(r.origin.x);
+    let top = i64::from(r.origin.y);
+    x >= left
+        && x < left + i64::from(r.size.width)
+        && y >= top
+        && y < top + i64::from(r.size.height)
+}
+
+/// One colour channel of surface pixel `(x, y)` of surface `id`: a function of the surface,
+/// the position, the channel and the repaint generation.
+fn deterministic(id: u32, x: u32, y: u32, channel: u32, generation: u32) -> u8 {
     let v = id
         .wrapping_mul(7919)
         .wrapping_add(x.wrapping_mul(104_729))
         .wrapping_add(y.wrapping_mul(129_9709))
-        .wrapping_add(channel.wrapping_mul(15_498_689));
+        .wrapping_add(channel.wrapping_mul(15_498_689))
+        .wrapping_add(generation.wrapping_mul(3_014_117));
     u8::try_from(v % 251).expect("below 251")
 }

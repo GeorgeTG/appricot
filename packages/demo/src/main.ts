@@ -4,7 +4,9 @@
  * This is a host UI of its own: a toolbar (same-origin session URL shown as text, a token
  * INPUT field that is the token's only source — never the URL or its query — connect/close
  * buttons, a status line, a reconnect toggle, an opt-in toggle that sends pasted text to the
- * streamed app (off by default, ADR-0003 §7), and a strip of restore buttons for the
+ * streamed app (off by default, ADR-0003 §7), a button that writes the app's last copied
+ * text to the user's clipboard inside its click gesture — the only clipboard write, the held
+ * text is rendered nowhere — and a strip of restore buttons for the
  * minimized windows, each titled with the window's own — untrusted — title through
  * `setTextOnly`) and, per streamed toplevel, one floating window of demo chrome: a title bar
  * whose title and app id go in through `setTextOnly` (untrusted text, ADR-0003 §1),
@@ -86,6 +88,12 @@ interface App {
   cursor: CursorImage | null;
   pointerBySurface: Map<number, Point>;
   configureSerial: number;
+  /**
+   * The streamed app's last copied text, as untrusted data (ADR-0003 §1/§7): held for the
+   * user, rendered nowhere, and written to the user's clipboard only by the toolbar button —
+   * a real user gesture, the only writer. Null while nothing is held.
+   */
+  appCopy: string | null;
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string): HTMLElementTagNameMap[K] {
@@ -135,6 +143,12 @@ const minimizedStrip = requireElement<HTMLElement>('minimized');
  */
 const pasteBox = document.getElementById('paste');
 
+/**
+ * The app-to-host copy button (ADR-0003 §7). Optional like the paste box: a page without it
+ * simply holds nothing user-visible. Its click is the only writer of the user's clipboard.
+ */
+const copyAppTextButton = document.getElementById('copy-app-text');
+
 /** The demo's paste policy: the user's own opt-in, read at every paste. */
 function pastePolicy(): boolean {
   return pasteBox instanceof HTMLInputElement && pasteBox.checked;
@@ -151,6 +165,7 @@ const app: App = {
   cursor: null,
   pointerBySurface: new Map(),
   configureSerial: 0,
+  appCopy: null,
 };
 
 // --- status line ---------------------------------------------------------------------------
@@ -718,6 +733,17 @@ function wireRegistry(registry: SurfaceRegistry): void {
     }
   });
 
+  registry.events.on('clipboard-text', ({ text }) => {
+    // The app copied (ADR-0003 §7): the text is untrusted data, so it is held and never
+    // rendered — the status line says how much arrived, in the host's own words, and the
+    // write happens only in the button's user gesture.
+    app.appCopy = text;
+    if (copyAppTextButton instanceof HTMLButtonElement) {
+      copyAppTextButton.disabled = false;
+    }
+    setStatus(`app copied ${text.length} characters`);
+  });
+
   registry.events.on('configure-acked', ({ surfaceId, size }) => {
     // Size the chrome to what the app actually took, not what we proposed. Serial 0 is no
     // answer to a Configure of ours: the app resized itself (C1), and the chrome follows it
@@ -787,6 +813,12 @@ function teardownSession(): void {
   app.wm = new WindowManager();
   resetRegistry();
   setCursorImage(null);
+  // The app's held copy belongs to the session that produced it; the next session starts
+  // with nothing to write, and the button says so.
+  app.appCopy = null;
+  if (copyAppTextButton instanceof HTMLButtonElement) {
+    copyAppTextButton.disabled = true;
+  }
   updateMinimizedStrip();
   updateWindowCount();
 }
@@ -907,6 +939,29 @@ connectButton.addEventListener('click', () => {
 });
 closeButton.addEventListener('click', () => {
   disconnect();
+});
+// The one clipboard write of the app-to-host direction (ADR-0003 §7): a click is the user
+// gesture the browser requires, and the held text leaves as data through writeText — the
+// page never renders it, so nothing untrusted reaches the DOM on this path either.
+copyAppTextButton?.addEventListener('click', () => {
+  const text = app.appCopy;
+  if (text === null) {
+    return; // nothing held: the button is disabled, this is only the belt to the braces
+  }
+  if (navigator.clipboard === undefined) {
+    // A non-secure context (or an old engine): the demo serves loopback-only, which is a
+    // secure context in every current browser, so this is the diagnostic, not the norm.
+    setStatus('no clipboard API in this context', 'error');
+    return;
+  }
+  void navigator.clipboard
+    .writeText(text)
+    .then(() => {
+      setStatus('copied to your clipboard');
+    })
+    .catch(() => {
+      setStatus('clipboard write refused', 'error');
+    });
 });
 // Focus on host chrome leaves every streamed surface: the server releases held keys.
 windowsLayer.parentElement?.addEventListener('pointerdown', (e) => {

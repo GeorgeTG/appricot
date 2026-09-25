@@ -20,7 +20,9 @@ pub use appricot_proto::limits::{
     MAX_FRAME_CREDITS, MAX_POPUPS_PER_PARENT, MAX_SURFACE_HEIGHT, MAX_SURFACE_WIDTH, MAX_SURFACES,
 };
 
-use appricot_proto::limits::{AppId, MAX_CURSOR_HEIGHT, MAX_CURSOR_WIDTH, Title};
+use appricot_proto::limits::{
+    AppId, MAX_CLIPBOARD_BYTES, MAX_CURSOR_HEIGHT, MAX_CURSOR_WIDTH, Title,
+};
 
 use crate::capture::SurfaceEvent;
 use crate::frame::FrameCredits;
@@ -115,6 +117,14 @@ pub enum SessionEvent {
     /// The app pasted and the backend holds no clipboard text. The host decides what, if
     /// anything, to send back.
     ClipboardAsk,
+    /// The app copied: the UTF-8 text the backend fetched from the new CLIPBOARD owner,
+    /// already capped. Untrusted text; the host decides what to do with it. Identical
+    /// consecutive text is not re-sent, and a host paste resets that memory (see
+    /// [`Session::note_clipboard_set`]), so the app's next copy re-triggers.
+    ClipboardText {
+        /// The fetched text.
+        text: String,
+    },
     /// The app took a size, answering the configure named by the serial and every older
     /// configure of the surface still waiting. `size` may be the app's own clamp of what was
     /// proposed; it is the surface's size from here on.
@@ -248,6 +258,9 @@ pub struct Session {
     cursor: Option<CursorImage>,
     /// The last cursor serial handed out; the next is one more, wrapping past 0.
     cursor_serial: u32,
+    /// The app clipboard text the host last received, for the not-twice rule. A host paste
+    /// clears it ([`Session::note_clipboard_set`]).
+    clipboard: Option<String>,
     /// Whether the socket is gone and the session waits for its client.
     detached: bool,
 }
@@ -261,6 +274,7 @@ impl Session {
             configure_serial: 0,
             cursor: None,
             cursor_serial: 0,
+            clipboard: None,
             detached: false,
         }
     }
@@ -271,8 +285,9 @@ impl Session {
     /// detached nothing is appended: state still moves on, and [`Session::resume`]
     /// re-synchronises the client with the whole window set and the cursor. A clipboard ask or
     /// a focus ask made while detached is not replayed: the backend refused that paste at
-    /// once, and the app's next paste asks again. Damage is never an event; it comes out
-    /// through [`Session::plan_frame`].
+    /// once, and the app's next paste asks again. Clipboard text made while detached is not
+    /// replayed either: the host's own clipboard is its business, and the app's next copy
+    /// reports again. Damage is never an event; it comes out through [`Session::plan_frame`].
     pub fn apply_event(&mut self, ev: SurfaceEvent, out: &mut Vec<SessionEvent>) {
         match ev {
             SurfaceEvent::Created {
@@ -332,7 +347,29 @@ impl Session {
             SurfaceEvent::ClipboardRequested => {
                 self.emit(out, SessionEvent::ClipboardAsk);
             }
+            SurfaceEvent::ClipboardText { text } => {
+                // Over the cap the wire cannot carry it: dropped, like a cursor image the
+                // wire cannot carry, and the last text sent stays what it was. The memory
+                // holds what the host last RECEIVED, so while detached - when nothing
+                // reaches it, and a resume replays no clipboard - it does not move: the
+                // app's next copy after the resume reports again, identical or not.
+                if text.len() > MAX_CLIPBOARD_BYTES || self.detached {
+                    return;
+                }
+                if self.clipboard.as_deref() == Some(text.as_str()) {
+                    return; // identical consecutive text is not re-sent
+                }
+                self.clipboard = Some(text.clone());
+                self.emit(out, SessionEvent::ClipboardText { text });
+            }
         }
+    }
+
+    /// Notes that the host pasted: the streamer takes the CLIPBOARD selection again, so the
+    /// app's next copy is a change to the host even when its text is identical to the last
+    /// one fetched (v0.md §4.4).
+    pub fn note_clipboard_set(&mut self) {
+        self.clipboard = None;
     }
 
     /// Proposes `size` for surface `id`, and returns the serial that names the proposal, or
@@ -712,7 +749,7 @@ fn clamp_to_wire(size: Size) -> Size {
 
 #[cfg(test)]
 mod tests {
-    use appricot_proto::limits::{AppId, Title};
+    use appricot_proto::limits::{AppId, MAX_CLIPBOARD_BYTES, Title};
 
     use crate::{
         CursorImage, GoneReason, MAX_FRAME_CREDITS, MAX_POPUPS_PER_PARENT, MAX_SURFACES, Point,
@@ -1409,5 +1446,81 @@ mod tests {
             &mut Vec::new(),
         );
         assert!(!s.close_request(SurfaceId::new(1)));
+    }
+
+    fn copied(text: &str) -> SurfaceEvent {
+        SurfaceEvent::ClipboardText {
+            text: text.to_owned(),
+        }
+    }
+
+    fn clipboard_out(text: &str) -> SessionEvent {
+        SessionEvent::ClipboardText {
+            text: text.to_owned(),
+        }
+    }
+
+    #[test]
+    fn clipboard_text_is_sent_on_a_change_and_never_twice_the_same() {
+        let mut s = Session::new();
+        let mut out = Vec::new();
+        s.apply_event(copied("αντίγραφο"), &mut out);
+        // The app copied the same text again: not a change, not re-sent.
+        s.apply_event(copied("αντίγραφο"), &mut out);
+        s.apply_event(copied("άλλο"), &mut out);
+        assert_eq!(
+            out,
+            vec![clipboard_out("αντίγραφο"), clipboard_out("άλλο")],
+            "one event per change of text"
+        );
+    }
+
+    #[test]
+    fn a_host_paste_re_arms_the_not_twice_rule() {
+        let mut s = Session::new();
+        let mut out = Vec::new();
+        s.apply_event(copied("α"), &mut out);
+        out.clear();
+        // The host pasted: the streamer owns the selection again, and the app copying the
+        // very same text afterwards is a change to the host.
+        s.note_clipboard_set();
+        s.apply_event(copied("α"), &mut out);
+        assert_eq!(out, vec![clipboard_out("α")]);
+    }
+
+    #[test]
+    fn an_over_cap_clipboard_text_is_dropped_whole_and_silently() {
+        let mut s = Session::new();
+        let mut out = Vec::new();
+        s.apply_event(copied("kept"), &mut out);
+        out.clear();
+        let oversized = "x".repeat(MAX_CLIPBOARD_BYTES + 1);
+        s.apply_event(copied(&oversized), &mut out);
+        assert!(out.is_empty(), "the wire cannot carry it; nothing is sent");
+        // The last text sent is unchanged: a later repeat of it is still not a change.
+        s.apply_event(copied("kept"), &mut out);
+        assert!(out.is_empty());
+        s.apply_event(copied("next"), &mut out);
+        assert_eq!(out, vec![clipboard_out("next")]);
+    }
+
+    #[test]
+    fn clipboard_text_while_detached_reaches_no_one_and_is_not_remembered() {
+        let mut s = Session::new();
+        let mut out = Vec::new();
+        s.apply_event(copied("seen"), &mut out);
+        out.clear();
+        s.detach();
+        s.apply_event(copied("while away"), &mut out);
+        assert!(out.is_empty());
+        s.resume(&mut out);
+        assert!(
+            !out.contains(&clipboard_out("while away")),
+            "a resume replays no clipboard"
+        );
+        out.clear();
+        // The host never received it, so the same text after the resume is a change again.
+        s.apply_event(copied("while away"), &mut out);
+        assert_eq!(out, vec![clipboard_out("while away")]);
     }
 }

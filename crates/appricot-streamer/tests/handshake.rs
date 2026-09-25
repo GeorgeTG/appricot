@@ -44,8 +44,9 @@ const EVERY_REFUSAL: [Refusal; 6] = [
     Refusal::UnknownBody,
 ];
 
-/// An envelope naming field 25, which v0 does not define: a message this server cannot know.
-const UNKNOWN_BODY: [u8; 3] = [0xca, 0x01, 0x00];
+/// An envelope naming field 26, which v0 does not define: a message this server cannot know.
+/// Field 25 was this probe's unknown message until v0 gained `clipboard_text` for it.
+const UNKNOWN_BODY: [u8; 3] = [0xd2, 0x01, 0x00];
 
 /// Asserts the socket closes with no protocol message first: only the WebSocket close frame,
 /// with code 1002 (protocol error).

@@ -1,6 +1,6 @@
 //! The structure-aware decoder fuzzer: seeded, deterministic, and part of `cargo test`.
 //!
-//! The byte-mutation loop in `src/wire.rs` walks around 24 small valid messages and cannot
+//! The byte-mutation loop in `src/wire.rs` walks around 25 small valid messages and cannot
 //! reach the paths a hostile peer aims at: a repeated count far past its cap, a second body,
 //! an enum value v0 does not define. This file generates messages from the schema instead,
 //! with values drawn from the edges of every rule (0, 1, the cap, the cap + 1, the extremes of
@@ -30,11 +30,12 @@ use appricot_proto::limits::{
     MAX_SESSION_ID_BYTES, MAX_TILE_BYTES, MAX_TILES_PER_FRAME, MAX_TITLE_BYTES, MAX_TOKEN_BYTES,
 };
 use appricot_proto::wire::{
-    Anchor, BlurRelease, Body, Bye, ByeReason, ClipboardAsk, ClipboardSet, CloseRequest, Configure,
-    ConfigureAck, CursorGone, CursorImage, DecodeError, Envelope, FocusAsk, FocusNotify, Frame,
-    FrameAck, Hello, HelloReply, Key, Point, PointerAxis, PointerButton, PointerMove, Positioner,
-    Rect, ResizeAsk, Role, ServerError, Size, SurfaceGone, SurfaceGoneReason, SurfaceMetadata,
-    SurfaceNew, Tile, decode_envelope, encode_envelope, validate_envelope,
+    Anchor, BlurRelease, Body, Bye, ByeReason, ClipboardAsk, ClipboardSet, ClipboardText,
+    CloseRequest, Configure, ConfigureAck, CursorGone, CursorImage, DecodeError, Envelope,
+    FocusAsk, FocusNotify, Frame, FrameAck, Hello, HelloReply, Key, Point, PointerAxis,
+    PointerButton, PointerMove, Positioner, Rect, ResizeAsk, Role, ServerError, Size, SurfaceGone,
+    SurfaceGoneReason, SurfaceMetadata, SurfaceNew, Tile, decode_envelope, encode_envelope,
+    validate_envelope,
 };
 use prost::Message;
 
@@ -383,14 +384,17 @@ fn any_frame_or_input(rng: &mut Rng, kind: usize) -> Body {
             text: any_text(rng, MAX_CLIPBOARD_BYTES),
         }),
         22 => Body::ClipboardAsk(ClipboardAsk {}),
-        _ => Body::CloseRequest(CloseRequest {
+        23 => Body::CloseRequest(CloseRequest {
             surface_id: any_u32(rng),
+        }),
+        _ => Body::ClipboardText(ClipboardText {
+            text: any_text(rng, MAX_CLIPBOARD_BYTES),
         }),
     }
 }
 
 fn any_envelope(rng: &mut Rng) -> Envelope {
-    let kind = rng.below(24);
+    let kind = rng.below(25);
     let body = if kind <= 10 {
         any_handshake_or_surface(rng, kind)
     } else {
@@ -597,8 +601,9 @@ fn generated_and_mutated_messages_keep_every_invariant() {
         let (number, body) = split(&envelope);
 
         // An unknown body: the same payload under an envelope field no v0 message has.
+        // Field 25 is `clipboard_text`, so the probe starts one past the last defined.
         if iteration % 32 == 0 {
-            let unknown = 25 + u32::try_from(rng.below(1000)).expect("small");
+            let unknown = 26 + u32::try_from(rng.below(1000)).expect("small");
             let result = run.decode(&format!("{label} as body {unknown}"), &wrap(unknown, &body));
             if !matches!(result, Err(DecodeError::UnknownMessage)) {
                 run.failures

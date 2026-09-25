@@ -13,7 +13,8 @@
 //!   them, and a full redraw covers the whole surface;
 //! - every ack names a proposal that is still waiting, and a size change with a proposal
 //!   waiting is never reported as the app's own;
-//! - cursor serials rise, and a new surface's id was never announced before.
+//! - cursor serials rise, and a new surface's id was never announced before;
+//! - identical consecutive clipboard text is never re-sent, and a host paste re-arms it.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -22,7 +23,9 @@ use appricot_core::{
     MAX_POPUPS_PER_PARENT, MAX_SURFACES, Point, Positioner, Rect, Role, Session, SessionEvent,
     Size, SurfaceEvent, SurfaceId,
 };
-use appricot_proto::limits::{AppId, MAX_SURFACE_HEIGHT, MAX_SURFACE_WIDTH, Title};
+use appricot_proto::limits::{
+    AppId, MAX_CLIPBOARD_BYTES, MAX_SURFACE_HEIGHT, MAX_SURFACE_WIDTH, Title,
+};
 
 /// xorshift64*: small, fast, and good enough to pick test actions.
 struct Rng(u64);
@@ -84,6 +87,9 @@ struct Mirror {
     living: BTreeMap<u32, Mirrored>,
     highest_announced: Option<u32>,
     last_cursor: u32,
+    /// The clipboard text the host last received, cleared by a host paste like the session's
+    /// own memory is.
+    last_clipboard: Option<String>,
 }
 
 fn within_caps(size: Size) -> bool {
@@ -167,6 +173,14 @@ impl Mirror {
                 | SessionEvent::FocusAsk { .. }
                 | SessionEvent::CursorGone
                 | SessionEvent::ClipboardAsk => {}
+                SessionEvent::ClipboardText { text } => {
+                    assert_ne!(
+                        self.last_clipboard.as_deref(),
+                        Some(text.as_str()),
+                        "identical consecutive clipboard text is not re-sent"
+                    );
+                    self.last_clipboard = Some(text.clone());
+                }
             }
         }
     }
@@ -246,7 +260,7 @@ fn run(seed: u64, steps: u32) {
                 .expect("fits")]
         };
         let id = SurfaceId::new(any_id);
-        match rng.below(20) {
+        match rng.below(21) {
             0..=2 => {
                 // A new window: a toplevel, a dialog or a popup. Now and then an old id.
                 let new_id = if rng.chance(5) && next_id > 1 {
@@ -397,6 +411,24 @@ fn run(seed: u64, steps: u32) {
                         surface.last_plan = None;
                     }
                 }
+            }
+            19 => {
+                // The app copied: a small set of texts so repeats meet the not-twice rule,
+                // now and then a host paste that re-arms it, and rarely a text over the cap.
+                if rng.chance(10) {
+                    s.note_clipboard_set();
+                    mirror.last_clipboard = None;
+                }
+                let text = if rng.chance(15) {
+                    "x".repeat(MAX_CLIPBOARD_BYTES + 1)
+                } else {
+                    match rng.below(3) {
+                        0 => "a".to_owned(),
+                        1 => "b".to_owned(),
+                        _ => "αντίγραφο".to_owned(),
+                    }
+                };
+                s.apply_event(SurfaceEvent::ClipboardText { text }, &mut out);
             }
             _ => {
                 if detached {

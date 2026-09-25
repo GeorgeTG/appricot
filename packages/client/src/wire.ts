@@ -313,6 +313,15 @@ export interface ClipboardSet {
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- the proto message has no fields
 export interface ClipboardAsk {}
 
+/**
+ * S -> C. The app copied: the UTF-8 text the streamer fetched from the new CLIPBOARD owner.
+ * Untrusted text (ADR-0003 §7): the client exposes it as an event only, and the host decides
+ * what to do with it inside its own user gesture.
+ */
+export interface ClipboardText {
+  text: string;
+}
+
 /** C -> S. The host user closed this window's chrome. It is a request. */
 export interface CloseRequest {
   surfaceId: number;
@@ -346,7 +355,8 @@ export type Envelope =
   | { kind: 'blurRelease'; blurRelease: BlurRelease }
   | { kind: 'clipboardSet'; clipboardSet: ClipboardSet }
   | { kind: 'clipboardAsk'; clipboardAsk: ClipboardAsk }
-  | { kind: 'closeRequest'; closeRequest: CloseRequest };
+  | { kind: 'closeRequest'; closeRequest: CloseRequest }
+  | { kind: 'clipboardText'; clipboardText: ClipboardText };
 
 // ---------------------------------------------------------------------------
 // Wire primitives
@@ -1045,6 +1055,10 @@ function encodeNoFields(): void {
 
 function encodeClipboardSet(w: Writer, m: ClipboardSet): void {
   writeString(w, 1, m.text, MAX_CLIPBOARD_BYTES, 'ClipboardSet.text');
+}
+
+function encodeClipboardText(w: Writer, m: ClipboardText): void {
+  writeString(w, 1, m.text, MAX_CLIPBOARD_BYTES, 'ClipboardText.text');
 }
 
 function encodeCloseRequest(w: Writer, m: CloseRequest): void {
@@ -1878,6 +1892,26 @@ function decodeClipboardSet(r: Reader): ClipboardSet {
   return m;
 }
 
+function decodeClipboardText(r: Reader): ClipboardText {
+  const m: ClipboardText = { text: '' };
+  const seen = new SingularFields('ClipboardText', 1);
+  while (!r.done()) {
+    const [field, wireType] = fieldKey(r, 'ClipboardText field key');
+    seen.mark(field);
+    switch (field) {
+      case 1: {
+        wantWireType(wireType, WT_LEN, 'ClipboardText.text');
+        const length = r.u32('ClipboardText.text length');
+        m.text = r.takeString(length, MAX_CLIPBOARD_BYTES, 'ClipboardText.text');
+        break;
+      }
+      default:
+        r.skip(wireType, 'ClipboardText');
+    }
+  }
+  return m;
+}
+
 /** CursorGone, BlurRelease and ClipboardAsk know no field: whatever they carry is skipped. */
 function decodeEmpty(r: Reader, kind: string): void {
   while (!r.done()) {
@@ -1966,6 +2000,9 @@ export function encodeEnvelope(e: Envelope): Uint8Array {
     case 'closeRequest':
       writeMessage(w, 24, e.closeRequest, encodeCloseRequest);
       break;
+    case 'clipboardText':
+      writeMessage(w, 25, e.clipboardText, encodeClipboardText);
+      break;
   }
   return w.finish();
 }
@@ -2023,6 +2060,8 @@ function decodeBody(field: number, r: Reader): Envelope {
       return { kind: 'clipboardAsk', clipboardAsk: {} };
     case 24:
       return { kind: 'closeRequest', closeRequest: { surfaceId: decodeSurfaceIdOnly(r, 'CloseRequest') } };
+    case 25:
+      return { kind: 'clipboardText', clipboardText: decodeClipboardText(r) };
     default:
       throw new ProtocolError(
         `envelope names unknown oneof field ${field}`,

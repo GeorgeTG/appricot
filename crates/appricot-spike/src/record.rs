@@ -496,6 +496,13 @@ impl Recorder {
             )?,
             Body::CursorGone(_) => self.log(JsonObject::new().str("ev", "cursor_gone"))?,
             Body::ClipboardAsk(_) => self.log(JsonObject::new().str("ev", "clipboard_ask"))?,
+            // The app copied. The text itself is the user's data and never logged: the byte
+            // length is all a measurement needs.
+            Body::ClipboardText(m) => self.log(
+                JsonObject::new()
+                    .str("ev", "clipboard_text")
+                    .uint("len", u64::try_from(m.text.len()).unwrap_or(u64::MAX)),
+            )?,
             Body::ServerError(e) => self.log(
                 JsonObject::new()
                     .str("ev", "server_error")

@@ -351,13 +351,22 @@ static CLIPBOARD_ASK: Schema = Schema {
     fields: &[],
 };
 
+static CLIPBOARD_TEXT: Schema = Schema {
+    path: "clipboard_text",
+    fields: &[field(
+        1,
+        "clipboard_text.text",
+        Kind::Str(MAX_CLIPBOARD_BYTES),
+    )],
+};
+
 static CLOSE_REQUEST: Schema = Schema {
     path: "close_request",
     fields: &[field(1, "close_request.surface_id", Kind::Varint)],
 };
 
 /// The Envelope oneof: field number `n` names `BODIES[n - 1]`.
-static BODIES: [&Schema; 24] = [
+static BODIES: [&Schema; 25] = [
     &HELLO,
     &HELLO_REPLY,
     &BYE,
@@ -382,6 +391,7 @@ static BODIES: [&Schema; 24] = [
     &CLIPBOARD_SET,
     &CLIPBOARD_ASK,
     &CLOSE_REQUEST,
+    &CLIPBOARD_TEXT,
 ];
 
 /// The body schema an envelope field number names, if any.
@@ -614,7 +624,7 @@ mod tests {
         BODIES, Kind, MAX_FIELDS, POINT, POSITIONER, RECT, Refusal, SIZE, Schema, TILE, envelope,
     };
 
-    /// Every schema: the 24 bodies and the five messages only nested ones use.
+    /// Every schema: the 25 bodies and the five messages only nested ones use.
     fn all_schemas() -> Vec<&'static Schema> {
         let mut all: Vec<&'static Schema> = BODIES.to_vec();
         all.extend([&POINT, &SIZE, &RECT, &POSITIONER, &TILE]);

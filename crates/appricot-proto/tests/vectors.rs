@@ -654,6 +654,7 @@ fn edge_handshake_and_surface_vectors() -> Vec<Vector> {
 }
 
 /// Frame, cursor and input messages at their caps.
+#[allow(clippy::too_many_lines)] // One entry per edge case.
 fn edge_frame_and_input_vectors() -> Vec<Vector> {
     let side = MAX_TILE_WIDTH.min(MAX_TILE_HEIGHT);
     let steps = i32::try_from(MAX_POINTER_AXIS_STEPS).expect("a small cap");
@@ -751,6 +752,21 @@ fn edge_frame_and_input_vectors() -> Vec<Vector> {
             name: "clipboard-set-at-cap",
             note: "ClipboardSet text of exactly MAX_CLIPBOARD_BYTES, in two-byte Greek",
             envelope: envelope(Body::ClipboardSet(ClipboardSet {
+                text: greek_text(MAX_CLIPBOARD_BYTES),
+            })),
+        },
+        Vector {
+            name: "clipboard-text",
+            note: "Copy text from the app to the host: UTF-8 the streamer fetched from the \
+                   new CLIPBOARD owner",
+            envelope: envelope(Body::ClipboardText(ClipboardText {
+                text: "αντιγραμμένο στο πρόχειρο".into(),
+            })),
+        },
+        Vector {
+            name: "clipboard-text-at-cap",
+            note: "ClipboardText text of exactly MAX_CLIPBOARD_BYTES, in two-byte Greek",
+            envelope: envelope(Body::ClipboardText(ClipboardText {
                 text: greek_text(MAX_CLIPBOARD_BYTES),
             })),
         },
@@ -1377,6 +1393,16 @@ fn over_cap_vectors() -> Vec<Invalid> {
             })),
             "clipboard_set.text",
         ),
+        prefix_only(
+            "clipboard-text-over-cap",
+            "ClipboardText.text of MAX_CLIPBOARD_BYTES + 1: only the key and the length are \
+             sent",
+            lfield(25, &length_only(1, MAX_CLIPBOARD_BYTES + 1)),
+            envelope(Body::ClipboardText(ClipboardText {
+                text: "x".repeat(MAX_CLIPBOARD_BYTES + 1),
+            })),
+            "clipboard_text.text",
+        ),
         refused(
             "pointer-axis-steps-x-over-cap",
             "PointerAxis.steps_x of MAX_POINTER_AXIS_STEPS + 1",
@@ -1690,20 +1716,20 @@ fn grammar_vectors() -> Vec<Invalid> {
         ),
         broken(
             "unknown-body",
-            "Envelope field 25, which names no v0 message",
-            lfield(25, &[]),
+            "Envelope field 26, which names no v0 message",
+            lfield(26, &[]),
             Unknown,
         ),
         broken(
             "unknown-body-after-a-known-one",
-            "CursorGone, then envelope field 25",
-            [lfield(15, &[]), lfield(25, &[])].concat(),
+            "CursorGone, then envelope field 26",
+            [lfield(15, &[]), lfield(26, &[])].concat(),
             Unknown,
         ),
         broken(
             "unknown-body-as-varint",
-            "Envelope field 25 with wire type 0",
-            vfield(25, 0),
+            "Envelope field 26 with wire type 0",
+            vfield(26, 0),
             Unknown,
         ),
     ]
@@ -1828,8 +1854,9 @@ fn committed_vectors_are_current() {
     let vectors = vectors();
     assert_eq!(
         vectors.len(),
-        58,
-        "30 first vectors (24 message kinds and six extras) and 28 edge cases"
+        60,
+        "30 first vectors (24 message kinds and six extras), 28 edge cases, and the two \
+         clipboard-text additions"
     );
     let generated = render(&vectors, &lenient_vectors(), &invalid_vectors());
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1865,7 +1892,7 @@ fn every_vector_round_trips_byte_identically() {
     }
 }
 
-/// The envelope field number of a body: 1 for Hello through 24 for CloseRequest.
+/// The envelope field number of a body: 1 for Hello through 25 for ClipboardText.
 fn body_number(envelope: &Envelope) -> u32 {
     let bytes = envelope.encode_to_vec();
     u32::from(bytes.first().copied().expect("a body")) >> 3
@@ -1873,12 +1900,12 @@ fn body_number(envelope: &Envelope) -> u32 {
 
 #[test]
 fn every_message_kind_has_a_canonical_vector() {
-    let mut seen = [false; 24];
+    let mut seen = [false; 25];
     for vector in vectors() {
         let number = body_number(&vector.envelope);
         seen[usize::try_from(number - 1).expect("a small number")] = true;
     }
-    let missing: Vec<usize> = (1..=24).filter(|n| !seen[n - 1]).collect();
+    let missing: Vec<usize> = (1..=25).filter(|n| !seen[n - 1]).collect();
     assert!(
         missing.is_empty(),
         "no vector for envelope fields {missing:?}"
@@ -1993,6 +2020,7 @@ fn every_limit_row_has_its_cap_plus_one() {
         "cursor_image.argb_premultiplied",
         "key.code",
         "clipboard_set.text",
+        "clipboard_text.text",
         "pointer_axis.steps_x",
         "pointer_axis.steps_y",
     ];

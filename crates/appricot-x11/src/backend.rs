@@ -1,8 +1,10 @@
 //! [`X11Backend`]: the `CaptureBackend` and `InputSink` implementation on X11.
 
+use std::time::{Duration, Instant};
+
 use appricot_core::{
-    CaptureBackend, InputSink, KeyCode, KeyEvent, MAX_POINTER_AXIS_STEPS, PixelBuffer, Point,
-    PointerButton, PressState, Rect, Role, Size, SurfaceEvent, SurfaceId,
+    CaptureBackend, InputSink, KeyCode, KeyEvent, MAX_CLIPBOARD_BYTES, MAX_POINTER_AXIS_STEPS,
+    PixelBuffer, Point, PointerButton, PressState, Rect, Role, Size, SurfaceEvent, SurfaceId,
 };
 use x11rb::connection::Connection as _;
 use x11rb::cookie::VoidCookie;
@@ -21,11 +23,15 @@ use x11rb::{COPY_DEPTH_FROM_PARENT, COPY_FROM_PARENT, CURRENT_TIME, NONE};
 
 use crate::atoms::Atoms;
 use crate::capture::{convert_zpixmap, place_in, zeroed};
-use crate::clipboard::{Clipboard, latin1_decode, latin1_encode};
+use crate::clipboard::{
+    CLIPBOARD_FETCH_LONGS, Clipboard, ClipboardFetch, latin1_decode, latin1_encode,
+};
 use crate::cursor::cursor_image;
 use crate::error::BackendError;
 use crate::input::{HeldInput, KeyId, KeyPress, NoShiftKey, Stroke};
-use crate::keymap::{KeyKind, Keymap, XK_CAPS_LOCK, XK_SHIFT_L, key_kind, resolve_pressable};
+use crate::keymap::{
+    KeyKind, Keymap, Plan, Step, XK_CAPS_LOCK, XK_SHIFT_L, key_kind, plan, release_keycode,
+};
 use crate::wm::{
     MAX_SURFACE_HEIGHT, MAX_SURFACE_WIDTH, SizeHints, TrackedWindow, WindowKind, WindowTable,
     bounded_size, decode_utf8_cut, place_toplevel, size_bound,
@@ -66,6 +72,11 @@ const WM_STATE_WITHDRAWN: u32 = 0;
 /// The most X events one `drain_events` call handles. An app that floods damage cannot
 /// keep the call looping; what is left stays queued for the next call.
 const MAX_EVENTS_PER_DRAIN: usize = 512;
+
+/// How long the fetch of the app's clipboard text waits for its answer. Nothing blocks on
+/// it — drains stay non-blocking whatever the owner does — but an answer this late belongs
+/// to a fetch that was given up, and is ignored.
+const CLIPBOARD_FETCH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The byte cap a title is cut to, mirroring `appricot-proto`'s `MAX_TITLE_BYTES` (512,
 /// provisional until the wire spec task fixes it).
@@ -113,6 +124,9 @@ pub struct X11Backend {
     clipboard: Clipboard,
     held: HeldInput,
     keymap: Keymap,
+    /// The spare keycodes rebound for held keys, with the keysym each carries: released
+    /// when the key comes up (or on blur), by writing an empty row back.
+    rebound: Vec<(u8, u32)>,
     /// The toplevel input last went to: the host's focus, or the pointer's surface since. A
     /// popup that names no parent is given this one. It never moves the keyboard.
     focused: Option<SurfaceId>,
@@ -194,6 +208,7 @@ impl X11Backend {
             clipboard: Clipboard::default(),
             held: HeldInput::new(),
             keymap,
+            rebound: Vec::new(),
             focused: None,
             ensured: None,
             raised_at: SurfaceId::new(0),
@@ -639,10 +654,17 @@ impl X11Backend {
     ) -> Result<(), BackendError> {
         // Any client can SendEvent to the root with the masks the backend selects there.
         // Only what ICCCM has clients send is believed: the synthetic UnmapNotify of a
-        // withdrawal, and client messages. A forged ConfigureNotify must not move
-        // root_size, the bound every clamp uses; a forged DestroyNotify must not drop a
-        // live window.
-        if event.sent_event() && !matches!(event, Event::UnmapNotify(_) | Event::ClientMessage(_)) {
+        // withdrawal, client messages, and the SelectionNotify an owner owes a requestor
+        // (ourselves, when the fetch of the app's clipboard asks). A forged ConfigureNotify
+        // must not move root_size, the bound every clamp uses; a forged DestroyNotify must
+        // not drop a live window; a forged SelectionNotify can at worst make the backend
+        // read a property on its own window, bounded and type-checked like any fetch reply.
+        if event.sent_event()
+            && !matches!(
+                event,
+                Event::UnmapNotify(_) | Event::ClientMessage(_) | Event::SelectionNotify(_)
+            )
+        {
             return Ok(());
         }
         match event {
@@ -698,6 +720,7 @@ impl X11Backend {
                 Ok(())
             }
             Event::SelectionRequest(e) => self.selection_request(e, out),
+            Event::SelectionNotify(e) => self.selection_notify(e, out),
             Event::SelectionClear(e) => {
                 if e.selection == self.atoms.clipboard {
                     self.clipboard.text = None;
@@ -708,9 +731,18 @@ impl X11Backend {
                 if e.selection == self.atoms.clipboard && e.owner != self.owner_window {
                     // Another client took the selection; the host's text is stale.
                     self.clipboard.text = None;
+                    if e.owner == NONE {
+                        // Nobody owns the selection; no fetch has anything to ask.
+                        self.clipboard.fetch = None;
+                    } else {
+                        // The app copied: ask the new owner for its UTF-8 text.
+                        self.start_clipboard_fetch()?;
+                    }
                 } else if e.selection == self.atoms.clipboard {
-                    // The backend took it: the time the server recorded answers TIMESTAMP.
+                    // The backend took it: the time the server recorded answers TIMESTAMP,
+                    // and any fetch of a previous owner's text is over.
                     self.clipboard.acquired = e.selection_timestamp;
+                    self.clipboard.fetch = None;
                 }
                 Ok(())
             }
@@ -1057,6 +1089,79 @@ impl X11Backend {
         Ok(())
     }
 
+    /// Asks the current CLIPBOARD owner for its `UTF8_STRING`, into the backend's own fetch
+    /// property, and starts the deadline the answer must beat.
+    ///
+    /// Called when an XFixes notification says another client took the selection: the app
+    /// copied. The backend never blocks on the answer — it arrives as a `SelectionNotify`
+    /// event the next drains pick up, or it does not, and [`ClipboardFetch::deadline`]
+    /// bounds how long the fetch is still believed live.
+    fn start_clipboard_fetch(&mut self) -> Result<(), BackendError> {
+        self.clipboard.fetch = Some(ClipboardFetch {
+            deadline: Instant::now() + CLIPBOARD_FETCH_TIMEOUT,
+        });
+        self.conn
+            .convert_selection(
+                self.owner_window,
+                self.atoms.clipboard,
+                self.atoms.utf8_string,
+                self.atoms.clipboard_fetch,
+                CURRENT_TIME,
+            )?
+            .check()?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    /// The answer to the backend's own selection request: the app's clipboard text, when the
+    /// fetch is live, the answer names it, and the property is a carriable `UTF8_STRING`.
+    ///
+    /// Anything else — a stale answer, a refusal, a different type (an `INCR` the wire never
+    /// asked for), a text over `MAX_CLIPBOARD_BYTES`, bytes that are not UTF-8 — sends
+    /// nothing and disturbs nothing; the property is still deleted, so a hostile owner
+    /// cannot leave data on the backend's window.
+    fn selection_notify(
+        &mut self,
+        e: x::SelectionNotifyEvent,
+        out: &mut Vec<SurfaceEvent>,
+    ) -> Result<(), BackendError> {
+        if self.clipboard.fetch.is_none()
+            || e.requestor != self.owner_window
+            || e.selection != self.atoms.clipboard
+            || e.target != self.atoms.utf8_string
+        {
+            return Ok(()); // not ours, or an answer to a fetch already given up
+        }
+        self.clipboard.fetch = None;
+        if e.property == NONE {
+            return Ok(()); // refused, or the owner holds no UTF-8 text
+        }
+        // Bounded in longs: one byte past the cap, enough to tell carriable from not.
+        let reply = self
+            .conn
+            .get_property(
+                true,
+                self.owner_window,
+                e.property,
+                XA_ANY,
+                0,
+                CLIPBOARD_FETCH_LONGS,
+            )?
+            .reply()?;
+        if reply.type_ != self.atoms.utf8_string
+            || reply.format != 8
+            || reply.value.len() > MAX_CLIPBOARD_BYTES
+        {
+            return Ok(());
+        }
+        // Untrusted text, capped; the session decides whether the host already has it.
+        // Invalid UTF-8 is dropped whole: the wire message the text feeds is UTF-8 only.
+        if let Ok(text) = String::from_utf8(reply.value) {
+            out.push(SurfaceEvent::ClipboardText { text });
+        }
+        Ok(())
+    }
+
     /// Writes a reply property; a gone requestor ends the exchange, it does not fail it.
     fn write_property(&self, requestor: x::Window, property: u32, type_: u32, data: &[u8]) -> bool {
         match self.conn.change_property(
@@ -1273,6 +1378,88 @@ impl X11Backend {
         Ok(())
     }
 
+    /// Binds `keysym` onto an unused keycode and returns it, for a press no modifier state
+    /// reaches — the technique VNC servers use. The row's first two columns both carry the
+    /// keysym, so the press needs no Shift choreography, and the server broadcasts a
+    /// `MappingNotify` so the apps refetch. `requested` names the wire keysym in the error
+    /// when no spare keycode exists.
+    fn bind_spare(&mut self, keysym: u32, requested: u32) -> Result<u8, BackendError> {
+        let taken: Vec<u8> = self.rebound.iter().map(|(k, _)| *k).collect();
+        let Some(spare) = self.keymap.spare_keycode(&taken) else {
+            return Err(BackendError::KeysymUnavailable(requested));
+        };
+        let width = self.keymap.width();
+        let mut row = vec![0u32; usize::from(width)];
+        row[0] = keysym;
+        if let Some(second) = row.get_mut(1) {
+            *second = keysym;
+        }
+        self.conn
+            .change_keyboard_mapping(1, spare, width, &row)?
+            .check()?;
+        self.conn.flush()?;
+        self.rebound.push((spare, keysym));
+        Ok(spare)
+    }
+
+    /// Writes an empty row back over `keycode`, ending its rebind.
+    fn restore_spare(&mut self, keycode: u8) -> Result<(), BackendError> {
+        let width = self.keymap.width();
+        let row = vec![0u32; usize::from(width)];
+        self.conn
+            .change_keyboard_mapping(1, keycode, width, &row)?
+            .check()?;
+        self.rebound.retain(|(k, _)| *k != keycode);
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    /// Types and releases one dead key of a sequence, with the text modifier choreography
+    /// around it, before the base key goes down. A tap that needs a rebind keeps it until
+    /// the sequence's key comes up: the binding is restored with the base's, so a client
+    /// reading the keymap at any point of the sequence sees each rebound row as it is.
+    fn deliver_tap(&mut self, tap: Step) -> Result<(), BackendError> {
+        let (keysym, keycode, shift, level3) = match tap {
+            Step::Direct {
+                keysym,
+                keycode,
+                shift,
+                level3,
+            } => (
+                keysym,
+                keycode,
+                shift,
+                if level3 {
+                    self.keymap.level3_keycode()
+                } else {
+                    None
+                },
+            ),
+            Step::Rebind { keysym } => (keysym, self.bind_spare(keysym, keysym)?, false, None),
+        };
+        let press = KeyPress {
+            keysym,
+            code: None,
+            kind: KeyKind::Character,
+            keycode,
+            shifted: shift,
+            level3,
+        };
+        let shift_key = self.keymap.shift_keycode();
+        let strokes = self
+            .held
+            .press_key(KeyId::Keycode(keycode), press, shift_key)
+            .map_err(|NoShiftKey| BackendError::KeysymUnavailable(XK_SHIFT_L))?;
+        for stroke in strokes {
+            self.xtest_stroke(stroke)?;
+        }
+        for stroke in self.held.release_key(&KeyId::Keycode(keycode)) {
+            self.xtest_stroke(stroke)?;
+        }
+        self.conn.flush()?;
+        Ok(())
+    }
+
     // The XTEST events are written, not waited on: a checked request is a round trip, and
     // one wheel message used to cost two per step. The caller flushes once at the end.
     // Requests on one connection run in order, so nothing is reordered; an error the
@@ -1370,6 +1557,14 @@ impl CaptureBackend for X11Backend {
     /// keep the caller from its other work. The rest stays queued for the next call.
     fn drain_events(&mut self, out: &mut Vec<SurfaceEvent>) -> Result<(), Self::Error> {
         out.append(&mut self.pending);
+        // A fetch past its deadline is over: an app that never answered cannot hold one open.
+        if self
+            .clipboard
+            .fetch
+            .is_some_and(|fetch| Instant::now() > fetch.deadline)
+        {
+            self.clipboard.fetch = None;
+        }
         self.conn.flush()?;
         let mut damaged: Vec<damage::Damage> = Vec::new();
         for _ in 0..MAX_EVENTS_PER_DRAIN {
@@ -1534,8 +1729,10 @@ impl InputSink for X11Backend {
 
     /// A press goes to the surface the host focused, and only there; with none focused it
     /// is dropped. The keysym is authoritative, so the X modifier state is set around each
-    /// press to produce exactly it (see the input module). A release comes off whatever its
-    /// press put down, focus or not.
+    /// press to produce exactly it (see the input module), and a keysym the keymap holds
+    /// only past the first two columns is typed by holding the level-3 key around the
+    /// press or by rebinding an unused keycode for it (see the keymap module). A release
+    /// comes off whatever its press put down, focus or not.
     fn key(&mut self, key: KeyEvent) -> Result<(), Self::Error> {
         let keysym = key.keysym.0;
         let kind = key_kind(keysym);
@@ -1547,12 +1744,25 @@ impl InputSink for X11Backend {
             PressState::Released => {
                 let id = if let Some(code) = code {
                     KeyId::Code(code.to_owned())
-                } else if let Ok(resolved) = resolve_pressable(&self.keymap, keysym) {
-                    KeyId::Keycode(resolved.keycode)
+                } else if let Some(keycode) = release_keycode(&self.keymap, keysym, &self.rebound) {
+                    KeyId::Keycode(keycode)
                 } else {
                     return Ok(()); // nothing was pressed under it
                 };
-                self.held.release_key(&id)
+                let strokes = self.held.release_key(&id);
+                // A rebound keycode no held key keeps down ends its rebind: the base key
+                // this release may have just freed, and any dead-key tap of its sequence,
+                // whose binding waited for exactly that.
+                let spent: Vec<u8> = self
+                    .rebound
+                    .iter()
+                    .map(|(k, _)| *k)
+                    .filter(|k| !self.held.holds_keycode(*k))
+                    .collect();
+                for keycode in spent {
+                    self.restore_spare(keycode)?;
+                }
+                strokes
             }
             PressState::Pressed => {
                 let Some(target) = self
@@ -1562,23 +1772,52 @@ impl InputSink for X11Backend {
                     return Ok(());
                 };
                 self.give_keyboard(target)?;
-                let resolved = resolve_pressable(&self.keymap, keysym)?;
-                let id = code.map_or(KeyId::Keycode(resolved.keycode), |c| {
-                    KeyId::Code(c.to_owned())
-                });
+                let planned = plan(&self.keymap, keysym)?;
+                if let Plan::Dead { taps, .. } = &planned {
+                    for tap in taps.iter().copied() {
+                        self.deliver_tap(tap)?;
+                    }
+                }
+                let step = match &planned {
+                    Plan::Key(step) => *step,
+                    Plan::Dead { base, .. } => *base,
+                };
+                let (keycode, shift, level3) = match step {
+                    Step::Direct {
+                        keycode,
+                        shift,
+                        level3,
+                        ..
+                    } => (
+                        keycode,
+                        shift,
+                        if level3 {
+                            self.keymap.level3_keycode()
+                        } else {
+                            None
+                        },
+                    ),
+                    // The keymap holds this keysym out of every modifier's reach: press
+                    // it on a keycode rebound for as long as the key stays down.
+                    Step::Rebind { keysym: bound } => {
+                        (self.bind_spare(bound, keysym)?, false, None)
+                    }
+                };
+                let id = code.map_or(KeyId::Keycode(keycode), |c| KeyId::Code(c.to_owned()));
                 if let KeyKind::Modifier(modifier) = kind {
-                    self.held.press_modifier(id, resolved.keycode, modifier)
+                    self.held.press_modifier(id, keycode, modifier)
                 } else {
                     let press = KeyPress {
                         keysym,
                         code,
                         kind,
-                        keycode: resolved.keycode,
-                        shifted: resolved.column == 1,
+                        keycode,
+                        shifted: shift,
+                        level3,
                     };
-                    let shift = self.keymap.shift_keycode();
+                    let shift_key = self.keymap.shift_keycode();
                     self.held
-                        .press_key(id, press, shift)
+                        .press_key(id, press, shift_key)
                         .map_err(|NoShiftKey| BackendError::KeysymUnavailable(XK_SHIFT_L))?
                 }
             }
@@ -1604,10 +1843,11 @@ impl InputSink for X11Backend {
         Ok(())
     }
 
-    /// Releases every key and button held, the modifiers included, then anything else X
-    /// still reports down, and takes the keyboard focus off the app. The streamer calls it
-    /// for `BlurRelease`, and when the socket is lost or the session ends. The next key
-    /// press goes back to the surface the host last focused.
+    /// Releases every key and button held, the modifiers included, restores every keycode
+    /// a rebind still holds, then anything else X still reports down, and takes the
+    /// keyboard focus off the app. The streamer calls it for `BlurRelease`, and when the
+    /// socket is lost or the session ends. The next key press goes back to the surface the
+    /// host last focused.
     fn blur(&mut self) -> Result<(), Self::Error> {
         let (keys, buttons) = self.held.release_all();
         for keycode in keys {
@@ -1615,6 +1855,9 @@ impl InputSink for X11Backend {
         }
         for button in buttons {
             self.xtest_button(button, PressState::Released)?;
+        }
+        for (keycode, _) in std::mem::take(&mut self.rebound) {
+            self.restore_spare(keycode)?;
         }
         self.release_input_left_down(false)?;
         check_gone(self.conn.set_input_focus(

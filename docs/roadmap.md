@@ -142,22 +142,30 @@ Exit criteria:
   parent-plus-margin box, or take focus. This is a CI test.
 - Decoders in the browser realm have fuzz tests.
 
-Where it stands (2026-09-21): the code side has landed and is gated in CI — the streamer
-(token auth, readiness, ack-based flow control, the resume grace), `@appricot/client` and
-`@appricot/react`, the hostile fixture and the decoder fuzz tests, and a demo host page that
-draws the streamed windows as its own floating windows under a strict CSP. Still open: the
-real-browser pass on desktop Chrome, Firefox and Safari, and everything that needs the pilot
-application on a real device. The clipboard criterion is met in one direction only: text pastes
-from the host into the app, and the app can ask for a paste, but v0 has no message that carries
-the app's selection to the browser. Copy from the app needs a new server-to-client message under
-ADR-0003 §7's gesture and policy rules, before v0 is accepted.
+Where it stands (2026-09-21; refreshed 2026-09-24): the code side has landed and is gated in CI —
+the streamer (token auth, readiness, ack-based flow control, the resume grace), `@appricot/client`
+and `@appricot/react`, the hostile fixture and the decoder fuzz tests, and a demo host page that
+draws the streamed windows as its own floating windows under a strict CSP. Three more units
+landed in-repo with their gates on 2026-09-24:
 
-Carried from M1 (2026-09-24), with the measurements in
-[spike/findings-2026-09-23.md](spike/findings-2026-09-23.md): the X11 backend delivers a keysym
-that is not on the keymap's first group and two levels (Greek next to US, AltGr, dead-key
-accents; findings §5), which the input criterion above needs; and, as a proposal, the streamer
-skips tiles unchanged since the last frame, because an OpenGL application damages its whole
-window on every repaint (findings §2).
+- **The keysym delivery fix** carried from M1 ([spike findings
+  §5](spike/findings-2026-09-23.md#5-the-keyboard-check)): the X11 backend delivers keysyms
+  beyond the keymap's first group and two levels — Greek next to US, AltGr, dead-key accents —
+  driven through the backend and asserted by a test X client on a private Xvfb, for the `us`,
+  `gr` and `us,gr` layouts: direct keymap columns, the layout's own dead-key sequences, and a
+  rebind onto a spare keycode as the fallback, restored on release.
+- **The skip-unchanged-tiles sender optimisation**, carried from M1 as a proposal ([spike
+  findings §2](spike/findings-2026-09-23.md#2-the-scene-graph-and-what-it-damages), where an
+  OpenGL application damages its whole window on every repaint): the streamer omits a tile whose
+  encoded payload is byte-identical to the last one it sent for that grid cell, so a frame may
+  carry fewer tiles than the damage, and a frame with no changed tile is not sent at all.
+- **The app-to-host clipboard**, the gap the 2026-09-21 state of this note named: envelope #25
+  `clipboard_text` carries the app's copy to the host as untrusted text, capped and UTF-8,
+  exposed as a client event only; the host's policy decides, and a write to the user's clipboard
+  happens only inside a user gesture (ADR-0003 §7's rules, landed ahead of v0's acceptance).
+
+Still open for M2: the real-browser pass on desktop Chrome, Firefox and Safari, and everything
+that needs the pilot application on a real device.
 
 ## M3: First host integration behind a flag
 

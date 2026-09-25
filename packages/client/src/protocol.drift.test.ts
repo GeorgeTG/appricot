@@ -449,9 +449,9 @@ describe('the limits table has one set of numbers', () => {
 });
 
 describe('wire.ts decodes exactly what wire.proto says', () => {
-  it('parsed 24 bodies and the five nested messages', () => {
-    expect(BODIES).toHaveLength(24);
-    expect(BODIES.map((body) => body.number)).toEqual(Array.from({ length: 24 }, (_, i) => i + 1));
+  it('parsed 25 bodies and the five nested messages', () => {
+    expect(BODIES).toHaveLength(25);
+    expect(BODIES.map((body) => body.number)).toEqual(Array.from({ length: 25 }, (_, i) => i + 1));
     expect([...PARENT.keys()].sort()).toEqual(['Point', 'Positioner', 'Rect', 'Size', 'Tile']);
   });
 

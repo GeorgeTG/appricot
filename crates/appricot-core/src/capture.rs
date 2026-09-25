@@ -7,6 +7,10 @@
 //! signature may not change without every implementor and every caller changing in the same
 //! change.
 
+/// The byte cap of [`SurfaceEvent::ClipboardText`], re-exported from the limits table so a
+/// backend needs no dependency on the wire crate to honour it.
+pub use appricot_proto::limits::MAX_CLIPBOARD_BYTES;
+
 use appricot_proto::limits::{AppId, Title};
 
 use crate::geometry::{Rect, Size};
@@ -85,6 +89,14 @@ pub enum SurfaceEvent {
     /// anything, to send back through
     /// [`InputSink::clipboard_set`](crate::InputSink::clipboard_set).
     ClipboardRequested,
+    /// The app copied: another client took the CLIPBOARD selection, and the backend fetched
+    /// its UTF-8 text, whole and inside `MAX_CLIPBOARD_BYTES` (a conversion that is over the
+    /// cap, not UTF-8, or unanswered sends nothing). Untrusted text: the host decides what to
+    /// do with it, inside its own user gesture.
+    ClipboardText {
+        /// The text the backend fetched from the app's selection.
+        text: String,
+    },
 }
 
 /// Reads surfaces and their pixels from a display server.

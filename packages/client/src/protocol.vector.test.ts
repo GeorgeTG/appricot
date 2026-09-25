@@ -168,8 +168,8 @@ describe('the shared vector file', () => {
     expect(file.protocol_version).toBe(0);
   });
 
-  it('carries at least one vector per message kind (24 oneof fields)', () => {
-    expect(file.vectors.length).toBeGreaterThanOrEqual(24);
+  it('carries at least one vector per message kind (25 oneof fields)', () => {
+    expect(file.vectors.length).toBeGreaterThanOrEqual(25);
   });
 });
 
@@ -275,9 +275,10 @@ describe('decoder hardening beyond the vectors', () => {
   });
 
   it('rejects an unknown oneof field number', () => {
-    // Field 25, wire type 2, empty payload: 0xca 0x01 (key) 0x00 (length).
-    expect(() => decodeEnvelope(new Uint8Array([0xca, 0x01, 0x00]))).toThrowError(
-      'unknown oneof field 25',
+    // Field 26, wire type 2, empty payload: 0xd2 0x01 (key) 0x00 (length). Field 25 was
+    // this probe's unknown message until v0 gained `clipboardText` for it.
+    expect(() => decodeEnvelope(new Uint8Array([0xd2, 0x01, 0x00]))).toThrowError(
+      'unknown oneof field 26',
     );
   });
 

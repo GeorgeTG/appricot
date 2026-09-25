@@ -32,7 +32,7 @@ reasons and the detail behind it.
 | [vision.md](vision.md) | The problem, the four bad roads that exist today, what APPricot is and is not, the product principles, and how we will know it works. |
 | [architecture.md](architecture.md) | The as-built L1 (crates, packages, dependency edges), the documented L2/L3, the pixel and input paths, the Wayland-shaped window model, trust boundaries, the backend matrix and the pilot-deployment lessons. |
 | [protocol/README.md](protocol/README.md) | The eleven design rules every wire message must satisfy. |
-| [protocol/v0.md](protocol/v0.md) | The v0 spec: encoding, handshake, the limits table, all 24 messages, flow control, reattachment, keyboard and pointer mapping, popup placement, tile codecs, versioning. |
+| [protocol/v0.md](protocol/v0.md) | The v0 spec: encoding, handshake, the limits table, all 25 messages, flow control, reattachment, keyboard and pointer mapping, popup placement, tile codecs, versioning. |
 | [roadmap.md](roadmap.md) | M0-M6, their tasks and exit criteria. |
 | [adr/README.md](adr/README.md) | The ADR rules and the index of ADR-0001 to ADR-0005. |
 | [security/threat-model.md](security/threat-model.md) | The first-cut threat model: assets, adversaries, planned controls per adversary. |

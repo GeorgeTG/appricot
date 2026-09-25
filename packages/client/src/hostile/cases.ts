@@ -176,6 +176,7 @@ const F_SURFACE_METADATA = 7;
 const F_FRAME = 12;
 const F_CURSOR_IMAGE = 14;
 const F_CLIPBOARD_SET = 22;
+const F_CLIPBOARD_TEXT = 25;
 
 // ---------------------------------------------------------------------------
 // The markup corpus as typed envelopes: codec-legal, hostile in the DOM
@@ -301,6 +302,14 @@ export function markupEnvelopes(): readonly HostileEnvelope[] {
       },
     });
   }
+  // The app-to-host direction: the copied text is a server string like every other, and the
+  // host's copy-to-clipboard gesture must receive it as data, never as markup.
+  for (const s of markupUnder(MAX_CLIPBOARD_BYTES)) {
+    cases.push({
+      name: `ClipboardText.text <- ${shortLabel(s)}`,
+      envelope: { kind: 'clipboardText', clipboardText: { text: s } },
+    });
+  }
   return cases;
 }
 
@@ -388,6 +397,11 @@ export function oversizedBytes(): readonly HostileBytes[] {
       name: 'ClipboardSet.text of 65537 bytes (cap 65536)',
       bytes: envelope(F_CLIPBOARD_SET, stringField(1, 'A'.repeat(MAX_CLIPBOARD_BYTES + 1))),
       field: 'ClipboardSet.text',
+    },
+    {
+      name: 'ClipboardText.text of 65537 bytes (cap 65536)',
+      bytes: envelope(F_CLIPBOARD_TEXT, stringField(1, 'A'.repeat(MAX_CLIPBOARD_BYTES + 1))),
+      field: 'ClipboardText.text',
     },
     {
       name: 'CursorImage.width of 129 pixels (cap 128)',

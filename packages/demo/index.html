@@ -40,6 +40,11 @@
         <input id="paste" type="checkbox" />
         Send pasted text to the app
       </label>
+      <!-- The other clipboard direction (ADR-0003 §7): a copy made in the streamed app
+           reaches this page as an event and is held as data — nothing is written anywhere
+           until this button, a real user gesture and the only writer of the user's
+           clipboard, says so. Disabled while nothing is held. -->
+      <button id="copy-app-text" type="button" disabled>Copy app text</button>
       <!-- Minimized windows: one restore button per hidden window, its label the window's
            own title — untrusted server text, written by src/main.ts through setTextOnly
            (ADR-0003 §1), never markup. Empty (nothing minimized) it renders nothing. -->

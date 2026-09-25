@@ -76,7 +76,7 @@
 //   MAX_TOKEN_BYTES               256     Hello.stream_token
 //   MAX_KEY_CODE_BYTES             16     Key.code (physical key name, e.g. "KeyA")
 //   MAX_CODECS_OFFERED              8     entries in Hello.codecs and in HelloReply.codecs
-//   MAX_CLIPBOARD_BYTES         65536     ClipboardSet.text, in UTF-8 bytes
+//   MAX_CLIPBOARD_BYTES         65536     ClipboardSet.text and ClipboardText.text, UTF-8 bytes
 //   MAX_CURSOR_WIDTH              128     pixels
 //   MAX_CURSOR_HEIGHT             128     pixels
 //   MAX_CURSOR_BYTES            65536     bytes of CursorImage.argb_premultiplied
@@ -443,6 +443,17 @@ message ClipboardSet {
 // whether to answer; the answer, if any, is a later ClipboardSet.
 message ClipboardAsk {}
 
+// S -> C. The app copied: it took the CLIPBOARD selection, and the streamer fetched the
+// new owner's UTF8_STRING and found text. Sent when the app's clipboard UTF-8 text changes;
+// identical consecutive text is not re-sent, and a host paste (ClipboardSet) re-arms the
+// streamer's ownership so the app's next copy re-triggers. Bounded by MAX_CLIPBOARD_BYTES;
+// a conversion that is over the cap, or that times out, sends nothing. Untrusted text: the
+// client exposes it as an event only and the host decides what to do with it inside its own
+// user gesture (ADR-0003 section 7).
+message ClipboardText {
+  string text = 1;
+}
+
 // C -> S. The host user closed this window's chrome. It is a request: the streamer asks
 // the app (WM_DELETE_WINDOW) and the app decides.
 message CloseRequest {
@@ -479,5 +490,6 @@ message Envelope {
     ClipboardSet clipboard_set = 22;
     ClipboardAsk clipboard_ask = 23;
     CloseRequest close_request = 24;
+    ClipboardText clipboard_text = 25;
   }
 }

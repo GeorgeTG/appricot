@@ -14,9 +14,12 @@
 //! - [`server`]: routes (`/readyz`, `/session`), the one-session slot, its keeper, and the
 //!   bind.
 //! - [`session`]: the v0 protocol over one WebSocket: handshake, dispatch, frames, resume.
+//! - [`sent_tiles`]: what the client last received per grid cell, so unchanged tiles are
+//!   omitted from frames instead of sent.
 
 pub mod auth;
 pub mod backend;
 pub mod config;
+pub mod sent_tiles;
 pub mod server;
 pub mod session;

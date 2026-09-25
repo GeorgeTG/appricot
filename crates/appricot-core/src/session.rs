@@ -372,6 +372,13 @@ impl Session {
         self.clipboard = None;
     }
 
+    /// Forgets the clipboard text the last host received: a client that replaced the session
+    /// received nothing, so the not-twice rule must not swallow the app's next copy of the
+    /// same text on its account (v0.md §7: a replacement's session state starts fresh).
+    pub fn forget_clipboard(&mut self) {
+        self.clipboard = None;
+    }
+
     /// Proposes `size` for surface `id`, and returns the serial that names the proposal, or
     /// `None` for an unknown id, where the request is dropped like every other and spends no
     /// serial.
@@ -1484,6 +1491,19 @@ mod tests {
         // The host pasted: the streamer owns the selection again, and the app copying the
         // very same text afterwards is a change to the host.
         s.note_clipboard_set();
+        s.apply_event(copied("α"), &mut out);
+        assert_eq!(out, vec![clipboard_out("α")]);
+    }
+
+    #[test]
+    fn a_replaced_client_receives_the_next_copy_even_when_identical() {
+        let mut s = Session::new();
+        let mut out = Vec::new();
+        s.apply_event(copied("α"), &mut out);
+        out.clear();
+        // The client that received that text is gone: its replacement received nothing, so
+        // the app copying the same text again is a change to it (v0.md §7: fresh state).
+        s.forget_clipboard();
         s.apply_event(copied("α"), &mut out);
         assert_eq!(out, vec![clipboard_out("α")]);
     }

@@ -9,8 +9,8 @@
 //! What this file pins, against the real server over a real loopback WebSocket:
 //!
 //! - a session dropped inside the grace still resumes, however short the grace is;
-//! - a `Hello` without a serial replaces a parked session with a fresh one: the old window set
-//!   is never re-announced;
+//! - a `Hello` without a serial replaces the client, not the window set: the parked session
+//!   lives on under a fresh serial and the newcomer is told every window, old and new;
 //! - once the grace expires, the keeper tears the parked session — backend included — down, and
 //!   nothing is served again: the upgrade is refused with `410` and readiness reads red;
 //! - the grace ends at the deadline the socket's death set: refused handshakes, and a socket
@@ -31,8 +31,8 @@ use appricot_streamer::session::EndCause;
 use common::MockHandle;
 use common::harness::{
     Client, TestServer, connect_with_retry, expect_bye, expect_frame, expect_surface_new,
-    handshake, hello, hello_with_wrong_token, http_get, read_body, read_until, send,
-    spawn_mock_server, upgrade_refused, wait_until,
+    handshake, hello, hello_with_wrong_token, http_get, read_body, send, spawn_mock_server,
+    upgrade_refused, wait_until,
 };
 
 /// One lock for every test that touches the process-wide grace override: the tests of this
@@ -185,32 +185,48 @@ async fn a_short_grace_still_resumes_a_session_dropped_within_it() {
 }
 
 #[tokio::test]
-async fn a_hello_without_a_serial_replaces_a_parked_session_with_a_fresh_one() {
+async fn a_hello_without_a_serial_replaces_the_client_not_the_window_set() {
     let _grace = grace(2_000).await;
     let (server, mock) = spawn_mock_server().await;
     let (first, _serial) = live_session_with_a_window(&server, &mock, 7).await;
     drop(first);
 
-    // A Hello that names no serial replaces the parked session (v0.md §7): the reply says
-    // resumed = false and the client starts from an empty window set.
-    let (mut second, reply) = handshake(&server.addr, None).await;
-    assert!(!reply.resumed, "no serial named: fresh, not resumed");
+    // A window mapped while the session waits out its grace joins the set the same way: the
+    // backend announces a window once, so only the session can carry it to the next client.
+    mock.create_dialog(9, 7, Size::new(100, 60));
 
-    // A new window is announced on demand, and the old one never comes back: the replaced
-    // session's window set died with it.
-    mock.create_surface(8, Size::new(90, 60));
-    let announced = expect_surface_new(&mut second, 8).await;
+    // A Hello that names no serial replaces the client (v0.md §7): the reply says
+    // resumed = false, and the newcomer is told the window set the session kept.
+    let (mut second, reply) = handshake(&server.addr, None).await;
+    assert!(
+        !reply.resumed,
+        "no serial named: a replacement, not a resume"
+    );
+
+    // The old window is re-announced as it stands, and the one mapped while parked with it;
+    // then exactly one cursor message (v0.md §7: no cursor was ever seen, so CursorGone);
+    // then a full-redraw frame, its sequence started over for the new connection.
+    let announced = expect_surface_new(&mut second, 7).await;
+    let size = announced.size.expect("a size is carried");
+    assert_eq!((size.width, size.height), (120, 80));
+    expect_surface_new(&mut second, 9).await;
+    assert!(matches!(read_body(&mut second).await, Body::CursorGone(_)));
+    let frame = expect_frame(&mut second, 7).await;
+    assert!(frame.full_redraw, "a replacement repaints everything");
+    assert_eq!(frame.sequence, 1, "the replacement restarts the sequences");
+    let frame = expect_frame(&mut second, 9).await;
+    assert!(
+        frame.full_redraw,
+        "the window mapped while parked repaints with the rest"
+    );
+
+    // A new window still arrives on demand: the session goes on serving under its new serial.
+    // The id must clear the kept session's high-water mark — a backend's ids only rise.
+    mock.create_surface(10, Size::new(90, 60));
+    let announced = expect_surface_new(&mut second, 10).await;
     let size = announced.size.expect("a size is carried");
     assert_eq!((size.width, size.height), (90, 60));
-    expect_frame(&mut second, 8).await;
-
-    // A sentinel from the app: the next message after frame 8 is its ClipboardAsk, so surface
-    // 7 was never re-announced in between — proved by order, not by a quiet window on a clock.
-    mock.push(appricot_core::SurfaceEvent::ClipboardRequested);
-    read_until(&mut second, "the sentinel ClipboardAsk", |b| {
-        matches!(b, Body::ClipboardAsk(_))
-    })
-    .await;
+    expect_frame(&mut second, 10).await;
 }
 
 #[tokio::test]

@@ -185,7 +185,7 @@ async fn a_replaced_session_never_answers_to_the_old_serial() {
     let new = reply.resume_serial.expect("a session can be resumed");
     drop(ws);
 
-    // The old serial names the replaced session, which is gone: no resume of the empty one.
+    // The old serial names a session that parked under a newer one: it resumes nothing.
     let (ws, stale) = handshake(&server.addr, Some(old)).await;
     assert!(
         !stale.resumed,

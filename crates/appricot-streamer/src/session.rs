@@ -24,10 +24,15 @@
 //! A dropped socket parks the session (backend and all) for the grace window; a reconnect
 //! whose `Hello` names the parked `resume_serial` resumes it — the whole window set is
 //! re-announced and every surface gets a full-redraw frame. An authenticated `Hello` that
-//! does **not** name it replaces the parked session with a fresh one (`resumed = false`):
-//! the spec leaves this to the implementation's policy (§7), and a client that wants a new
-//! session "simply sends Hello without resume_serial". `BYE_SESSION_GONE` is answered only
-//! when there is nothing left to serve: a resume meets a backend whose display died.
+//! does **not** name it replaces the client (`resumed = false`): the spec leaves this to the
+//! implementation's policy (§7), and a client that wants a new session "simply sends Hello
+//! without resume_serial". A replacement is told the window set exactly as a first client
+//! is: the windows did not close with the client they lost, and the backend announces a
+//! window once — at its startup, when it adopts what is mapped — never per session. So the
+//! parked session lives on under a fresh serial, its clipboard's not-twice memory dropped
+//! for a host that received nothing, and the same announcement rebuilds the newcomer's
+//! mirror. `BYE_SESSION_GONE` is answered only when there is nothing left to serve: a
+//! resume meets a backend whose display died.
 //!
 //! Keysyms pass through untouched: docs/protocol/v0.md §8 defines them, and the backend owns
 //! the resolution — the streamer never rewrites one, and never logs one: nothing the user types
@@ -578,19 +583,24 @@ where
         }
     }
 
-    // A Hello that does not name the parked serial replaces the session (v0.md §7) — only now
-    // that the client holds the new serial. The parked core session died with its client: it
-    // is detached, and a detached session emits nothing and plans no frames, so the replacement
-    // starts from a fresh one on the same backend.
+    // A Hello that does not name the parked serial replaces the client (v0.md §7) — only now
+    // that the client holds the new serial. The parked session keeps everything the display
+    // still says — above all its window set, for the backend announces a window once, at its
+    // startup, and never per session — and the announcement below resynchronises the newcomer
+    // exactly as it resynchronises a resume: every surface re-announced under a full redraw,
+    // pacing started over. Only the clipboard's not-twice memory dies with the replaced
+    // client, which received nothing for it to remember.
     if parked_serial.is_some() && !resumed {
-        pump.session = Session::new();
+        pump.session.forget_clipboard();
     }
 
     // Announce the whole window set, then the frames (run_session), with nothing in between
     // (v0.md §7). For a resume this is the resynchronisation, always; for a fresh start it is
-    // every window the app opened before the client came, when it opened any.
+    // every window the app opened before the client came, when it opened any; for a
+    // replacement it is both at once, and with no window either it still must run, to bring
+    // the parked session back to a client that can be told things again.
     let mut out = Vec::new();
-    if resumed || pump.session.surface_count() > 0 {
+    if pump.session.is_detached() || pump.session.surface_count() > 0 {
         pump.session.resume(&mut out);
     }
     for event in &out {

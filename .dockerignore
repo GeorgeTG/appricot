@@ -1,0 +1,48 @@
+# Build context for the streamer release image (docker/streamer/Dockerfile, repo root context).
+#
+# What goes in: the Rust workspace, Cargo.lock, rust-toolchain.toml and the two licence texts —
+# the release build needs nothing else. Everything below stays out, so the context stays small, a
+# stale build output or a node_modules tree can never reach an image layer, and no machine-local
+# setting (`.env`) can be baked into a published artefact.
+#
+# Each name is listed in both spellings (`x` and `**/x`): a directory of that name is excluded
+# wherever it sits. A new build context with a different root needs its own file — docker/dev and
+# docker/spike build from their own directories and never see this one.
+
+# git, and the files that only the repository's own tooling reads
+.git
+.github
+.gitattributes
+.gitignore
+.editorconfig
+AGENTS.md
+
+# Rust build output, in whatever form it exists
+target
+**/target
+build
+**/build
+
+# The TypeScript workspace: its install, its output and its configuration. Not part of the Rust
+# build, and node_modules through a Windows bind mount is exactly what should never travel.
+node_modules
+**/node_modules
+dist
+**/dist
+*.tsbuildinfo
+packages
+eslint.config.js
+pnpm-lock.yaml
+pnpm-workspace.yaml
+tsconfig.base.json
+
+# Documents, diagrams, branding, and the manual spike artefacts
+docs
+assets
+artifacts
+**/artifacts
+*.md
+
+# Machine-local settings. Never in an image.
+.env
+.env.*

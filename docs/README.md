@@ -38,7 +38,7 @@ reasons and the detail behind it.
 | [security/threat-model.md](security/threat-model.md) | The first-cut threat model: assets, adversaries, planned controls per adversary. |
 | [glossary.md](glossary.md) | Every term of art, one entry each. |
 | [prior-art.md](prior-art.md) | Prior art, from browser remote desktops to per-window forwarding and commercial application streaming, with checked citations. |
-| [development.md](development.md) | The developer guide: Docker-only rule, the gates, the dev image, lockfiles, the demo run, dependencies, the untrusted-server lint rules, port policy, the spike service. |
+| [development.md](development.md) | The developer guide: Docker-only rule, the gates, the dev image, lockfiles, the demo run, dependencies, the untrusted-server lint rules, port policy, the spike service, and the release path a `v*` tag drives (§13). |
 | [spike/README.md](spike/README.md) | The M1 capture spike's harness: what a run starts, how to run and steer it, what it writes. Dated findings sit next to it. |
 
 ## The diagrams

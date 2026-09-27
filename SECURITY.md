@@ -22,8 +22,11 @@ A useful report says:
 
 ## Supported versions
 
-APPricot has not had a release. Every crate and package is `0.0.0`, and only `main` is
-supported: a fix lands there, and there are no older branches to backport it to.
+The newest version in the tree is **0.1.0**, and a `v*` tag is what publishes it — the streamer
+image and the two npm packages ([README](README.md#consuming-appricot-the-released-artefacts)).
+`main` is supported alongside it: a fix lands there and goes out in the next release, and there are
+no older branches to backport it to. A report should name the version, or the commit, it applies
+to.
 
 ## What is in scope
 

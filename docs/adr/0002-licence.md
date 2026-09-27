@@ -173,3 +173,24 @@ Alternatives considered:
 - Gating the development graph at Tier A. It fails today, and passing it would mean replacing
   vitest, jsdom and eslint.
 - Leaving the development graph ungated. That lets a GPL tool in without anyone deciding it.
+
+## Amendment 2: the release decision §1 deferred (2026-09-27)
+
+§1 keeps `publish = false` / `"private": true` in place "until there is something worth
+releasing", and calls that a release decision rather than a licence one. That decision has been
+taken — for the image that carries the streamer, and for the two packages
+[ADR-0001](0001-separate-repository.md) names as the artefact a host consumes:
+
+- `packages/client` and `packages/react` drop `"private": true`, and carry the workspace's version
+  (`0.1.0`). A host installs released tarballs at a version, and a packed manifest that still said
+  `private` would be a false claim about the thing being delivered
+  ([roadmap, M2's tail](../roadmap.md), [development.md §13](../development.md#13-releases)).
+- `@appricot/demo` and the root package keep `"private": true`: both are dev-only and ship to
+  nobody.
+- The Rust crates keep `publish = false`. Publishing a crate to crates.io is still a separate
+  decision, untaken; the delivered Rust artefact is the release image, not a crate.
+- The licence does not change, and it is what lets any of this happen without a negotiation:
+  `MIT OR Apache-2.0`, so a consumer's own dependency policy needs no exception entry (§1, §3).
+
+Nothing here relaxes §2. The graph a release links or bundles is the graph `cargo deny` and the npm
+licence gate already check, and they remain the gate for it.

@@ -1,7 +1,6 @@
 {
   "name": "@appricot/react",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "license": "MIT OR Apache-2.0",
   "author": "George Gougoudis <george_gougoudis@hotmail.com>",
   "description": "React bindings for @appricot/client: a provider, hooks and a window canvas. The host renders its own chrome.",

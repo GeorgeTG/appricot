@@ -21,7 +21,16 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.0"
+# One version for the workspace, the three npm packages and the released artefacts. 0.1.0 is the
+# first version a host can consume (tag `v0.1.0`; .github/workflows/release.yml builds and
+# publishes it). It is the pre-1.0 line on purpose: the whole L1 stack is implemented and gated,
+# but M2 is not closed — the real-browser pass on desktop Chrome, Firefox and Safari, and
+# everything that needs the pilot application on a real device, are still owed — and the wire
+# protocol is v0, so the interface may still move (docs/roadmap.md). 0.1.x is exactly that
+# promise: a consumer may take it, and a minor bump may still break it. Not 0.0.x, which says an
+# artefact is not meant to be consumed at all. A bump here moves Cargo.lock with it
+# (`cargo update --workspace`, which re-resolves nothing external).
+version = "0.1.0"
 edition = "2024"
 # The declared MSRV floor. These crates are meant to build INSIDE a host application's own
 # workspace, so the floor is a promise to that host: adopting APPricot must not force anyone to

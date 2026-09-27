@@ -77,6 +77,7 @@ them one at a time while iterating:
 | `just web-licences` | the npm licence gate: `scripts/web-licences.mjs` and its tests |
 | `just web-typecheck` / `web-lint` / `web-test` / `web-build` | `pnpm -r typecheck` / `lint` / `test` / `build` |
 | `just run-streamer` | prints the streamer's version line and exits 0 |
+| `just pack` | builds the TypeScript workspace and writes the two publishable tarballs into `artifacts/release/`. Manual, and it publishes nothing ([development.md §13](docs/development.md#13-releases)) |
 | `just demo` | builds the web packages and serves the demo host page on container port 8390 |
 
 Read the **exit code**, never the tail of the log. Chain with `&&`; a `| tail -N` throws the status
@@ -245,6 +246,10 @@ Plain, short sentences. English everywhere — code, comments, commit messages, 
 - The branch is `main`. Never force-push, never rewrite history.
 - When asked to commit: one logical change per commit, present tense, English, and commit by
   pathspec rather than `git add -A`.
+- **A release is a tag, and the tag is the user's to push.** `git tag v<version> && git push
+  origin v<version>` fires `.github/workflows/release.yml`, which publishes the streamer image and
+  the two packages. An agent never tags, never pushes and never publishes: the tag is that
+  workflow's trigger, so only the user pulls it ([development.md §13](docs/development.md#13-releases)).
 
 Documents live under [docs/](docs/); decisions are ADRs under [docs/adr/](docs/adr/README.md), and
 an Accepted ADR outranks every other document.

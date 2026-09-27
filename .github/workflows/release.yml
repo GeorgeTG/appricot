@@ -1,0 +1,291 @@
+# The release workflow: one `v*` tag, and APPricot's artefacts exist at a version.
+#
+#   git tag v0.1.0 && git push origin v0.1.0        # the owner's act — never an agent's
+#
+# ADR-0001 makes this the whole precondition of M3: a host application consumes APPricot's
+# **released artefacts** — the streamer image, and the npm packages `@appricot/client` and
+# `@appricot/react` — and does not vendor the source. Nothing was published before 0.1.0; this
+# workflow is where a version starts meaning something.
+#
+# Two artefacts, one token. Every step authenticates with the runner's own `GITHUB_TOKEN`
+# (`packages: write` for the image, `contents: write` for the release). The repository carries no
+# publishing secret of its own, so a release has no credential to leak.
+#
+# - **The streamer image** → GHCR, `ghcr.io/<owner>/appricot/streamer:<version>`, built from
+#   docker/streamer/Dockerfile. amd64 only (that file says why). It is verified before it is
+#   pushed: the tag must equal the version in the manifests, and the built binary's own version
+#   line must equal the tag.
+# - **The two packages** → built inside the dev image by `just pack` (the same image and the same
+#   recipe a developer runs) and attached to the GitHub Release for the tag, so a host installs
+#   them at a version instead of a hand-built file. GitHub's npm registry (`npm.pkg.github.com`) is
+#   deliberately not the transport: it stores a package under the account its scope names, and
+#   `@appricot` is not an account. docs/development.md §13 has the whole reasoning, and what a
+#   public registry would take. Either way the thing a host depends on is unchanged: the package
+#   names, and the version the manifests carry.
+#
+# What this workflow does NOT do:
+#
+# - It does not re-run `just check`. The tag is expected to name a commit whose CI on main is
+#   green, and the assertions below catch the one mistake a tag can carry that CI cannot: a tag
+#   that disagrees with the tree. Add `docker compose run --rm dev just check` to the release job
+#   if a release should prove the whole gate itself.
+# - It does not create a repository, a secret, a schedule or a cron. Nothing here runs on a timer.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Read by default; each job asks for what it alone needs. The two are separate on purpose: the
+# image job never needs to write the repository, and the release job never needs the registry.
+permissions:
+  contents: read
+
+# Two tags are two releases, and neither may cancel the other: `cancel-in-progress` would leave a
+# half-published tag behind.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: the streamer image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      reference: ${{ steps.push.outputs.reference }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The tag and the tree must agree on the version
+        # One version in four places: [workspace.package] in Cargo.toml and the three
+        # package.json files. A tag that names anything else would publish an artefact whose own
+        # metadata contradicts its name, so this fails before anything is built.
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          test -n "${version}" || { echo "the tag carries no version: ${GITHUB_REF_NAME}" >&2; exit 1; }
+          cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          test "${version}" = "${cargo_version}" || {
+            echo "tag ${GITHUB_REF_NAME} disagrees with Cargo.toml (${cargo_version})" >&2; exit 1; }
+          for package in client react demo; do
+            package_version="$(sed -n 's/^  "version": "\(.*\)",$/\1/p' "packages/${package}/package.json")"
+            test "${version}" = "${package_version}" || {
+              echo "tag ${GITHUB_REF_NAME} disagrees with packages/${package} (${package_version})" >&2
+              exit 1; }
+          done
+          echo "VERSION=${version}" >> "${GITHUB_ENV}"
+          # The owner comes from the run, not from this file: a transferred repository cannot
+          # leave a stale name behind. Container names are lower case.
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/appricot/streamer" >> "${GITHUB_ENV}"
+
+      - name: Build the image
+        run: |
+          set -euo pipefail
+          docker build --file docker/streamer/Dockerfile \
+            --label "org.opencontainers.image.version=${VERSION}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --tag "${IMAGE}:${VERSION}" .
+
+      - name: The image's own version is the tag
+        # The image sets no CMD, so this reaches the binary with no argument — which is its
+        # version line, exit 0 (crates/appricot-streamer/src/main.rs). This is the check that the
+        # released binary and the tag are one version, and it fails a tag whose version and
+        # manifests disagree. The prefix is asserted, not the whole line: the wire protocol the
+        # line also names (v0 today) may move without this release being wrong.
+        run: |
+          set -euo pipefail
+          line="$(docker run --rm "${IMAGE}:${VERSION}")"
+          echo "${line}"
+          case "${line}" in
+            "appricot-streamer ${VERSION} ("*) ;;
+            *) echo "the image reports '${line}', expected 'appricot-streamer ${VERSION} (...'" >&2
+               exit 1 ;;
+          esac
+
+      - name: The binary needs nothing the runtime image lacks
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh "${IMAGE}:${VERSION}" \
+            -c 'ldd /usr/local/bin/appricot-streamer' | tee /tmp/ldd.txt
+          ! grep -q 'not found' /tmp/ldd.txt
+
+      - name: Log in to GHCR
+        # The runner's own token and nothing else. `--password-stdin` keeps it out of the process
+        # list, and it arrives in an environment variable so the shell never prints it.
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "${GHCR_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Push the version, and `latest` when the tag is not a prerelease
+        id: push
+        run: |
+          set -euo pipefail
+          docker push "${IMAGE}:${VERSION}" | tee /tmp/push.txt
+          case "${GITHUB_REF_NAME}" in
+            *-*) echo "a prerelease tag: latest stays where it is" ;;
+            *)   docker tag "${IMAGE}:${VERSION}" "${IMAGE}:latest"
+                 docker push "${IMAGE}:latest" ;;
+          esac
+          {
+            echo "reference=${IMAGE}:${VERSION}"
+            # `docker push` prints `<tag>: digest: sha256:… size: …`; an older daemon printed it
+            # without the tag. Both shapes are accepted, and an empty digest is not fatal — the
+            # notes then say the push printed none.
+            echo "digest=$(sed -n 's/^\([^:]*: \)\?digest: \(sha256:[0-9a-f]*\) size: .*$/\2/p' /tmp/push.txt | tail -1)"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Say what was published
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### The streamer image"
+            echo
+            echo "- \`${{ steps.push.outputs.reference }}\`"
+            echo "- digest: \`${DIGEST:-the push printed none}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  release:
+    name: the versioned release
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [image]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Match the container uid to the checkout owner
+        # The dev container writes into the bind mount, so it runs as the runner's uid/gid, as in
+        # ci.yml. If the two disagree, every later step fails on a permission error that says
+        # nothing about its cause.
+        run: |
+          set -euo pipefail
+          {
+            echo "APPRICOT_UID=$(id -u)"
+            echo "APPRICOT_GID=$(id -g)"
+          } >> "${GITHUB_ENV}"
+
+      - name: The version, and the tarball URL, for the notes
+        run: |
+          set -euo pipefail
+          echo "VERSION=${GITHUB_REF_NAME#v}" >> "${GITHUB_ENV}"
+          echo "DOWNLOAD=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}" >> "${GITHUB_ENV}"
+
+      - name: Build the dev image
+        run: docker compose build dev
+
+      - name: Pack the two packages
+        # The image every gate runs in, and the recipe a developer runs. `just pack` installs the
+        # workspace, builds it and writes both tarballs under artifacts/release/ (gitignored),
+        # which the bind mount puts back on the runner.
+        run: docker compose run --rm dev just pack
+
+      - name: Write the release notes
+        env:
+          IMAGE_REFERENCE: ${{ needs.image.outputs.reference }}
+          IMAGE_DIGEST: ${{ needs.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          notes="$(mktemp)"
+          {
+            echo "APPricot ${VERSION} — the released artefacts: the streamer image, and the two npm"
+            echo "packages at the same version."
+            echo
+            echo "From commit \`${GITHUB_SHA}\`."
+            echo
+            echo "## The streamer image (linux/amd64)"
+            echo
+            echo '```'
+            echo "docker pull ${IMAGE_REFERENCE}"
+            echo '```'
+            echo
+            echo "Digest: \`${IMAGE_DIGEST:-the push printed none}\`"
+            echo
+            echo "A session image takes it as a layer, and brings its own display server, its"
+            echo "application and its per-session stream token:"
+            echo
+            echo '```dockerfile'
+            echo "FROM ${IMAGE_REFERENCE}"
+            echo 'CMD ["serve"]     # this image sets no CMD, so name the command here'
+            echo "# plus Xvfb (or another display server), the application, and APPRICOT_STREAM_TOKEN"
+            echo "# from your own session machinery."
+            echo '```'
+            echo
+            echo "## The npm packages"
+            echo
+            echo "| Tarball (attached below) | SHA-256 |"
+            echo "|---|---|"
+            for tarball in artifacts/release/*.tgz; do
+              name="$(basename "${tarball}")"
+              echo "| \`${name}\` | \`sha256:$(sha256sum "${tarball}" | cut -d' ' -f1)\` |"
+            done
+            echo
+            echo '```sh'
+            for tarball in artifacts/release/*.tgz; do
+              echo "pnpm add \"${DOWNLOAD}/$(basename "${tarball}")\""
+            done
+            echo '```'
+            echo
+            echo "The repository is private, so that URL needs an authenticated request: \`gh release"
+            echo "download\` is the shortest way, and a token in the installing project's own package-"
+            echo "manager configuration is the other."
+            echo
+            echo "They are attached here rather than published to a registry because GitHub's npm"
+            echo "registry stores a package under the account its scope names, and \`@appricot\` is not"
+            echo "one (docs/development.md §13). The package names and the version are the manifests'"
+            echo "own either way: \`@appricot/client\` and \`@appricot/react\`, both \`${VERSION}\`."
+            echo
+            echo "## What a host must supply"
+            echo
+            echo "APPricot ships the stream, not the product around it: the **per-session stream token**"
+            echo "(\`serve\` refuses to start without \`APPRICOT_STREAM_TOKEN\`), the **reach** (the streamer"
+            echo "binds loopback or a unix socket only, so the host's own proxy opens that leg), the"
+            echo "**chrome and window decisions**, and the **display and the application**. The"
+            echo "[README](README.md#consuming-appricot-the-released-artefacts) says it in one screen."
+            echo
+            echo "## What this version does not claim"
+            echo
+            echo "M2 is not closed: the real-browser pass on desktop Chrome, Firefox and Safari, and"
+            echo "everything that needs the pilot application on a real device, are still owed. The wire"
+            echo "protocol is v0, so the interface may still move — which is what \`0.1.x\` promises"
+            echo "(docs/roadmap.md)."
+          } > "${notes}"
+          echo "NOTES=${notes}" >> "${GITHUB_ENV}"
+          cat "${notes}"
+
+      - name: Publish the release, with the two tarballs
+        # `gh` is on the runner and authenticates with the same token, so no third-party action is
+        # needed to write a release. `--verify-tag` refuses if the tag is not there — the release
+        # is created for this tag and for nothing else.
+        #
+        # `gh release create` fails when the release already exists, so a re-run of a failed job
+        # (the image is pushed by then, the release is not) falls back to replacing the notes and
+        # the assets with the same run's outputs. Both paths are the same tag and the same commit.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! gh release create "${GITHUB_REF_NAME}" \
+                 --verify-tag \
+                 --title "${GITHUB_REF_NAME}" \
+                 --notes-file "${NOTES}" \
+                 artifacts/release/*.tgz; then
+            echo "the release already exists; replacing its notes and its assets" >&2
+            gh release edit "${GITHUB_REF_NAME}" --notes-file "${NOTES}"
+            gh release upload "${GITHUB_REF_NAME}" artifacts/release/*.tgz --clobber
+          fi

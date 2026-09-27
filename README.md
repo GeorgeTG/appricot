@@ -59,6 +59,72 @@ The first host application — the web product that will embed the client — is
 its own repository; it is not named here. The pilot application APPricot streams first is an X11
 client built on Qt6/xcb.
 
+## Consuming APPricot: the released artefacts
+
+A host application does not vendor this source ([ADR-0001](docs/adr/0001-separate-repository.md)).
+It consumes two released artefacts, both built and published by one `v*` tag
+([`.github/workflows/release.yml`](.github/workflows/release.yml), which uses the runner's own
+token — this repository holds no publishing secret). **0.1.0** is the first version;
+[where it stands](#where-it-stands) says what that number does and does not claim.
+
+**The streamer image**, from GHCR, linux/amd64. `<owner>` is the GitHub account that owns this
+repository, lower-cased; the workflow derives it from `github.repository_owner`, so the reference
+cannot drift from the push:
+
+```sh
+docker pull ghcr.io/<owner>/appricot/streamer:0.1.0
+docker run --rm ghcr.io/<owner>/appricot/streamer:0.1.0   # the version line, exit 0
+```
+
+A session image takes it as a layer, or takes the binary out of it, and brings its own display
+server, application and per-session token:
+
+```dockerfile
+FROM ghcr.io/<owner>/appricot/streamer:0.1.0
+CMD ["serve"]        # this image sets no CMD, so a bare run is a version probe
+```
+
+```dockerfile
+COPY --from=ghcr.io/<owner>/appricot/streamer:0.1.0 \
+     /usr/local/bin/appricot-streamer /usr/local/bin/
+```
+
+**The two npm packages**, `@appricot/client` and `@appricot/react`, at the same version. They are
+built at the tag and attached to that version's release as tarballs, so a host installs a version
+and not a hand-built file:
+
+```sh
+pnpm add "https://github.com/<owner>/appricot/releases/download/v0.1.0/appricot-client-0.1.0.tgz"
+pnpm add "https://github.com/<owner>/appricot/releases/download/v0.1.0/appricot-react-0.1.0.tgz"
+```
+
+`@appricot/react`'s packed manifest names `@appricot/client` as `0.1.0` — pnpm rewrites the
+workspace protocol — so install both at the same version. A release tarball is the transport
+rather than a registry because GitHub's npm registry stores a package under the account its scope
+names, and `@appricot` is not an account; [development.md §13](docs/development.md#13-releases) has
+the whole reasoning, and what a public registry would take.
+
+### What the host supplies
+
+APPricot ships the stream, not the product around it. Four things are the host's:
+
+- **The per-session stream token.** `serve` refuses to start without `APPRICOT_STREAM_TOKEN`, and
+  serves nothing until the first client message carries it (rule 8 of
+  [protocol/README.md](docs/protocol/README.md)). Mint one per session.
+- **The reach.** The streamer binds `loopback:<port>` or `unix:<path>` and refuses every other
+  address form, so a browser never connects to it. The host's own proxy opens that leg and relays
+  it to the page: `GET /readyz` for readiness, `GET /session` for the binary WebSocket.
+- **The chrome and the window decisions.** Size, position, stacking and focus are the host's, and
+  so is the clipboard policy (rule 6, same page); the client draws into canvases the host provides
+  and renders every server string as text.
+- **The display and the application.** The streamer connects to whatever `APPRICOT_DISPLAY` (or
+  `$DISPLAY`) names. Who starts that display server, and the application itself, are the session
+  image's.
+
+The streamer's whole configuration is four variables
+([`config.rs`](crates/appricot-streamer/src/config.rs)): `APPRICOT_BIND` (`loopback:0` by
+default), `APPRICOT_STREAM_TOKEN` (required), `APPRICOT_DISPLAY` and `APPRICOT_LOG`.
+
 ## Quick start
 
 Everything runs in Docker through compose. Never run `cargo`, `pnpm`, `node` or `just` on the host.
@@ -170,7 +236,7 @@ LICENSE-APACHE     the Apache-2.0 licence
 
 | Layer | What it is | State |
 |---|---|---|
-| **L1 streamer** | The wire protocol, `appricot-streamer` (per-window capture and input, inside the app container next to a headless display server), and the embeddable browser client. | implemented; the spike's measurements are still open |
+| **L1 streamer** | The wire protocol, `appricot-streamer` (per-window capture and input, inside the app container next to a headless display server), and the embeddable browser client. | implemented and gated; M1 closed by the owner's decision 2026-09-24 with two criteria moved rather than met, M2 open ([roadmap](docs/roadmap.md)) |
 | **L2 node** | Single-node session manager: app profiles, a container per session, warm pool, readiness gate, reaper, per-session egress scoping, audit, session-ticket API. | documented, not scaffolded |
 | **L3 broker** | Multi-node placement and session-affine routing. A ticket names the owning node; a stateful stream cannot migrate. | documented, not scaffolded |
 
@@ -182,14 +248,19 @@ minimise, close and focus; text paste from the host into the app, and the app's 
 the host's policy allows; the demo page under a strict CSP; the hostile-server fixture; decoder
 fuzz tests on both sides of the wire.
 
+**The released artefacts.** The version in the tree is **0.1.0**, and one `v*` tag publishes it:
+the streamer image to GHCR and the two packages to that version's release
+([the section above](#consuming-appricot-the-released-artefacts)). Pushing the tag is the owner's
+act and nothing has been tagged yet, so 0.1.0 is the version the next tag carries — it is recorded
+as M2's tail, and it does **not** close M2.
+
 **Still open.**
 
-- The X11 capture spike's measurements: the numbers that v0's limits and the backend decision
-  still rest on have yet to be taken, so v0's numbers may still move
-  ([roadmap M1](docs/roadmap.md),
-  [ADR-0004](docs/adr/0004-layers-window-model-and-first-backend.md)).
-- The on-device browser matrix: input on desktop Chrome, Firefox and Safari, with US and Greek
-  layouts, AltGr and dead keys.
+- The real-browser pass on desktop Chrome, Firefox and Safari: input with US and Greek layouts,
+  AltGr and dead keys. M1's keyboard check landed in the code — the X11 backend delivers keysyms
+  beyond the keymap's first group and two levels, asserted by a test X client for `us`, `gr` and
+  `us,gr` — so what is owed is the pass in real browsers, and everything that needs the pilot
+  application on a real device ([roadmap M2](docs/roadmap.md)).
 - Copy from the app to the host: v0 has no message that carries the app's selection to the
   browser, so the clipboard works in one direction only. IME composition input is open too.
 - L2 and L3 are written down

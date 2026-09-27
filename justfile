@@ -27,9 +27,10 @@ check: names-check pins fmt-check clippy test display-levers doc deny web-check
 names-check:
     sh scripts/check-names.sh
 
-# Two versions are pinned twice: the Rust toolchain (rust-toolchain.toml and the dev image's
-# base) and pnpm (package.json and the dev image). A drifted pair makes rustup or corepack
-# download the other version into every throwaway container.
+# Two versions are pinned twice: the Rust toolchain (rust-toolchain.toml and each image's
+# rust:<version> base) and pnpm (package.json and the dev image). A drifted pair makes rustup or
+# corepack download the other version into every throwaway container — and, for the release image,
+# ships a binary this repository's gates never compiled.
 # Fail when a version pinned in two places has drifted.
 pins:
     #!/usr/bin/env bash
@@ -41,9 +42,11 @@ pins:
             status=1
         fi
     }
-    same "Rust (rust-toolchain.toml channel, docker/dev/Dockerfile FROM rust:<version>)" \
-        "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" \
-        "$(sed -n 's/^FROM .*rust:\([0-9][0-9.]*\)-.*$/\1/p' docker/dev/Dockerfile)"
+    for dockerfile in docker/dev/Dockerfile docker/streamer/Dockerfile; do
+        same "Rust (rust-toolchain.toml channel, ${dockerfile} FROM rust:<version>)" \
+            "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" \
+            "$(sed -n 's/^FROM .*rust:\([0-9][0-9.]*\)-.*$/\1/p' "${dockerfile}")"
+    done
     same "pnpm (package.json packageManager, docker/dev/Dockerfile ARG PNPM_VERSION)" \
         "$(sed -n 's/^ *"packageManager": "pnpm@\([^"+]*\).*$/\1/p' package.json)" \
         "$(sed -n 's/^ARG PNPM_VERSION=\(.*\)$/\1/p' docker/dev/Dockerfile)"
@@ -163,6 +166,29 @@ web-build:
 # can typecheck or test against it. web-licences needs only node_modules.
 # Every TypeScript gate.
 web-check: web-install web-licences web-build web-typecheck web-lint web-test
+
+# --- the released packages (manual) ----------------------------------------------------------
+# A host consumes released artefacts and never this source (ADR-0001). This recipe is the package
+# half of that — the tarballs `@appricot/client` and `@appricot/react` — and it is what a `v*` tag
+# runs (.github/workflows/release.yml). It publishes nothing: it writes files, so it is safe to run
+# by hand, and running it is how you see exactly what a host installs.
+#
+# `pnpm pack` rewrites `workspace:*` to the real version, so the packed manifest of @appricot/react
+# names its client dependency as 0.1.0. The workflow asserts the version and this recipe asserts
+# there are exactly two tarballs; read the listing this prints when a package's `files` or
+# `exports` entry changes, because that is what a host receives.
+# Pack the two publishable packages into artifacts/release/ (gitignored).
+pack: web-install web-build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out=artifacts/release
+    rm -rf "${out}"
+    mkdir -p "${out}"
+    pnpm --filter @appricot/client pack --pack-destination "${out}"
+    pnpm --filter @appricot/react pack --pack-destination "${out}"
+    count="$(ls -1 "${out}"/*.tgz | wc -l | tr -d ' ')"
+    [[ "${count}" == 2 ]] || { echo "pack: ${count} tarball(s), expected 2" >&2; exit 1; }
+    ls -l "${out}"
 
 # --- the demo host page (manual) -------------------------------------------------------------
 # One container, ONE published loopback port. The demo's static server proxies the WebSocket

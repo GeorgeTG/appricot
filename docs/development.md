@@ -64,6 +64,7 @@ array after the `--`), it stops and asks for a quoted `'--'`, which always passe
 | `just web-licences` | the npm licence gate (§7): `scripts/web-licences.mjs` and its tests |
 | `just web-typecheck` / `web-lint` / `web-test` / `web-build` | `pnpm -r typecheck` / `lint` / `test` / `build` |
 | `just run-streamer` | prints the streamer's version line and exits 0 |
+| `just pack` | builds the TypeScript workspace and writes the two publishable tarballs into `artifacts/release/` (§13). Manual; it publishes nothing |
 | `just demo` | builds the web packages and the streamer, starts the streamer, and serves the demo host page on container port 8390 once the streamer is ready |
 
 `web-build` runs before `web-typecheck`/`web-test` inside `web-check` on purpose:
@@ -144,6 +145,11 @@ every build is reproducible. Only two recipes may rewrite them: `just lock`
 `--locked` / `--frozen-lockfile` and fails loudly on a stale lockfile instead of rewriting it
 behind your back. A deliberate dependency change is: edit the manifest, run the matching lock
 recipe, commit both files together.
+
+One change that is not a dependency change still moves `Cargo.lock`: a version bump rewrites the
+workspace members' entries in it, and `cargo update --workspace` is the narrow way to do that — it
+re-resolves nothing external, and `--locked` on every other build is what proves the result is
+consistent with the manifests. §13 says when that happens.
 
 ## 6. The demo host page
 
@@ -317,3 +323,63 @@ docker compose --profile spike run --rm spike just spike --help
 It publishes no port. Its demo mode reuses the demo page's one port on the command line, as
 `just demo` does. A run writes only under `artifacts/spike/`, which is gitignored, and the
 application runs in a scratch directory of its own, so nothing it writes lands in the tree.
+
+## 13. Releases
+
+A release is a tag, and the tag is the owner's to push:
+`git tag v0.1.0 && git push origin v0.1.0`.
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) then does the whole of it with
+the runner's own `GITHUB_TOKEN` — `packages: write` for the image, `contents: write` for the
+release. **No secret of this repository's is involved**, and an agent never tags, pushes or
+publishes: a tag fires this workflow, so it is the owner's act and nobody else's.
+
+Two artefacts, and they are the two [ADR-0001](adr/0001-separate-repository.md) names for a host:
+
+- **The streamer image**, `ghcr.io/<owner>/appricot/streamer:<version>` (linux/amd64, `<owner>`
+  lower-cased, derived from `github.repository_owner`), built from
+  [docker/streamer/Dockerfile](../docker/streamer/Dockerfile). It carries the release build of
+  `appricot-streamer` and the two licence texts, and nothing else — no display server, no
+  application, no token, no port. A session image takes it as a layer, or copies the binary out of
+  it. The workflow fails a tag unless the built binary's own version line equals the tag, and
+  unless `ldd` inside the image finds nothing missing.
+- **The two packages**, `@appricot/client` and `@appricot/react`, packed by `just pack` inside the
+  dev image and attached to that version's GitHub Release as tarballs. A host installs them from
+  that version's URL ([README](../README.md#consuming-appricot-the-released-artefacts)).
+
+### The version rule
+
+One version in four places — `[workspace.package]` in [Cargo.toml](../Cargo.toml) and the three
+`packages/*/package.json` files — and the workflow refuses a tag that disagrees with any of them.
+`0.1.0` is the first, and it is pre-1.0 on purpose: the wire protocol is v0 and M2 is not closed
+([roadmap](roadmap.md)). A bump is: edit the four manifests, run `cargo update --workspace` (§5),
+and commit them together. `pnpm-lock.yaml` carries no workspace versions, so it needs nothing.
+
+### Why tarballs, and not a registry
+
+GitHub's npm registry (`npm.pkg.github.com`) would need no secret either, which is why it was the
+first candidate. It is not the transport because the registry stores a package under the account
+its scope names — its own instructions say the `name` field's scope names "the user or organization
+account to which the package will be scoped", and that names and scopes are lower case
+([GitHub docs](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry),
+checked 2026-09-27) — and `@appricot` is not an account of this repository's owner. Publishing
+there would mean a scope that matches the owner (a rename, which ADR-0001's own words —
+`@appricot/client`, `@appricot/react` — do not allow without an amendment) or an npm account and a
+token (a new secret this repository does not carry, and will not learn). Whether that registry
+would in fact refuse a mismatched scope is **(unverified)**: it cannot be tested without publishing,
+and publishing is the owner's act.
+
+A public registry on npmjs.com is a separate, untaken decision, exactly as crates.io is for the
+Rust crates ([Cargo.toml](../Cargo.toml), `publish = false`): it needs a token, and it means
+claiming the names. When that decision is taken, the tarball step in the workflow is what it
+replaces, and what a host depends on — the two package names, and the version — is the same either
+way.
+
+### Seeing what a host gets
+
+`just pack` is manual, like `demo` and the spike: it publishes nothing, writes
+`artifacts/release/*.tgz` (gitignored) and prints the listing. Run it in the dev container after a
+change to a package's `files` or `exports` entry — that listing is what a host receives.
+
+`just check` does not build the release image, and cannot: the dev container has no docker socket.
+The workflow is where the image is built and run, and the Dockerfile's header says how to build it
+by hand (`docker build --file docker/streamer/Dockerfile .`).

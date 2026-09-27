@@ -1,7 +1,6 @@
 {
   "name": "@appricot/client",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "license": "MIT OR Apache-2.0",
   "author": "George Gougoudis <george_gougoudis@hotmail.com>",
   "description": "APPricot's embeddable browser client: connection, codec mirror, window registry, tile decode and input. Framework-agnostic; draws into canvases the host provides.",

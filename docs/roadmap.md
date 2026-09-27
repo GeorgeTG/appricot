@@ -164,6 +164,20 @@ landed in-repo with their gates on 2026-09-24:
   exposed as a client event only; the host's policy decides, and a write to the user's clipboard
   happens only inside a user gesture (ADR-0003 §7's rules, landed ahead of v0's acceptance).
 
+**M2's tail, 2026-09-27: the versioned artefacts.** Nothing had ever been published — every
+version was `0.0.0`, the packages were private and there was no tag, no release and no image a
+consumer could pull — and ADR-0001's "a host consumes released artefacts, and does not vendor the
+source" cannot work with that. The workspace and the three packages are `0.1.0` now, and one `v*`
+tag builds and publishes the two artefacts a host consumes: the streamer image
+(`ghcr.io/<owner>/appricot/streamer`, built from `docker/streamer/Dockerfile`) and the two npm
+packages `@appricot/client` and `@appricot/react`, packed at the tag inside the dev image and
+attached to that version's release, with the runner's own token and no secret of this
+repository's. The consumer's screen is the
+[README](../README.md#consuming-appricot-the-released-artefacts); the release path, its version
+rule and the reasoning behind the transport are
+[development.md §13](development.md#13-releases). This is the artefact M3 waits for. It is **not**
+M2's exit: the criteria below still are, and 0.1.x is what says so.
+
 Still open for M2: the real-browser pass on desktop Chrome, Firefox and Safari, and everything
 that needs the pilot application on a real device.
 
@@ -178,6 +192,9 @@ delivers versioned artefacts — the streamer binary or image layer, and the npm
 an app profile, and nothing else. Nothing in this milestone edits APPricot to suit one consumer;
 anything that looks like it
 must is a gap in the interface and is fixed as one.
+
+The first of those releases is the `0.1.0` recorded in M2's tail above: the image is the streamer
+layer, the two tarballs are the npm packages, and both are at one version a host pins.
 
 Exit criteria:
 

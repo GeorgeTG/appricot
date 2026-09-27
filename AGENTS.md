@@ -253,3 +253,19 @@ Plain, short sentences. English everywhere — code, comments, commit messages, 
 
 Documents live under [docs/](docs/); decisions are ADRs under [docs/adr/](docs/adr/README.md), and
 an Accepted ADR outranks every other document.
+
+### This repo (Rust builds)
+
+The workstation's shared build-hygiene text is deliberately **not** carried in this repository: the
+names of other private checkouts and the absolute paths it measures are precisely what
+§"Hard rule: no borrowed names, no borrowed paths" keeps out of here, and the check that enforces it
+is the first gate in `just check`. Follow that text from outside the repository; what follows is only
+what is about this repo.
+
+- Workspace root `.`: appricot-proto, appricot-core, appricot-x11, appricot-encode, appricot-streamer, appricot-spike (e.g. `cargo check -p appricot-core`).
+- Dev loop in Docker: `compose.yml` (top-level `name: appricot`) sets `CARGO_HOME=/cargo` and `CARGO_TARGET_DIR=/target` on the named volumes `cargo_home` and `target` (`appricot_cargo_home`, `appricot_target`). A target dir inside the container is fine (rule 4 is about the host).
+- Host build: likely not for appricot-x11 and appricot-streamer (X11); unknown for the other crates.
+- Dev profile: present (`debug = "line-tables-only"`, `[profile.dev.package."*"] debug = false`).
+- Dockerfile caching: cache mounts (`docker/dev/Dockerfile`).
+- Legacy in-tree target/: none.
+- Recommended follow-ups (not applied): none found.

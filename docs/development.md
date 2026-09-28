@@ -68,7 +68,7 @@ array after the `--`), it stops and asks for a quoted `'--'`, which always passe
 | `just demo` | builds the web packages and the streamer, starts the streamer, and serves the demo host page on container port 8390 once the streamer is ready |
 
 `web-build` runs before `web-typecheck`/`web-test` inside `web-check` on purpose:
-`@appricot/react` resolves `@appricot/client` through its exports map, which points at `dist/`,
+`@app-ricot/react` resolves `@app-ricot/client` through its exports map, which points at `dist/`,
 so the client must be built before anything can typecheck against it. The web tests also load
 each package's own `dist/index.js` under Node's ESM loader (`src/dist-esm.test.ts` in both
 packages), so a package is built before its tests run. Both compile under `NodeNext`, which
@@ -153,7 +153,7 @@ consistent with the manifests. §13 says when that happens.
 
 ## 6. The demo host page
 
-The demo is a whole host product in miniature: `@appricot/demo` draws the streamed windows as
+The demo is a whole host product in miniature: `@app-ricot/demo` draws the streamed windows as
 its own floating windows (title bars, minimise, focus, popups clamped to their parent), served
 by a zero-dependency static server under the strict CSP of ADR-0003 — no `'unsafe-inline'`, no
 `'unsafe-eval'` in `script-src`, and Trusted Types required for every script sink. Keyboard paste
@@ -235,7 +235,7 @@ reports every probe and leaves the safe spellings alone. A new rule therefore ne
 probes in that test. A sink reached through an alias (`const w = window`) is beyond a syntactic
 rule, so review still owns it. To stay green:
 
-- Render text through `setTextOnly()` (from `@appricot/client`) or as React children — never
+- Render text through `setTextOnly()` (from `@app-ricot/client`) or as React children — never
   through a sink.
 - `packages/client/src/hostile/` proves the whole policy end-to-end in CI: a fixture server
   that sends markup in every string field, oversized lengths, a popup the size of the screen
@@ -328,10 +328,10 @@ application runs in a scratch directory of its own, so nothing it writes lands i
 
 A release is a tag, and the tag is the owner's to push:
 `git tag v0.1.0 && git push origin v0.1.0`.
-[`.github/workflows/release.yml`](../.github/workflows/release.yml) then does the whole of it with
-the runner's own `GITHUB_TOKEN` — `packages: write` for the image, `contents: write` for the
-release. **No secret of this repository's is involved**, and an agent never tags, pushes or
-publishes: a tag fires this workflow, so it is the owner's act and nobody else's.
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) then does the whole of it:
+the image and the release with the runner's own `GITHUB_TOKEN`, the npm publish with the
+repository secret `NPM_TOKEN` (below). An agent never tags, pushes or publishes: a tag fires this
+workflow, so it is the owner's act and nobody else's.
 
 Two artefacts, and they are the two [ADR-0001](adr/0001-separate-repository.md) names for a host:
 
@@ -342,9 +342,10 @@ Two artefacts, and they are the two [ADR-0001](adr/0001-separate-repository.md) 
   application, no token, no port. A session image takes it as a layer, or copies the binary out of
   it. The workflow fails a tag unless the built binary's own version line equals the tag, and
   unless `ldd` inside the image finds nothing missing.
-- **The two packages**, `@appricot/client` and `@appricot/react`, packed by `just pack` inside the
-  dev image and attached to that version's GitHub Release as tarballs. A host installs them from
-  that version's URL ([README](../README.md#consuming-appricot-the-released-artefacts)).
+- **The two packages**, `@app-ricot/client` and `@app-ricot/react`, packed by `just pack` inside the
+  dev image, published to npmjs.org at the tag, and attached to that version's GitHub Release as
+  tarballs — the registry-free fallback. A host installs them from the registry, or from that
+  version's URL ([README](../README.md#consuming-appricot-the-released-artefacts)).
 
 ### The version rule
 
@@ -354,25 +355,34 @@ One version in four places — `[workspace.package]` in [Cargo.toml](../Cargo.to
 ([roadmap](roadmap.md)). A bump is: edit the four manifests, run `cargo update --workspace` (§5),
 and commit them together. `pnpm-lock.yaml` carries no workspace versions, so it needs nothing.
 
-### Why tarballs, and not a registry
+### npmjs.org, under the app-ricot organization
 
-GitHub's npm registry (`npm.pkg.github.com`) would need no secret either, which is why it was the
-first candidate. It is not the transport because the registry stores a package under the account
+The packages are published to npmjs.org. That was the user's decision, 2026-09-28, taken together
+with making the repository public, and it amended [ADR-0001](adr/0001-separate-repository.md): a
+registry is one more way the artefacts are released, not a change in what a host consumes. The npm
+organization name `appricot` was unavailable (checked in npmjs.org's organization-creation flow on
+2026-09-28; its profile pages are bot-gated, so there is no URL to cite), so the user created the
+`app-ricot` organization there and the packages carry its scope. Mentions of `@appricot/*` inside
+accepted ADRs' bodies keep the names as they were written when each ADR was accepted; everywhere
+else the names are `@app-ricot/client` and `@app-ricot/react`.
+
+GitHub's npm registry (`npm.pkg.github.com`) was the first candidate and is deliberately not the
+transport, for a reason public visibility does not soften: it stores a package under the account
 its scope names — its own instructions say the `name` field's scope names "the user or organization
 account to which the package will be scoped", and that names and scopes are lower case
 ([GitHub docs](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry),
-checked 2026-09-27) — and `@appricot` is not an account of this repository's owner. Publishing
-there would mean a scope that matches the owner (a rename, which ADR-0001's own words —
-`@appricot/client`, `@appricot/react` — do not allow without an amendment) or an npm account and a
-token (a new secret this repository does not carry, and will not learn). Whether that registry
-would in fact refuse a mismatched scope is **(unverified)**: it cannot be tested without publishing,
-and publishing is the owner's act.
+checked 2026-09-27). It also asks every installer for a token, even for public packages
+**(unverified)**: that is its behaviour as read at planning time, and it cannot be checked without
+publishing, which is the owner's act.
 
-A public registry on npmjs.com is a separate, untaken decision, exactly as crates.io is for the
-Rust crates ([Cargo.toml](../Cargo.toml), `publish = false`): it needs a token, and it means
-claiming the names. When that decision is taken, the tarball step in the workflow is what it
-replaces, and what a host depends on — the two package names, and the version — is the same either
-way.
+The cost of npmjs.org is the one secret this repository carries: `NPM_TOKEN`, an npm automation
+token owned by the user with publish rights on the `app-ricot` organization and nothing else,
+created and placed by the owner. Before 0.1.0 this section said the repository would not learn
+such a secret; the user's registry decision is what changed that sentence. The tarballs stay
+attached to each release as the fallback that needs no registry and no token.
+
+crates.io stays untaken for the Rust crates, exactly as before
+([Cargo.toml](../Cargo.toml), `publish = false`).
 
 ### Seeing what a host gets
 

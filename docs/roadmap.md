@@ -41,7 +41,7 @@ Exit criteria:
 
 Where it stands (2026-09-21): done. The gates pass on a clean clone, the five crates and the
 client/react packages exist with full contents, and the docs are written. A third npm package,
-`@appricot/demo` (the demo host page), joined later with the client work — the criterion's "two
+`@app-ricot/demo` (the demo host page), joined later with the client work — the criterion's "two
 npm packages" counted `client` and `react`.
 
 ## M1: Wire spec v0 and the X11 capture spike
@@ -57,7 +57,7 @@ Two tasks that run side by side and meet at the end.
   breaks a limit before it allocates.
 - A round-trip test covers every message. A fuzz target covers the decoder and runs in CI for a
   bounded time.
-- The TypeScript codec in `@appricot/client` passes the same test vectors, generated from the
+- The TypeScript codec in `@app-ricot/client` passes the same test vectors, generated from the
   Rust side.
 
 **`l1-spike-x11-capture`**: measure before building. It answers the open questions of
@@ -96,7 +96,7 @@ than met (the keyboard check and S3, below).**
 
 `l1-wire-spec-v0`: `appricot-proto` encodes and decodes all 24 v0 messages, refuses any input
 that breaks a limit before it allocates, generates the test vectors, and the TypeScript mirror in
-`@appricot/client` passes them; both decoders are fuzzed. The spec is revised with what the spike
+`@app-ricot/client` passes them; both decoders are fuzzed. The spec is revised with what the spike
 measured, and the spike moved nothing on the wire ([protocol/v0.md](protocol/v0.md)).
 
 `l1-spike-x11-capture`: the harness is [spike/README.md](spike/README.md), the results
@@ -128,7 +128,7 @@ Exit criteria:
 
 - `appricot-streamer` serves those windows from a container, with token auth, a readiness
   endpoint and ack-based flow control. An idle window sends nothing.
-- `@appricot/client` and `@appricot/react` drive a demo host page: one host window per toplevel,
+- `@app-ricot/client` and `@app-ricot/react` drive a demo host page: one host window per toplevel,
   popups placed and clamped to their parent, titles as text, the cursor, resize, minimise, close
   and focus.
 - Input works on desktop Chrome, Firefox and Safari, with US and Greek layouts, AltGr and dead
@@ -143,8 +143,8 @@ Exit criteria:
 - Decoders in the browser realm have fuzz tests.
 
 Where it stands (2026-09-21; refreshed 2026-09-24): the code side has landed and is gated in CI —
-the streamer (token auth, readiness, ack-based flow control, the resume grace), `@appricot/client`
-and `@appricot/react`, the hostile fixture and the decoder fuzz tests, and a demo host page that
+the streamer (token auth, readiness, ack-based flow control, the resume grace), `@app-ricot/client`
+and `@app-ricot/react`, the hostile fixture and the decoder fuzz tests, and a demo host page that
 draws the streamed windows as its own floating windows under a strict CSP. Three more units
 landed in-repo with their gates on 2026-09-24:
 
@@ -170,7 +170,7 @@ consumer could pull — and ADR-0001's "a host consumes released artefacts, and 
 source" cannot work with that. The workspace and the three packages are `0.1.0` now, and one `v*`
 tag builds and publishes the two artefacts a host consumes: the streamer image
 (`ghcr.io/<owner>/appricot/streamer`, built from `docker/streamer/Dockerfile`) and the two npm
-packages `@appricot/client` and `@appricot/react`, packed at the tag inside the dev image and
+packages `@app-ricot/client` and `@app-ricot/react`, packed at the tag inside the dev image and
 attached to that version's release, with the runner's own token and no secret of this
 repository's. The consumer's screen is the
 [README](../README.md#consuming-appricot-the-released-artefacts); the release path, its version

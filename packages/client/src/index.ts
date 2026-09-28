@@ -1,5 +1,5 @@
 /**
- * @appricot/client: APPricot's embeddable browser client.
+ * @app-ricot/client: APPricot's embeddable browser client.
  *
  * The public surface, for a host that draws its own chrome (ADR-0003): a connection over a
  * transport, a surface registry fed by envelopes, a renderer that acks what it drew, input

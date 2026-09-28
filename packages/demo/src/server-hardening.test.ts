@@ -60,12 +60,12 @@ beforeAll(async () => {
   writeFileSync(
     join(roots.demoDist, 'rewrite.js'),
     [
-      'import { A } from "@appricot/client";',
-      "export * from '@appricot/client';",
-      "import '@appricot/client';",
-      "const lazy = () => import('@appricot/client');",
-      "const name = '@appricot/client';",
-      'export const label = "@appricot/client";',
+      'import { A } from "@app-ricot/client";',
+      "export * from '@app-ricot/client';",
+      "import '@app-ricot/client';",
+      "const lazy = () => import('@app-ricot/client');",
+      "const name = '@app-ricot/client';",
+      'export const label = "@app-ricot/client";',
       'export { lazy, name };',
       '',
     ].join('\n'),
@@ -80,7 +80,7 @@ beforeAll(async () => {
   writeFileSync(join(roots.demoDist, 'c:colon.js'), 'export const COLON = 1;\n');
   writeFileSync(
     join(roots.clientDist, 'index.js'),
-    "export const NAME = '@appricot/client';\n",
+    "export const NAME = '@app-ricot/client';\n",
   );
 
   upstream = createServer((req, res) => {
@@ -456,8 +456,8 @@ describe('the module rewrite and the static map', () => {
     expect(text).toContain("import '/client/index.js';");
     expect(text).toContain("import('/client/index.js')");
     // The same string as data stays data.
-    expect(text).toContain("const name = '@appricot/client';");
-    expect(text).toContain('export const label = "@appricot/client";');
+    expect(text).toContain("const name = '@app-ricot/client';");
+    expect(text).toContain('export const label = "@app-ricot/client";');
   });
 
   it('gives a HEAD on a module its length and no body', async () => {
@@ -470,7 +470,7 @@ describe('the module rewrite and the static map', () => {
 
   it('serves /client/* unchanged', async () => {
     const text = await (await fetch(`http://127.0.0.1:${demo.port}/client/index.js`)).text();
-    expect(text).toBe("export const NAME = '@appricot/client';\n");
+    expect(text).toBe("export const NAME = '@app-ricot/client';\n");
   });
 
   it("does not serve the server's own module", async () => {

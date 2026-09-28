@@ -20,7 +20,7 @@ its **Consequences**, and the **Alternatives considered**.
 
 | ADR | Title | Status |
 |---|---|---|
-| [0001](0001-separate-repository.md) | A separate repository from day one | **Accepted** 2026-09-19 (the user) |
+| [0001](0001-separate-repository.md) | A separate repository from day one | **Accepted** 2026-09-19 (the user); Amendment 1, the npm scope, 2026-09-28 (the user) |
 | [0002](0002-licence.md) | Licence of APPricot, and a permissive-only core graph | **Accepted** 2026-09-20 (the user); Amendment 1, the npm development graph, 2026-09-23 (the user); Amendment 2, the release decision §1 deferred, 2026-09-27 (the user) |
 | [0003](0003-untrusted-server-client.md) | The client treats the server as untrusted | Proposed 2026-09-19 |
 | [0004](0004-layers-window-model-and-first-backend.md) | Three layers, a Wayland-shaped window model, and X11 first | **Accepted** 2026-09-24 (the user), after the M1 spike; proposed 2026-09-19 |

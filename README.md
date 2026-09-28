@@ -45,10 +45,10 @@ whose own windows carry the content. What is built and gated today, on the L1 st
 - **Resume.** A dropped transport is not a dead session. The client reattaches with its token and
   the server re-sends the window set and a full frame per surface, instead of replaying damage the
   client may have missed.
-- **An embeddable browser client.** `@appricot/client` is framework-agnostic TypeScript —
+- **An embeddable browser client.** `@app-ricot/client` is framework-agnostic TypeScript —
   connection, the codec mirror, a window registry with events, tile decode, input and key mapping,
   text paste from the host into the app as the host's policy allows — drawing into canvases the
-  host provides. `@appricot/react` adds a provider, hooks and a window canvas. The client never
+  host provides. `@app-ricot/react` adds a provider, hooks and a window canvas. The client never
   turns a server string into markup: that rule is enforced by lint rules that fail the build and
   proven in CI against a hostile test server.
 - **A demo host page.** Floating windows with drag, resize, minimise, close and focus; popups
@@ -89,20 +89,25 @@ COPY --from=ghcr.io/<owner>/appricot/streamer:0.1.0 \
      /usr/local/bin/appricot-streamer /usr/local/bin/
 ```
 
-**The two npm packages**, `@appricot/client` and `@appricot/react`, at the same version. They are
-built at the tag and attached to that version's release as tarballs, so a host installs a version
-and not a hand-built file:
+**The two npm packages**, `@app-ricot/client` and `@app-ricot/react`, at the same version. They are
+published to npmjs.org at the tag, under the `app-ricot` organization's scope
+([ADR-0001 Amendment 1](docs/adr/0001-separate-repository.md)), so a host installs a version:
 
 ```sh
-pnpm add "https://github.com/<owner>/appricot/releases/download/v0.1.0/appricot-client-0.1.0.tgz"
-pnpm add "https://github.com/<owner>/appricot/releases/download/v0.1.0/appricot-react-0.1.0.tgz"
+pnpm add @app-ricot/client@0.1.0 @app-ricot/react@0.1.0
 ```
 
-`@appricot/react`'s packed manifest names `@appricot/client` as `0.1.0` — pnpm rewrites the
-workspace protocol — so install both at the same version. A release tarball is the transport
-rather than a registry because GitHub's npm registry stores a package under the account its scope
-names, and `@appricot` is not an account; [development.md §13](docs/development.md#13-releases) has
-the whole reasoning, and what a public registry would take.
+The registry resolves the pair — `@app-ricot/react` names `@app-ricot/client` at the same
+version — so one add installs both. The same two tarballs are attached to that version's release
+as a registry-free fallback:
+
+```sh
+pnpm add "https://github.com/<owner>/appricot/releases/download/v0.1.0/app-ricot-client-0.1.0.tgz"
+pnpm add "https://github.com/<owner>/appricot/releases/download/v0.1.0/app-ricot-react-0.1.0.tgz"
+```
+
+A tarball install resolves no registry, so install both tarballs at the same version. Why npmjs.org
+and not GitHub's npm registry: [development.md §13](docs/development.md#13-releases).
 
 ### What the host supplies
 
@@ -177,9 +182,9 @@ instead of rewriting it.
 | [`crates/appricot-x11`](crates/appricot-x11) | The S1 capture backend on x11rb: Composite redirect, Damage, XFixes, XTEST — and the minimal window manager. |
 | [`crates/appricot-encode`](crates/appricot-encode) | Tile encoders: RAW and an in-house QOI, plus tile cutting. Lossless first. |
 | [`crates/appricot-streamer`](crates/appricot-streamer) | The binary that runs inside the app container: the protocol over a loopback WebSocket or a unix socket, per-session token auth, a readiness endpoint. |
-| [`packages/client`](packages/client) | `@appricot/client`: the framework-agnostic TypeScript client — connection, codec mirror, window registry, tile decode, input and key mapping. Draws into canvases the host provides. |
-| [`packages/react`](packages/react) | `@appricot/react`: React bindings — a provider, hooks and a window canvas. The host renders its own chrome. |
-| [`packages/demo`](packages/demo) | `@appricot/demo`: the demo host page and its static server with the WebSocket proxy. Dev-only; never shipped. |
+| [`packages/client`](packages/client) | `@app-ricot/client`: the framework-agnostic TypeScript client — connection, codec mirror, window registry, tile decode, input and key mapping. Draws into canvases the host provides. |
+| [`packages/react`](packages/react) | `@app-ricot/react`: React bindings — a provider, hooks and a window canvas. The host renders its own chrome. |
+| [`packages/demo`](packages/demo) | `@app-ricot/demo`: the demo host page and its static server with the WebSocket proxy. Dev-only; never shipped. |
 
 Dependencies point one way and review enforces it: `proto ← core ← x11`, `encode → core`, and
 `streamer` may depend on all of them. `proto` depends on no sibling; `core` depends on `proto`
@@ -197,9 +202,9 @@ crates/            the Rust workspace
   appricot-encode/   tile encoders: RAW and an in-house QOI, tile cutting
   appricot-streamer/ the binary that runs inside the app container
 packages/          the TypeScript workspace
-  client/            @appricot/client: framework-agnostic browser client
-  react/             @appricot/react: React bindings (provider, hooks, window canvas)
-  demo/              @appricot/demo: the demo host page, dev-only
+  client/            @app-ricot/client: framework-agnostic browser client
+  react/             @app-ricot/react: React bindings (provider, hooks, window canvas)
+  demo/              @app-ricot/demo: the demo host page, dev-only
 docker/dev/        the dev image every gate runs in
 docs/              vision, architecture, roadmap, glossary, protocol, ADRs,
                    threat model, prior art, diagrams

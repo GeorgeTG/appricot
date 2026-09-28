@@ -3,11 +3,11 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 
-import type { AppricotConnection } from '@appricot/client';
+import type { AppricotConnection } from '@app-ricot/client';
 
 /**
  * The one main-wiring test: the real `src/main.ts` booting against the real page DOM and the
- * real `SurfaceRegistry`, with only the canvas-bound seams of `@appricot/client` swapped out
+ * real `SurfaceRegistry`, with only the canvas-bound seams of `@app-ricot/client` swapped out
  * (`SurfaceRenderer.attach` — jsdom has no canvas rasteriser — and `attachInput`), plus
  * `connectAppricot` for a fake connection whose messages the test emits by hand.
  *
@@ -72,10 +72,10 @@ const mocks = vi.hoisted(() => {
   return { renderers, inputs, sent, conn };
 });
 
-vi.mock('@appricot/client', async (importOriginal) => {
+vi.mock('@app-ricot/client', async (importOriginal) => {
   // Everything real except the three canvas/transport seams; setTextOnly, SurfaceRegistry,
   // the geometry and the limits stay the shipped code.
-  const actual = await importOriginal<typeof import('@appricot/client')>();
+  const actual = await importOriginal<typeof import('@app-ricot/client')>();
   return {
     ...actual,
     SurfaceRenderer: {

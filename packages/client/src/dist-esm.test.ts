@@ -14,7 +14,7 @@ const dist = new URL('../dist/', import.meta.url);
 const entry = new URL('index.js', dist);
 
 describe('the built client', () => {
-  it('exists: run `pnpm --filter @appricot/client build` first', () => {
+  it('exists: run `pnpm --filter @app-ricot/client build` first', () => {
     expect(existsSync(entry)).toBe(true);
   });
 

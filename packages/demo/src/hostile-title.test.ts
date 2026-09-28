@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { setTextOnly } from '@appricot/client';
+import { setTextOnly } from '@app-ricot/client';
 import { describe, expect, it } from 'vitest';
 
 /**

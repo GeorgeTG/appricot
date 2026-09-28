@@ -64,9 +64,9 @@ app inside the container owns nothing outside its own windows.
 | `crates/appricot-x11` | Rust library | The S1 backend on x11rb — and the window manager: there is no other WM in the container. Composite manual redirect held from `connect()` for the connection's life, Damage, pixel grab from the named window pixmap (`GetImage`), XTEST input, XFixes cursor and selections, the keymap. Toplevels are placed to overlap as little as the root allows; nothing relies on it ([§4.2](#42-how-x11-maps-into-the-model)). | Trust anything an X client says about stacking, focus or size without clamping it. |
 | `crates/appricot-encode` | Rust library | Tile encoders: RAW and QOI, both written in-house from the published specification — no third-party codec code in the graph ([ADR-0002](adr/0002-licence.md)). Tiles are cut on a 256-pixel grid aligned to the surface origin (`TILE_SIZE` = 256; a tile never crosses a grid line); the streamer keeps a frame to at most 48. QOI falls back to RAW whenever its stream would be longer than the RAW payload, and every tile draws opaque either way. | Pull a crate off the permissive allow list into the graph ([ADR-0002](adr/0002-licence.md)). |
 | `crates/appricot-streamer` | Rust library + binary | The binary that runs inside the app container, in the shape [§1](#1-the-shape-in-one-picture) describes: axum, loopback/unix bind, token auth (byte compare with no early exit), readiness, the resume grace and its keeper, the backend actor on its own OS thread, and the sender-side skip of tiles identical to the last sent ones (§3.1). | Listen on a non-loopback address. Accept a stream without the token. |
-| `packages/client` (`@appricot/client`) | TypeScript, no framework, zero runtime dependencies | Connection and reconnect, the hand-written codec mirror (pinned byte-exact by the Rust-generated test vectors), a window registry with events, tile decode into `ImageData`, input capture and key mapping, clipboard hand-off under host policy. Draws into canvases the host provides. | Touch the DOM outside those canvases. Turn a server string into markup, script or a URL ([ADR-0003](adr/0003-untrusted-server-client.md)). |
-| `packages/react` (`@appricot/react`) | TypeScript, React | Provider, hooks over the registry, a window-canvas component. The host renders its own chrome around it. | Render chrome. |
-| `packages/demo` (`@appricot/demo`) | TypeScript, React | The demo host page and its static server: serves the page under a strict CSP and reverse-proxies `/session` and `/readyz` to the streamer's loopback bind, so the streamer is never published. Dev-only; never in a shipped dependency graph. | Shipping in anyone's dependency graph. |
+| `packages/client` (`@app-ricot/client`) | TypeScript, no framework, zero runtime dependencies | Connection and reconnect, the hand-written codec mirror (pinned byte-exact by the Rust-generated test vectors), a window registry with events, tile decode into `ImageData`, input capture and key mapping, clipboard hand-off under host policy. Draws into canvases the host provides. | Touch the DOM outside those canvases. Turn a server string into markup, script or a URL ([ADR-0003](adr/0003-untrusted-server-client.md)). |
+| `packages/react` (`@app-ricot/react`) | TypeScript, React | Provider, hooks over the registry, a window-canvas component. The host renders its own chrome around it. | Render chrome. |
+| `packages/demo` (`@app-ricot/demo`) | TypeScript, React | The demo host page and its static server: serves the page under a strict CSP and reverse-proxies `/session` and `/readyz` to the streamer's loopback bind, so the streamer is never published. Dev-only; never in a shipped dependency graph. | Shipping in anyone's dependency graph. |
 
 Crate dependencies point one way: `proto` <- `core` <- `x11`, `encode` -> `core`, and
 `appricot-streamer` may depend on all of them. Nothing points back: neither `appricot-proto`
@@ -340,7 +340,7 @@ is drawn inside it, and only its "new window" button maps another X window, from
                [B3] public network, TLS, WebSocket, Origin
   +------------------------------|---------------------------------------------+
   |  browser, host page (origin H)                                             |
-  |    @appricot/client  <- runs in H's realm, parses untrusted bytes          |
+  |    @app-ricot/client  <- runs in H's realm, parses untrusted bytes          |
   |      [B4] bytes -> bounded decoder -> pixels in host-given canvases only   |
   |    host chrome, host state, host credentials, the user's clipboard         |
   +----------------------------------------------------------------------------+
@@ -353,7 +353,7 @@ is drawn inside it, and only its "new window" button maps another X window, from
 | B1: node proxy to streamer | frames, input | per-session stream token in the first message; loopback or unix-socket bind; size caps | streamer checks the token; L2 mints it and never gives it to the browser |
 | B2: edge to node | WebSocket upgrade, frames | node identity and ticket audience | L3 edge and L2 node |
 | B3: browser to edge | WebSocket upgrade, frames | TLS; `Origin` allow-list; ticket in the first message, not in the URL | edge and node proxy |
-| B4: bytes to host realm | frame bytes, strings | bounded decoding; text-only strings; pixels only into host canvases; clamped popups; host-owned focus and stacking | `@appricot/client` ([ADR-0003](adr/0003-untrusted-server-client.md)) |
+| B4: bytes to host realm | frame bytes, strings | bounded decoding; text-only strings; pixels only into host canvases; clamped popups; host-owned focus and stacking | `@app-ricot/client` ([ADR-0003](adr/0003-untrusted-server-client.md)) |
 | B5: host backend to node or broker | session requests, tickets | server-to-server credential; the ticket binds (tenant, user, session, node) | L2 ticket API, L3 broker |
 
 The streamer runs inside the app's sandbox. A compromised app can therefore attack the streamer,

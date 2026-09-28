@@ -10,7 +10,7 @@ import { clientMock, mockClientModule } from './client-mock.js';
 import type { FakeConnection, FakeConnectionStatus } from './client-mock.js';
 import type { ConnectionStatus } from './client.js';
 
-type Client = typeof import('@appricot/client');
+type Client = typeof import('@app-ricot/client');
 
 /** The status and ended events a connection emits, in order. */
 function watch(events: {
@@ -50,7 +50,7 @@ describe('the fake connection', () => {
   });
 
   it('closes like the real connection: the closed status, then ended, and only once', async () => {
-    const { AppricotConnection } = await vi.importActual<Client>('@appricot/client');
+    const { AppricotConnection } = await vi.importActual<Client>('@app-ricot/client');
     const real = new AppricotConnection(quietTransport, { token: new Uint8Array([1]) });
     real.connect();
     const realSeen = watch(real.events as unknown as FakeConnection['events']);

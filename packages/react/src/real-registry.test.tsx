@@ -16,7 +16,7 @@ import { useSurfaceMeta, useWindows } from './hooks.js';
 import { AppricotProvider } from './provider.js';
 import { AppricotSurface } from './surface.js';
 
-vi.mock('@appricot/client', async (importOriginal) => {
+vi.mock('@app-ricot/client', async (importOriginal) => {
   const { mockClientModule } = await import('./client-mock.js');
   const actual = await importOriginal<Record<string, unknown>>();
   // Everything fake except the registry, which stays the shipped code.

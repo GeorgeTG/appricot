@@ -9,7 +9,7 @@
  *
  * - a package in the PRODUCTION graph of the npm workspace (`pnpm licenses list --prod`) has a
  *   licence expression that Tier A does not satisfy. That graph is what a host inherits when it
- *   bundles @appricot/client or @appricot/react.
+ *   bundles @app-ricot/client or @app-ricot/react.
  * - a package only in the DEVELOPMENT graph (the devDependencies) has a licence expression that
  *   the development list does not satisfy: Tier A plus DEV_EXTRA (ADR-0002, Amendment 1).
  * - a workspace package does not declare exactly "MIT OR Apache-2.0" (ADR-0002 §1). This is the

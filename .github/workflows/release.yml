@@ -3,25 +3,28 @@
 #   git tag v0.1.0 && git push origin v0.1.0        # the owner's act — never an agent's
 #
 # ADR-0001 makes this the whole precondition of M3: a host application consumes APPricot's
-# **released artefacts** — the streamer image, and the npm packages `@appricot/client` and
-# `@appricot/react` — and does not vendor the source. Nothing was published before 0.1.0; this
+# **released artefacts** — the streamer image, and the npm packages `@app-ricot/client` and
+# `@app-ricot/react` — and does not vendor the source. Nothing was published before 0.1.0; this
 # workflow is where a version starts meaning something.
 #
-# Two artefacts, one token. Every step authenticates with the runner's own `GITHUB_TOKEN`
-# (`packages: write` for the image, `contents: write` for the release). The repository carries no
-# publishing secret of its own, so a release has no credential to leak.
+# Two artefacts, two credentials. Every GitHub-facing step authenticates with the runner's own
+# `GITHUB_TOKEN` (`packages: write` for the image, `contents: write` for the release). The npm
+# publish is the one step that needs more: the repository secret `NPM_TOKEN`, an npm automation
+# token owned by the user with publish rights on the `app-ricot` organization and nothing else.
+# The registry decision is the user's (2026-09-28, with making the repository public) and is
+# recorded as ADR-0001 Amendment 1.
 #
 # - **The streamer image** → GHCR, `ghcr.io/<owner>/appricot/streamer:<version>`, built from
 #   docker/streamer/Dockerfile. amd64 only (that file says why). It is verified before it is
 #   pushed: the tag must equal the version in the manifests, and the built binary's own version
 #   line must equal the tag.
 # - **The two packages** → built inside the dev image by `just pack` (the same image and the same
-#   recipe a developer runs) and attached to the GitHub Release for the tag, so a host installs
-#   them at a version instead of a hand-built file. GitHub's npm registry (`npm.pkg.github.com`) is
-#   deliberately not the transport: it stores a package under the account its scope names, and
-#   `@appricot` is not an account. docs/development.md §13 has the whole reasoning, and what a
-#   public registry would take. Either way the thing a host depends on is unchanged: the package
-#   names, and the version the manifests carry.
+#   recipe a developer runs), published to npmjs.org as `@app-ricot/client` and
+#   `@app-ricot/react` with `--access public`, and attached to the GitHub Release for the tag as
+#   the registry-free fallback. GitHub's npm registry (`npm.pkg.github.com`) is deliberately not
+#   the transport: it stores a package under the account its scope names, and it asks every
+#   installer for a token even for public packages **(unverified)** — docs/development.md §13 has
+#   the whole reasoning.
 #
 # What this workflow does NOT do:
 #
@@ -29,7 +32,8 @@
 #   green, and the assertions below catch the one mistake a tag can carry that CI cannot: a tag
 #   that disagrees with the tree. Add `docker compose run --rm dev just check` to the release job
 #   if a release should prove the whole gate itself.
-# - It does not create a repository, a secret, a schedule or a cron. Nothing here runs on a timer.
+# - It does not create a repository, a secret, a schedule or a cron. `NPM_TOKEN` is the owner's to
+#   create and place; nothing here runs on a timer.
 
 name: release
 
@@ -195,6 +199,29 @@ jobs:
         # which the bind mount puts back on the runner.
         run: docker compose run --rm dev just pack
 
+      - name: Publish the two packages to npmjs.org
+        # The repository's one publishing secret, and the one step that uses it. `--access public`
+        # is explicit because a scoped package may otherwise default to restricted. A re-run of a
+        # failed job publishes a version that is already on the registry; that one outcome is
+        # tolerated exactly like the release fallback below — `npm view` proves the version is
+        # there, and any other failure fails the job.
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '//registry.npmjs.org/:_authToken=%s\n' "${NPM_TOKEN}" > "${HOME}/.npmrc"
+          for package in client react; do
+            tarball="artifacts/release/app-ricot-${package}-${VERSION}.tgz"
+            test -f "${tarball}" || { echo "missing ${tarball}" >&2; exit 1; }
+            if ! npm publish --access public "${tarball}"; then
+              npm view "@app-ricot/${package}@${VERSION}" > /dev/null 2>&1 || {
+                echo "publishing @app-ricot/${package}@${VERSION} failed" >&2
+                exit 1
+              }
+              echo "@app-ricot/${package}@${VERSION} is already on the registry; keeping it"
+            fi
+          done
+
       - name: Write the release notes
         env:
           IMAGE_REFERENCE: ${{ needs.image.outputs.reference }}
@@ -228,6 +255,18 @@ jobs:
             echo
             echo "## The npm packages"
             echo
+            echo "On npmjs.org, under the \`app-ricot\` organization's scope:"
+            echo
+            echo '```sh'
+            echo "pnpm add @app-ricot/client@${VERSION} @app-ricot/react@${VERSION}"
+            echo '```'
+            echo
+            echo "The registry resolves the pair — \`@app-ricot/react\` names \`@app-ricot/client\` at"
+            echo "the same version — so one add installs both."
+            echo
+            echo "The same two tarballs are attached below as the registry-free fallback, with their"
+            echo "SHA-256:"
+            echo
             echo "| Tarball (attached below) | SHA-256 |"
             echo "|---|---|"
             for tarball in artifacts/release/*.tgz; do
@@ -241,14 +280,9 @@ jobs:
             done
             echo '```'
             echo
-            echo "The repository is private, so that URL needs an authenticated request: \`gh release"
-            echo "download\` is the shortest way, and a token in the installing project's own package-"
-            echo "manager configuration is the other."
-            echo
-            echo "They are attached here rather than published to a registry because GitHub's npm"
-            echo "registry stores a package under the account its scope names, and \`@appricot\` is not"
-            echo "one (docs/development.md §13). The package names and the version are the manifests'"
-            echo "own either way: \`@appricot/client\` and \`@appricot/react\`, both \`${VERSION}\`."
+            echo "A tarball install resolves no registry, so install both tarballs at the same"
+            echo "version. Why npmjs.org and not GitHub's npm registry: docs/development.md §13"
+            echo "and ADR-0001 Amendment 1."
             echo
             echo "## What a host must supply"
             echo

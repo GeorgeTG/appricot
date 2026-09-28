@@ -215,13 +215,13 @@ test('every workspace package must declare exactly MIT OR Apache-2.0', () => {
   assert.equal(OWN_LICENCE, 'MIT OR Apache-2.0');
   assert.deepEqual(
     ownViolations([
-      { name: '@appricot/client', license: 'MIT OR Apache-2.0' },
-      { name: '@appricot/new', license: 'MIT' },
-      { name: '@appricot/bare' },
+      { name: '@app-ricot/client', license: 'MIT OR Apache-2.0' },
+      { name: '@app-ricot/new', license: 'MIT' },
+      { name: '@app-ricot/bare' },
     ]),
     [
-      { name: '@appricot/new', license: 'MIT' },
-      { name: '@appricot/bare', license: '(none)' },
+      { name: '@app-ricot/new', license: 'MIT' },
+      { name: '@app-ricot/bare', license: '(none)' },
     ],
   );
 });

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 
-import type { AppricotConnection } from '@appricot/client';
+import type { AppricotConnection } from '@app-ricot/client';
 
 /**
  * Main-wiring tests for the connection lifecycle: the real `src/main.ts` on the real page DOM
@@ -73,8 +73,8 @@ const mocks = vi.hoisted(() => {
   return { conns, renderers, makeConn };
 });
 
-vi.mock('@appricot/client', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@appricot/client')>();
+vi.mock('@app-ricot/client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@app-ricot/client')>();
   return {
     ...actual,
     SurfaceRenderer: {

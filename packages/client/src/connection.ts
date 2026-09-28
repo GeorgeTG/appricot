@@ -312,7 +312,7 @@ export class AppricotConnection {
   #handleOpen(transport: Transport): void {
     const hello: Hello = {
       protocolVersion: PROTOCOL_VERSION,
-      clientName: '@appricot/client',
+      clientName: '@app-ricot/client',
       streamToken: this.#token,
       codecs: [CODEC.QOI, CODEC.RAW], // best first; RAW is the must-decode fallback
     };

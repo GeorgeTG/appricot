@@ -30,6 +30,6 @@ pub use bounded::{BoundError, BoundedString};
 
 /// The wire protocol version this crate speaks.
 ///
-/// `@appricot/client` mirrors it in `packages/client/src/protocol.ts`, and a test there reads
+/// `@app-ricot/client` mirrors it in `packages/client/src/protocol.ts`, and a test there reads
 /// the line below, so change both together.
 pub const PROTOCOL_VERSION: u16 = 0;

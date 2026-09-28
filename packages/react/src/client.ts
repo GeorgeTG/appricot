@@ -1,7 +1,7 @@
 /**
- * The single seam between these React bindings and @appricot/client.
+ * The single seam between these React bindings and @app-ricot/client.
  *
- * No other file in this package imports '@appricot/client'; when the client SDK's shapes
+ * No other file in this package imports '@app-ricot/client'; when the client SDK's shapes
  * move, this file is the only place to adapt. What crosses the seam:
  *
  *   connectAppricot(url, { token: Uint8Array, reconnect? }) -> AppricotConnection
@@ -26,18 +26,18 @@ import {
   setTextOnly,
   SurfaceRegistry,
   SurfaceRenderer,
-} from '@appricot/client';
-import type { AppricotConnection, SurfaceRecord } from '@appricot/client';
+} from '@app-ricot/client';
+import type { AppricotConnection, SurfaceRecord } from '@app-ricot/client';
 
 export { attachInput, connectAppricot, setTextOnly, SurfaceRegistry, SurfaceRenderer };
-export { MAX_SURFACE_HEIGHT, MAX_SURFACE_WIDTH } from '@appricot/client';
+export { MAX_SURFACE_HEIGHT, MAX_SURFACE_WIDTH } from '@app-ricot/client';
 export type {
   AppricotConnection,
   ConnectionStatus,
   Envelope,
   RegistryEvents,
   SurfaceRecord,
-} from '@appricot/client';
+} from '@app-ricot/client';
 
 /** ROLE_TOPLEVEL of the wire Role enum (wire.proto); popups are ROLE_POPUP, 1. */
 export const ROLE_TOPLEVEL: SurfaceRecord['role'] = 0;

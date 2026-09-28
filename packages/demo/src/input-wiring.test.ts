@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 
-import type { AppricotConnection, CursorImage, InputDeps } from '@appricot/client';
+import type { AppricotConnection, CursorImage, InputDeps } from '@app-ricot/client';
 
 /**
  * Main-wiring tests for what the demo hands the SDK's input and cursor helpers: the real
@@ -51,8 +51,8 @@ const mocks = vi.hoisted(() => {
   return { conn, inputs, draws };
 });
 
-vi.mock('@appricot/client', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@appricot/client')>();
+vi.mock('@app-ricot/client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@app-ricot/client')>();
   return {
     ...actual,
     SurfaceRenderer: { attach: () => ({ detach: (): void => {} }) },

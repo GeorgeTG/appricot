@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 
-import type { AppricotConnection } from '@appricot/client';
+import type { AppricotConnection } from '@app-ricot/client';
 
 /**
  * Main-wiring tests for the app-to-host clipboard direction (ADR-0003 §7): the real
  * `src/main.ts` on a real page DOM with the real `SurfaceRegistry`, only the canvas seams
- * of `@appricot/client` swapped out (as in minimize-wiring.test.ts). The browser's
+ * of `@app-ricot/client` swapped out (as in minimize-wiring.test.ts). The browser's
  * `navigator.clipboard` is jsdom's — absent — so the test installs a recording stub before
  * the module boots.
  *
@@ -78,8 +78,8 @@ const mocks = vi.hoisted(() => {
   return { conn };
 });
 
-vi.mock('@appricot/client', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@appricot/client')>();
+vi.mock('@app-ricot/client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@app-ricot/client')>();
   return {
     ...actual,
     SurfaceRenderer: {

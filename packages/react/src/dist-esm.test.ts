@@ -7,14 +7,14 @@ import { describe, expect, it } from 'vitest';
 /**
  * The built bindings load under Node's own ESM loader, with no bundler in between: every
  * relative specifier in dist names its `.js` file (tsc under `NodeNext` enforces that in the
- * sources), and `react` and `@appricot/client` resolve from the workspace install. It reads
+ * sources), and `react` and `@app-ricot/client` resolve from the workspace install. It reads
  * `dist/`, so it runs after `pnpm build`, as `just web-check` does.
  */
 const dist = new URL('../dist/', import.meta.url);
 const entry = new URL('index.js', dist);
 
 describe('the built bindings', () => {
-  it('exist: run `pnpm --filter @appricot/react build` first', () => {
+  it('exist: run `pnpm --filter @app-ricot/react build` first', () => {
     expect(existsSync(entry)).toBe(true);
   });
 

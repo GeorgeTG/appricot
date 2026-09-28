@@ -1,5 +1,5 @@
 {
-  "name": "@appricot/demo",
+  "name": "@app-ricot/demo",
   "version": "0.1.0",
   "private": true,
   "license": "MIT OR Apache-2.0",
@@ -14,8 +14,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@appricot/client": "workspace:*",
-    "@appricot/react": "workspace:*",
+    "@app-ricot/client": "workspace:*",
+    "@app-ricot/react": "workspace:*",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },

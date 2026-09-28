@@ -1,18 +1,18 @@
 /**
- * Test infrastructure: a controllable fake of @appricot/client's public surface, shared by
+ * Test infrastructure: a controllable fake of @app-ricot/client's public surface, shared by
  * every test file in this package. Not shipped (excluded from tsconfig.build.json).
  *
  * Usage at the top of a test file (the factory must reach this module with a dynamic
  * import, because vi.mock is hoisted above static imports):
  *
- *   vi.mock('@appricot/client', async (importOriginal) => ({
+ *   vi.mock('@app-ricot/client', async (importOriginal) => ({
  *     ...(await importOriginal<Record<string, unknown>>()),
  *     ...mockClientModule(),
  *   }));
  *
  * and then `clientMock()` in the test body. The importOriginal spread keeps the REAL
  * setTextOnly, so the hostile-title test exercises the real text-only path. This module
- * must not import anything that (transitively) imports '@appricot/client' — the vi.mock
+ * must not import anything that (transitively) imports '@app-ricot/client' — the vi.mock
  * factory runs while that module is being resolved.
  *
  * Every connectAppricot() call hands out a FRESH connection, with its own emitter and its
@@ -22,7 +22,7 @@
  */
 import { vi, type Mock } from 'vitest';
 
-/** The Emitter's shape, hand-rolled here so this module stays free of '@appricot/client'. */
+/** The Emitter's shape, hand-rolled here so this module stays free of '@app-ricot/client'. */
 class FakeEmitter {
   readonly #listeners = new Map<string, Set<(value: unknown) => void>>();
 
@@ -126,7 +126,7 @@ export function fakeSurfaceRecord(
 }
 
 export interface ClientMock {
-  /** The '@appricot/client' overrides a vi.mock factory spreads over the real module. */
+  /** The '@app-ricot/client' overrides a vi.mock factory spreads over the real module. */
   readonly overrides: Record<string, unknown>;
   /** connectAppricot; one call per provider connection. */
   readonly connect: Mock;
@@ -340,7 +340,7 @@ function createMock(): ClientMock {
 
 let current: ClientMock | null = null;
 
-/** vi.mock factory entry: returns the '@appricot/client' overrides. */
+/** vi.mock factory entry: returns the '@app-ricot/client' overrides. */
 export function mockClientModule(): Record<string, unknown> {
   current = createMock();
   return current.overrides;

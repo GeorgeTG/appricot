@@ -7,7 +7,7 @@ import { clientMock, fakeSurfaceRecord } from './client-mock.js';
 import { AppricotProvider } from './provider.js';
 import { AppricotSurface } from './surface.js';
 
-vi.mock('@appricot/client', async (importOriginal) => {
+vi.mock('@app-ricot/client', async (importOriginal) => {
   const { mockClientModule } = await import('./client-mock.js');
   return {
     ...(await importOriginal<Record<string, unknown>>()),

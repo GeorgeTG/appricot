@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { Positioner } from '@appricot/client';
+import type { Positioner } from '@app-ricot/client';
 
 import { POPUP_MARGIN_PX, popupLocalRect } from './popups';
 

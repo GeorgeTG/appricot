@@ -10,8 +10,8 @@
  *   /            -> packages/demo/index.html
  *   /styles.css  -> packages/demo/styles.css
  *   /dist/*      -> packages/demo/dist       (the page's own modules)
- *   /client/*    -> packages/client/dist     (@appricot/client, ESM)
- *   /react/*     -> packages/react/dist      (@appricot/react, ESM)
+ *   /client/*    -> packages/client/dist     (@app-ricot/client, ESM)
+ *   /react/*     -> packages/react/dist      (@app-ricot/react, ESM)
  *   /vendor/*    -> node_modules files an import map would have named (see VENDOR_FILES —
  *                   empty, measured; the map itself is gone, see sendDistModule)
  *   /session     -> WebSocket upgrade proxied to 127.0.0.1:8391, from the page's own
@@ -89,7 +89,7 @@ const LOOPBACK_HOST = /^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?$/i;
  * `script-src 'self'` without a require() shim nobody should hand-write. The import map
  * itself was later removed outright (see `sendDistModule`): the page's modules get their
  * bare specifier rewritten at serve time instead, so nothing inline remains. The demo
- * runs client-only (@appricot/client under /client/); @appricot/react stays a declared
+ * runs client-only (@app-ricot/client under /client/); @app-ricot/react stays a declared
  * dependency and is served under /react/ for a later bundler-backed showcase, but the page
  * never imports it. If an ESM-capable runtime lands, list the exact files here.
  */
@@ -323,16 +323,16 @@ function sendFile(res: ServerResponse, resolved: ResolvedStatic, method: string)
 /** The one bare specifier the page's own modules import the client under, single- or
  *  double-quoted. Rewritten to the URL this server serves it under; a rewrite, not an
  *  import map, because Chromium applies script-src to inline import maps (measured
- *  2026-09-21: under a plain 'self' policy the map is blocked, `@appricot/client` then
+ *  2026-09-21: under a plain 'self' policy the map is blocked, `@app-ricot/client` then
  *  fails to resolve and no page script runs at all, and neither the block's sha256 nor a
  *  per-response nonce made this browser accept it). The rewrite keeps the source — and
- *  its tests, which mock '@appricot/client' by name — on the workspace name.
+ *  its tests, which mock '@app-ricot/client' by name — on the workspace name.
  *
  *  Anchored to module syntax: the quoted name is rewritten only right after `from` (an
  *  import or an `export … from`) or after `import` (a side-effect import, or a dynamic
  *  `import(…)`). The same string as data elsewhere in a module stays what it is. A template
  *  literal is never rewritten; the lint rules allow literal specifiers only. */
-const CLIENT_SPECIFIER = /(\bfrom\s*|\bimport\s*\(?\s*)(['"])@appricot\/client\2/g;
+const CLIENT_SPECIFIER = /(\bfrom\s*|\bimport\s*\(?\s*)(['"])@app-ricot\/client\2/g;
 
 /** Sends one of the page's own modules (/dist/*.js) with its bare client specifier
  *  rewritten to the served URL. Plain text in, plain text out; HEAD gets no body. A file

@@ -144,7 +144,7 @@ describe('AppricotConnection handshake', () => {
       throw new Error('first message must be a hello');
     }
     expect(helloEnvelope.hello.protocolVersion).toBe(PROTOCOL_VERSION);
-    expect(helloEnvelope.hello.clientName).toBe('@appricot/client');
+    expect(helloEnvelope.hello.clientName).toBe('@app-ricot/client');
     expect(helloEnvelope.hello.streamToken).toEqual(TOKEN);
     expect(helloEnvelope.hello.codecs).toEqual([2, 1]); // QOI best-first, RAW fallback
     expect(helloEnvelope.hello.resumeSerial).toBeUndefined();

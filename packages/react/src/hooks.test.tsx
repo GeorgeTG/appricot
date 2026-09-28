@@ -8,7 +8,7 @@ import type { SessionEvent } from './hooks.js';
 import { useConnectionStatus, useSessionEvents, useSurfaceMeta, useWindows } from './hooks.js';
 import { AppricotProvider } from './provider.js';
 
-vi.mock('@appricot/client', async (importOriginal) => {
+vi.mock('@app-ricot/client', async (importOriginal) => {
   const { mockClientModule } = await import('./client-mock.js');
   return {
     ...(await importOriginal<Record<string, unknown>>()),

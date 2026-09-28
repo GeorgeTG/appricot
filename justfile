@@ -161,7 +161,7 @@ web-test:
 web-build:
     pnpm build
 
-# web-build comes before typecheck and test: packages/react resolves @appricot/client through
+# web-build comes before typecheck and test: packages/react resolves @app-ricot/client through
 # its exports map, which points at dist/, so the client must be built before any other package
 # can typecheck or test against it. web-licences needs only node_modules.
 # Every TypeScript gate.
@@ -169,11 +169,11 @@ web-check: web-install web-licences web-build web-typecheck web-lint web-test
 
 # --- the released packages (manual) ----------------------------------------------------------
 # A host consumes released artefacts and never this source (ADR-0001). This recipe is the package
-# half of that — the tarballs `@appricot/client` and `@appricot/react` — and it is what a `v*` tag
+# half of that — the tarballs `@app-ricot/client` and `@app-ricot/react` — and it is what a `v*` tag
 # runs (.github/workflows/release.yml). It publishes nothing: it writes files, so it is safe to run
 # by hand, and running it is how you see exactly what a host installs.
 #
-# `pnpm pack` rewrites `workspace:*` to the real version, so the packed manifest of @appricot/react
+# `pnpm pack` rewrites `workspace:*` to the real version, so the packed manifest of @app-ricot/react
 # names its client dependency as 0.1.0. The workflow asserts the version and this recipe asserts
 # there are exactly two tarballs; read the listing this prints when a package's `files` or
 # `exports` entry changes, because that is what a host receives.
@@ -184,8 +184,8 @@ pack: web-install web-build
     out=artifacts/release
     rm -rf "${out}"
     mkdir -p "${out}"
-    pnpm --filter @appricot/client pack --pack-destination "${out}"
-    pnpm --filter @appricot/react pack --pack-destination "${out}"
+    pnpm --filter @app-ricot/client pack --pack-destination "${out}"
+    pnpm --filter @app-ricot/react pack --pack-destination "${out}"
     count="$(ls -1 "${out}"/*.tgz | wc -l | tr -d ' ')"
     [[ "${count}" == 2 ]] || { echo "pack: ${count} tarball(s), expected 2" >&2; exit 1; }
     ls -l "${out}"

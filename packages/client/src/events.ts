@@ -48,7 +48,7 @@ export class Emitter<Events extends object> {
       try {
         listener(value as never);
       } catch (error) {
-        console.error(`@appricot/client: a '${String(event)}' listener threw`, error);
+        console.error(`@app-ricot/client: a '${String(event)}' listener threw`, error);
       }
     }
   }

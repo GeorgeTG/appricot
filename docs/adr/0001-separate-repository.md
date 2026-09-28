@@ -85,3 +85,16 @@ here. They can be amended without re-opening the decision.
   ([ADR-0003](0003-untrusted-server-client.md)). A server-side adapter to an unmodified xpra stays
   open as shape S3 ([ADR-0004](0004-layers-window-model-and-first-backend.md)), and it would still
   live in this repository.
+
+## Amendment 1 (2026-09-28, by the user): the packages' npm scope
+
+The user made the repository public and chose npmjs.org as the registry of the two npm packages.
+The npm organization name `appricot` was unavailable (checked in npmjs.org's organization-creation
+flow on 2026-09-28; npmjs.org's profile pages are bot-gated, so there is no URL to cite), so the
+user created the `app-ricot` organization there, and the packages carry its scope:
+`@app-ricot/client` and `@app-ricot/react`. Every later mention of `@appricot/client` or
+`@appricot/react` in this repository names these same packages; the mentions inside accepted ADRs'
+bodies — including the Decision above — keep the names as they were written when each ADR was
+accepted. The decision this ADR records is unchanged: a host consumes APPricot's released
+artefacts and does not vendor its source. A registry is one more way those artefacts are released,
+not a change in what a host consumes.

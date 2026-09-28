@@ -41,10 +41,10 @@ importers:
 
   packages/demo:
     dependencies:
-      '@appricot/client':
+      '@app-ricot/client':
         specifier: workspace:*
         version: link:../client
-      '@appricot/react':
+      '@app-ricot/react':
         specifier: workspace:*
         version: link:../react
       react:
@@ -78,7 +78,7 @@ importers:
 
   packages/react:
     dependencies:
-      '@appricot/client':
+      '@app-ricot/client':
         specifier: workspace:*
         version: link:../client
     devDependencies:

@@ -170,9 +170,9 @@ plain Xvfb; that is a measurement, not a preference.
 | `crates/appricot-x11` | The S1 backend on x11rb: Composite redirect, Damage, pixmap grab, XTEST, XFixes. It is also the window manager — there is no other WM. | Trusting an X client's stacking, focus or size without clamping it. |
 | `crates/appricot-encode` | Tile encoders: RAW and in-house QOI, tile cutting. | Pulling a non-Tier-A crate into the graph. |
 | `crates/appricot-streamer` | The binary inside the app container: the protocol over a WebSocket on loopback or a unix socket, per-session token auth, a readiness endpoint. | Listening on a non-loopback address, or accepting a stream without the token. |
-| `packages/client` (`@appricot/client`) | Framework-agnostic TS: connection, codec mirror, window registry with events, tile decode, input and key mapping. Draws into canvases the host provides. | Touching the DOM outside those canvases. Turning a server string into markup. |
-| `packages/react` (`@appricot/react`) | Provider, hooks, a window-canvas component. | Rendering chrome — the host draws that. |
-| `packages/demo` (`@appricot/demo`) | The demo host page and its static server with the WebSocket proxy. Dev-only. | Shipping in anyone's dependency graph. |
+| `packages/client` (`@app-ricot/client`) | Framework-agnostic TS: connection, codec mirror, window registry with events, tile decode, input and key mapping. Draws into canvases the host provides. | Touching the DOM outside those canvases. Turning a server string into markup. |
+| `packages/react` (`@app-ricot/react`) | Provider, hooks, a window-canvas component. | Rendering chrome — the host draws that. |
+| `packages/demo` (`@app-ricot/demo`) | The demo host page and its static server with the WebSocket proxy. Dev-only. | Shipping in anyone's dependency graph. |
 | `crates/appricot-spike` | The M1 spike's measuring tools: window observer, wire recorder, memory sampler, codec bench, a stand-in X app. Dev-only. | Being depended on by any other crate, or shipping. |
 | `docker/spike`, `scripts/spike` | The spike image, its knob files, the run script and the input scripts. | The pilot application itself, its name, or a script naming its widgets' coordinates (those stay under `artifacts/`). |
 

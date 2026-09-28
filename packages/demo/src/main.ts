@@ -39,7 +39,7 @@ import {
   cursorOrigin,
   drawCursor,
   setTextOnly,
-} from '@appricot/client';
+} from '@app-ricot/client';
 import type {
   AppricotConnection,
   AttachedSurface,
@@ -47,7 +47,7 @@ import type {
   CursorImage,
   DetachInput,
   SurfaceRecord,
-} from '@appricot/client';
+} from '@app-ricot/client';
 import { POPUP_MARGIN_PX, popupLocalRect } from './wm/popups';
 import { applyDrag, applyResize, grantResize } from './wm/geometry';
 import type { Point, Size } from './wm/geometry';

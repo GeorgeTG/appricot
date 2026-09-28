@@ -1,0 +1,98 @@
+2026-09-28T00:25:36.401Z BROWSER firefox 155.0
+[RUN] CSP :: GET http://127.0.0.1:8390/; read the response headers
+    evidence: content-security-policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'
+    detail: HTTP 200
+[RUN] page :: the demo page rendered its toolbar
+    evidence: HTTP 200, #connect present
+2026-09-28T00:25:37.395Z screenshot /pass/out/firefox-01-loaded.png
+[RUN] CSP refuses inline script and style :: injected a <script> and a <style> the way a markup injection would
+    evidence: script.textContent threw "TypeError: HTMLScriptElement.textContent setter: Sink type mismatch violation blocked by CSP"; inline script ran = false; injected <style> applied = false (#status colour = rgb(169, 186, 195))
+    detail: the CSP violations are in the console log
+[RUN] token auth: a wrong token is refused :: typed a wrong token and clicked Connect
+    evidence: #status = "closed: bye", #session-id = ""
+2026-09-28T00:25:39.477Z screenshot /pass/out/firefox-02-wrong-token.png
+[RUN] token auth: the token from the recipe opens a session :: typed the token the recipe printed and clicked Connect
+    evidence: #status = "open", #session-id = "session session-1", #windows-count = "2 windows"
+    detail: [{"id":"1","title":"XLogo","canvas":{"width":100,"height":100,"cssWidth":100,"cssHeight":100}},{"id":"2","title":"XInputProbe","canvas":{"width":178,"height":178,"cssWidth":178,"cssHeight":178}}]
+2026-09-28T00:25:42.821Z screenshot /pass/out/firefox-03-open.png
+[RUN] one host window per streamed toplevel :: counted the host windows against the X toplevels the observer saw
+    evidence: 2 host window(s): XLogo (100x100), XInputProbe (178x178)
+    detail: the X side of this count is in the X observer log
+[RUN] titles as text (no markup) :: read each window title element and its child elements
+    evidence: [{"title":"XLogo","childElements":0,"app":"XLogo"},{"title":"XInputProbe","childElements":0,"app":""}]
+    detail: a marked-up title would have child elements; these are text-only
+[RUN] an idle window sends nothing :: held the session open for 5 s with no pointer or key input
+    evidence: received 0 message(s) in 5 s; sent 0
+[RUN] ack-based flow control :: counted the acks the client sent for the frames it drew
+    evidence: client sent: ["hello","hello","focus_notify","focus_notify","frame_ack","frame_ack"]
+    detail: streamer sent: ["bye","hello_reply","surface_new","surface_new","cursor_gone","frame","frame"]
+[RUN] focus follows a click :: clicked the XLogo title bar
+    evidence: class = "window focused"; document.activeElement = "surface"
+    detail: the X-side input focus is in the observer log
+2026-09-28T00:25:49.510Z screenshot /pass/out/firefox-04-pointer.png
+[RUN] drag moves the window :: dragged the XLogo title bar by +140 x, +110 y
+    evidence: host box {"x":24,"y":85} -> {"x":164,"y":195}
+    detail: the X-side move is in the observer log at the same timestamp
+2026-09-28T00:25:50.828Z screenshot /pass/out/firefox-05-dragged.png
+[RUN] resize :: dragged the resize grip by +90 x, +70 y and released
+    evidence: XLogo canvas {"width":100,"height":100,"cssWidth":100,"cssHeight":100} -> {"width":190,"height":170,"cssWidth":190,"cssHeight":170}
+    detail: the X-side size is in the observer log at the same timestamp
+2026-09-28T00:25:52.633Z screenshot /pass/out/firefox-06-resized.png
+[RUN] minimise :: clicked the XLogo minimise button
+    evidence: XLogo class = "window minimized"; restore strip = ["XLogo"]
+2026-09-28T00:25:53.593Z screenshot /pass/out/firefox-07-minimized.png
+[RUN] restore :: clicked the XLogo restore button in the toolbar strip
+    evidence: XLogo class = "window focused"; restore strip = []
+[RUN] close :: clicked the close button of XLogo (a CloseRequest)
+    evidence: windows: XLogo, XInputProbe -> XInputProbe; #windows-count = "1 window"
+    detail: the X client exits on WM_DELETE_WINDOW; the X observer log says whether it did
+2026-09-28T00:25:57.447Z screenshot /pass/out/firefox-12-closed.png
+2026-09-28T00:25:57.471Z === HANDOFF: start the stand-in app now (popup phase) ===
+2026-09-28T00:26:03.039Z screenshot /pass/out/firefox-08-popup.png
+2026-09-28T00:26:03.689Z screenshot /pass/out/firefox-08a-popup-moved.png
+2026-09-28T00:26:07.105Z screenshot /pass/out/firefox-08b-popup-dialog.png
+[RUN] popups placed and clamped to their parent :: measured every popup box against its parent content box, twice
+    evidence: [{"at":"the first popup mapped","parentTitle":"Fake app: table","parentContent":{"left":53,"top":142,"width":640,"height":400},"popup":{"left":93,"top":202,"width":160,"height":120},"clipsAtParent":"hidden"}]
+    detail: margin: the layer reaches 32 px past the content box and clips there
+2026-09-28T00:26:07.157Z === HANDOFF: start the stand-in app now (input observer; the popup is the NEXT hand-off) ===
+[RUN] input, US layout :: typed a, A, 1, Enter, ArrowLeft into Fake app: table (firefox)
+    evidence: 12 key envelopes on the wire; the X side is in the record below
+2026-09-28T00:26:13.690Z the keyboard refused ["α"]: Error: keyboard.down: Unknown key: "α"
+[FAILED] input, Greek layout :: sent the character α with the physical KeyA code (firefox)
+    evidence: 0 key envelope(s) (1 refused by the driver) on the wire; the X side is in the record below
+2026-09-28T00:26:14.196Z the keyboard refused ["€"]: Error: keyboard.down: Unknown key: "€"
+[FAILED] input, AltGr :: sent the AltGr character € with Ctrl+Alt held (firefox)
+    evidence: 0 key envelope(s) (1 refused by the driver) on the wire; the X side is in the record below
+2026-09-28T00:26:14.712Z the keyboard refused ["ά"]: Error: keyboard.down: Unknown key: "ά"
+[RUN] input, dead keys :: sent the dead-key keydown then the composed character ά (firefox)
+    evidence: 0 key envelope(s) for two keydowns (1 refused by the driver) (the dead key itself carries no keysym and is not sent); the X-side keysym is in the record below
+    detail: page key log: [{"t":35207,"type":"keydown","key":"1","code":"Digit1","shift":false,"ctrl":false,"alt":false,"meta":false,"altGraph":false,"repeat":false,"isTrusted":true},{"t":35611,"type":"keyup","key":"1","code":"Digit1","shift":false,"ctrl":false,"alt":false,"meta":false,"altGraph":false,"repeat":false,"isTrusted":true},{"t":35734,"type":"keydown","key":"Enter","code":"Enter","shift":false,"ctrl":false,"alt":false,"meta":false,"altGraph":false,"repeat":false,"isTrusted":true},{"t":36137,"type":"keyup","key":"Enter","code":"Enter","shift":false,"ctrl":false,"alt":false,"meta":false,"altGraph":false,"repeat":false,"isTrusted":true},{"t":36259,"type":"keydown","key":"ArrowLeft","code":"ArrowLeft","shift":false,"ctrl":false,"alt":false,"meta":false,"altGraph":false,"repeat":false,"isTrusted":true},{"t":36662,"type":"keyup","key":"ArrowLeft","code":"ArrowLeft","shift":false,"ctrl":false,"alt":false,"meta":false,"altGraph":false,"repeat":false,"isTrusted":true}]
+2026-09-28T00:26:15.636Z screenshot /pass/out/firefox-09-input.png
+2026-09-28T00:26:15.685Z === HANDOFF: read the X side of the input (stand-in app and X client key logs) into steps/xev-read.txt ===
+[RUN] input, what the X client received :: read the X client's own key log after the typing
+    evidence: --- the stand-in app (keysym recomputed from the server keymap on every change) | fake-app: key press keycode=38 state=0x0 keysym=0x61 | fake-app: key release keycode=38 state=0x0 keysym=0x61 | fake-app: key press keycode=50 state=0x0 keysym=0xffe1 | fake-app: key release keycode=50 state=0x1 keysym=0xffe1 | fake-app: key press keycode=38 state=0x0 keysym=0x61 | fake-app: key press keycode=50 state=0x0 keysym=0xffe1 | fake-app: key release keycode=38 state=0x1 keysym=0x41 | fake-app: key release keycode=50 state=0x1 keysym=0xffe1 | fake-app: key press keycode=10 state=0x0 keysym=0x31 | fake-app: key release keycode=10 state=0x0 keysym=0x31 | fake-app: key press keycode=36 state=0x0 keysym=0xff0d | fake-app: key release keycode=36 state=0x0 keysym=0xff0d | fake-app: key press keycode=113 state=0x0 keysym=0xff51 | fake-app: key release keycode=113 state=0x0 keysym=0xff51 | --- the X client XInputProbe | 
+    detail: xev recomputes each keysym from the server keymap, so this is what the app was actually given
+2026-09-28T00:26:20.242Z === HANDOFF: set the X clipboard from another X client now (xclip -selection clipboard) ===
+2026-09-28T00:26:22.382Z screenshot /pass/out/firefox-10-app-copy-held.png
+[RUN] clipboard, app -> host, written only inside a user gesture :: let another X client take the CLIPBOARD selection, then clicked "Copy app text"
+    evidence: clipboard before the click = "sentinel-before-the-click"; after the click = "APPricot app-side clipboard text"; #status = "copied to your clipboard"
+    detail: the button was enabled by the clipboard_text envelope; nothing was written until the click
+2026-09-28T00:26:23.328Z screenshot /pass/out/firefox-11-app-copy-written.png
+[RUN] clipboard, host -> app :: checked the paste toggle, put text on the host clipboard and pressed Ctrl+V
+    evidence: wire kinds after the paste: ["key","key","key","key","frame_ack","frame_ack","frame_ack"]
+    detail: the client sends clipboard_set only inside the paste event
+2026-09-28T00:26:24.646Z === HANDOFF: read the X clipboard now (xclip -selection clipboard -o) and write the text to steps/host-to-app-read.txt ===
+[RUN] clipboard, host -> app, observed on the X side :: read the CLIPBOARD selection from another X client after the paste
+    evidence: xclip read back: "APPricot app-side clipboard text"
+2026-09-28T00:26:30.395Z === HANDOFF: change the X cursor now (xsetroot -cursor_name crosshair, as another X client) ===
+[FAILED] the cursor :: let another X client change the cursor while the session was open, then moved the pointer over a window
+    evidence: #status = "closed: bye", cursor messages on the wire: ["cursor_gone"], overlays drawn: []
+    detail: the overlay is the streamed app's cursor image; if the session ended here, that is in this record
+2026-09-28T00:26:33.545Z screenshot /pass/out/firefox-14-cursor.png
+[RUN] console cleanliness :: collected every console message and page error for the whole run
+    evidence: 2 console message(s), 0 page error(s)
+    detail: [{"t":"2026-09-28T00:25:37.407Z","type":"error","text":"[JavaScript Error: \"Content-Security-Policy: The page’s settings blocked assigning to an injection sink because it violates the following directive: “require-trusted-types-for ’script’“\" {file: \"debugger eval code line 311 > eval\" line: 5}]"},{"t":"2026-09-28T00:25:37.407Z","type":"error","text":"[JavaScript Error: \"Content-Security-Policy: The page’s settings blocked an inline style (style-src-elem) from being applied because it violates the following directive: “style-src 'self'”. Consider using a hash ('sha256-3a6CGJBf0QxfeeV0XGLdB3Pyt1svwD4J3jNIcB05A/k=', requires 'unsafe-hashes' for style attributes) or a nonce.\" {file: \"debugger eval code line 311 > eval\" line: 13}]"}]
+2026-09-28T00:26:33.693Z screenshot /pass/out/firefox-13-final.png
+
+firefox 155.0: 23 run, 3 failed, 0 not run
+driver exit 0

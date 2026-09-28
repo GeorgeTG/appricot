@@ -31,6 +31,7 @@ pub const RUN_HINT: &str = "run inside the dev container: docker compose run --r
 
 // Core request opcodes.
 const CREATE_WINDOW: u8 = 1;
+const CHANGE_WINDOW_ATTRIBUTES: u8 = 2;
 const GET_WINDOW_ATTRIBUTES: u8 = 3;
 const DESTROY_WINDOW: u8 = 4;
 const MAP_WINDOW: u8 = 8;
@@ -42,9 +43,11 @@ const GRAB_SERVER: u8 = 36;
 const UNGRAB_SERVER: u8 = 37;
 const GET_INPUT_FOCUS: u8 = 43;
 const QUERY_KEYMAP: u8 = 44;
+const CREATE_PIXMAP: u8 = 53;
 const CREATE_GC: u8 = 55;
 const FREE_GC: u8 = 60;
 const POLY_FILL_RECTANGLE: u8 = 70;
+const CREATE_CURSOR: u8 = 93;
 
 // Event codes.
 /// `KeyPress`.
@@ -392,6 +395,62 @@ impl XApp {
             "this client ran out of resource ids"
         );
         self.id_base | offset
+    }
+
+    /// Builds a `side`×`side` cursor out of two blank depth-1 pixmaps and returns its id.
+    /// No font is involved — the container's X server ships no font catalogue — and any
+    /// cursor object serves: what the streamer hears is that the display's cursor changed,
+    /// not what it looks like.
+    pub fn blank_cursor(&mut self, side: u16) -> u32 {
+        let source = self.new_id();
+        self.checked(
+            CREATE_PIXMAP,
+            1, // depth
+            Fields::default()
+                .u32(source)
+                .u32(self.root)
+                .u16(side)
+                .u16(side),
+        );
+        let mask = self.new_id();
+        self.checked(
+            CREATE_PIXMAP,
+            1,
+            Fields::default()
+                .u32(mask)
+                .u32(self.root)
+                .u16(side)
+                .u16(side),
+        );
+        let cursor = self.new_id();
+        self.checked(
+            CREATE_CURSOR,
+            0,
+            Fields::default()
+                .u32(cursor)
+                .u32(source)
+                .u32(mask)
+                .u16(0)
+                .u16(0)
+                .u16(0) // foreground black
+                .u16(0xffff)
+                .u16(0xffff)
+                .u16(0xffff) // background white
+                .u16(side - 1)
+                .u16(side - 1), // the hotspot, inside the source
+        );
+        cursor
+    }
+
+    /// Defines `cursor` on the root: the display's cursor changes, which is what the
+    /// streamer's XFixes notification reports.
+    pub fn define_cursor(&mut self, cursor: u32) {
+        // The root's cursor attribute: bit 14 of the value mask.
+        self.checked(
+            CHANGE_WINDOW_ATTRIBUTES,
+            0,
+            Fields::default().u32(self.root).u32(1 << 14).u32(cursor),
+        );
     }
 
     fn create_window(

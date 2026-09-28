@@ -8,6 +8,7 @@ use appricot_core::{
 };
 use x11rb::connection::Connection as _;
 use x11rb::cookie::VoidCookie;
+use x11rb::errors::ReplyError;
 use x11rb::protocol::composite;
 use x11rb::protocol::composite::ConnectionExt as _;
 use x11rb::protocol::damage;
@@ -747,17 +748,30 @@ impl X11Backend {
                 Ok(())
             }
             Event::XfixesCursorNotify(_) => {
-                let reply = self.conn.xfixes_get_cursor_image()?.reply()?;
-                out.push(SurfaceEvent::CursorChanged {
-                    cursor: cursor_image(
-                        reply.cursor_serial,
-                        reply.width,
-                        reply.height,
-                        reply.xhot,
-                        reply.yhot,
-                        &reply.cursor_image,
-                    ),
-                });
+                let reply = self.conn.xfixes_get_cursor_image()?;
+                match reply.reply() {
+                    Ok(reply) => {
+                        out.push(SurfaceEvent::CursorChanged {
+                            cursor: cursor_image(
+                                reply.cursor_serial,
+                                reply.width,
+                                reply.height,
+                                reply.xhot,
+                                reply.yhot,
+                                &reply.cursor_image,
+                            ),
+                        });
+                    }
+                    // The grab races the cursor being hidden or the pointer leaving the
+                    // screen, where the server answers a Cursor error — the one error
+                    // this request has. That names a moment, not a fault: this update is
+                    // skipped, the next change re-reports, and the session lives on.
+                    // Treated as an error it once ended a live session as a "dead
+                    // display", with a log line that pointed at an X server that was
+                    // alive.
+                    Err(ReplyError::X11Error(e)) if e.error_kind == ErrorKind::Cursor => {}
+                    Err(e) => return Err(e.into()),
+                }
                 Ok(())
             }
             Event::MappingNotify(_) => self.refresh_keymap(),
@@ -1944,7 +1958,7 @@ fn take_root(conn: &RustConnection, root: x::Window) -> Result<(), BackendError>
         .check()
     {
         return Err(match e {
-            x11rb::errors::ReplyError::X11Error(ref err) if err.error_kind == ErrorKind::Access => {
+            ReplyError::X11Error(ref err) if err.error_kind == ErrorKind::Access => {
                 BackendError::NotWindowManager
             }
             other => BackendError::from(other),

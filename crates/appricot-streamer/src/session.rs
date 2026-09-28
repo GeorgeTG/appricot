@@ -631,10 +631,23 @@ where
     B: CaptureBackend + InputSink + Send + 'static,
 {
     match feed {
-        // The display died: nothing can be served again (no park; the backend is gone).
-        None | Some(Feed::Fatal(_)) => {
+        // The backend is gone: nothing can be served again (no park; the connection is
+        // dead or the thread ended). The cause is logged because the bare "display dead"
+        // once sent someone to an X server that was alive: a refused request and a broken
+        // connection say different things about the machine, and only the cause tells
+        // them apart.
+        Some(Feed::Fatal(cause)) => {
             let _ = send_bye(sink, ByeReason::ByeServerShutdown, "the display died").await;
-            tracing::error!(session = %session_id, "display dead; session ended");
+            tracing::error!(session = %session_id, error = %cause, "backend fault; session ended");
+            Flow::Stop(EndCause::Fault)
+        }
+        None => {
+            let _ = send_bye(sink, ByeReason::ByeServerShutdown, "the display died").await;
+            tracing::error!(
+                session = %session_id,
+                error = "the backend thread ended",
+                "backend fault; session ended"
+            );
             Flow::Stop(EndCause::Fault)
         }
         Some(Feed::Events(events)) => {

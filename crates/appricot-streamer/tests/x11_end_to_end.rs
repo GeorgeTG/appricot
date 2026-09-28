@@ -934,3 +934,46 @@ async fn expect_resync(host: &mut Host, windows: &[(u32, (u16, u16), u32)]) {
     ids.sort_unstable();
     assert_eq!(redrawn, ids, "one full redraw per window");
 }
+
+// --- 7. the cursor ------------------------------------------------------------------------
+
+/// A cursor change on the display reaches the host as a `CursorImage`, and the session
+/// survives it: the image grab the notification triggers once raced the cursor being
+/// ungrabbable, and the error of that race was classified as a dead display, ending the
+/// session — with a message that pointed at a live X server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_changed_cursor_reaches_the_host_and_the_session_survives_it() {
+    let _display = DISPLAY.lock().await;
+    let server = serve().await;
+    let (mut host, _reply) = open(&server, vec![codec::RAW], None).await;
+    let mut app = XApp::connect();
+
+    // Two cursors of different sizes, alternated so no two consecutive images are
+    // identical (a repeat of the last image is not resent); each change must arrive,
+    // and none may end the session.
+    let small = app.blank_cursor(1);
+    let large = app.blank_cursor(3);
+    for cursor in [small, large, small, large] {
+        app.define_cursor(cursor);
+        let (body, _) = host
+            .until("a CursorImage for the change", |body| {
+                matches!(body, Body::CursorImage(_))
+            })
+            .await;
+        let Body::CursorImage(image) = body else {
+            unreachable!("until checked the variant")
+        };
+        assert!(
+            !image.argb_premultiplied.is_empty(),
+            "the cursor carries pixels"
+        );
+    }
+
+    // The session outlived every change: one more still arrives after them all.
+    let other = app.blank_cursor(5);
+    app.define_cursor(other);
+    host.until("a CursorImage after the fourth", |body| {
+        matches!(body, Body::CursorImage(_))
+    })
+    .await;
+}

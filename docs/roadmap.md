@@ -178,6 +178,22 @@ rule and the reasoning behind the transport are
 [development.md §13](development.md#13-releases). This is the artefact M3 waits for. It is **not**
 M2's exit: the criteria below still are, and 0.1.x is what says so.
 
+**M2's browser pass, 2026-09-28: two of the three browsers, recorded.** The
+[pass](browser-pass/findings-2026-09-28.md) drove the demo host page in a container browser —
+Chromium 153 and Firefox 155, against the image's own X clients and the repository's stand-in
+application, one session per browser run — and recorded, criterion by criterion, what ran. It ran:
+the window set and its titles, popups placed inside their parent, focus, drag, resize, minimise,
+restore and close; an idle session sending nothing, and the client's acks; the token refused and
+then accepted; the strict CSP, which refused an injected script and an injected style; both
+clipboard directions in Chromium, with the write only inside the click; and US, Greek, AltGr and
+dead-key input in Chromium on a `us,gr` display, with the app's own key log as the evidence. It
+could not run Safari (no macOS here), and in Firefox it could not run the Greek, AltGr and
+dead-key keys or the host-to-app paste — the rig cannot express those there, which is a gap in the
+record and not a pass. It found
+[one defect](browser-pass/findings-2026-09-28.md#1-changing-the-cursor-on-the-display-ends-the-session):
+changing the cursor on the display ends the session, so the cursor criterion ends in a failure
+rather than in a pass. The device half is untouched by all of it.
+
 Still open for M2: the real-browser pass on desktop Chrome, Firefox and Safari, and everything
 that needs the pilot application on a real device.
 

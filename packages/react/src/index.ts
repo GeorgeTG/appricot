@@ -23,6 +23,7 @@ export type { AppricotTitleElement, AppricotTitleProps } from './title.js';
 export type {
   ConnectionStatus,
   Envelope,
+  PastePolicy,
   RegistryEvents,
   SurfaceRecord,
 } from './client.js';

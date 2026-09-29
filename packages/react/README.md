@@ -76,7 +76,9 @@ What each piece decides:
   decides **size** and **focus**: pass `focused` for the focused surface (it sends
   the one message that moves focus), and either let `autoConfigure` propose the
   host canvas's size to the app or answer resize asks yourself through
-  `onResizeAsk`.
+  `onResizeAsk`. Clipboard paste is opt-in: pass a `paste` policy — it sees the
+  text the user pasted and returns whether it may reach the session — and without
+  one the SDK reads no clipboard at all.
 - `AppricotTitle` is the text-only title — the proof of pattern for treating server
   strings as data.
 - The hooks — `useWindows`, `useSurfaceMeta`, `useConnectionStatus`,

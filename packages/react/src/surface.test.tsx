@@ -441,3 +441,45 @@ describe('AppricotSurface', () => {
     });
   });
 });
+
+// The paste policy (R16): the prop is the host's answer to a clipboard ask, and it must
+// reach attachInput's deps — live, read per paste, without re-attaching input.
+describe('AppricotSurface paste policy', () => {
+  it('forwards the policy to attachInput, live across renders', () => {
+    const m = clientMock();
+    m.setMeta(fakeSurfaceRecord(7));
+    let allow = true;
+    const view = renderInProvider(
+      <AppricotSurface id={7} paste={(text) => allow && text.length < 10} />,
+    );
+    expect(m.inputCalls()).toHaveLength(1);
+    const deps = m.inputCalls()[0]?.deps as { paste?: (text: string) => boolean };
+    expect(typeof deps.paste).toBe('function');
+    expect(deps.paste?.('hi')).toBe(true);
+    expect(deps.paste?.('a text longer than ten characters')).toBe(false);
+
+    // The policy is read per call, not frozen at attach: a host that changes its mind
+    // needs no re-render of the surface, and input is not re-attached.
+    allow = false;
+    expect(deps.paste?.('hi')).toBe(false);
+    expect(m.inputCalls()).toHaveLength(1);
+    void view;
+  });
+
+  it('sends no policy when the host gives none, and re-attaches when one appears', () => {
+    const m = clientMock();
+    m.setMeta(fakeSurfaceRecord(7));
+    const { rerender } = renderInProvider(<AppricotSurface id={7} />);
+    let deps = m.inputCalls()[0]?.deps as { paste?: unknown };
+    expect(deps.paste).toBeUndefined();
+
+    rerender(
+      <AppricotProvider url={TEST_URL} token="stream-token">
+        <AppricotSurface id={7} paste={() => true} />
+      </AppricotProvider>,
+    );
+    expect(m.inputCalls()).toHaveLength(2);
+    deps = m.inputCalls()[1]?.deps as { paste?: unknown };
+    expect(typeof deps.paste).toBe('function');
+  });
+});

@@ -8,6 +8,7 @@ import {
   sendFocusNotify,
   SurfaceRenderer,
 } from './client.js';
+import type { PastePolicy } from './client.js';
 import { useSurfaceMeta } from './hooks.js';
 import { useAppricot } from './provider.js';
 
@@ -57,6 +58,15 @@ export interface AppricotSurfaceProps {
    * (or not) through `send`. Either way the ConfigureAck sizes the registry's record.
    */
   readonly onResizeAsk?: (ask: AppricotResizeAsk) => void;
+  /**
+   * The host's clipboard policy for keyboard paste (ADR-0003 §7). Opt-in: without it the
+   * SDK reads no clipboard at all. With it, the platform paste chord is held back from the
+   * app until the browser's `paste` event arrives, the policy sees the pasted text, and
+   * text it allows goes out as one `ClipboardSet` ahead of the chord. The prop is read per
+   * paste, so the host's policy may change with its own state; only its presence or absence
+   * re-attaches input.
+   */
+  readonly paste?: PastePolicy;
 }
 
 /**
@@ -79,6 +89,7 @@ export function AppricotSurface({
   autoConfigure = false,
   focused = false,
   onResizeAsk,
+  paste,
 }: AppricotSurfaceProps) {
   const { conn, registry } = useAppricot();
   const meta = useSurfaceMeta(id);
@@ -87,12 +98,17 @@ export function AppricotSurface({
   const serialRef = useRef(0);
   const focusedRef = useRef(false);
   const resizeAskRef = useRef(onResizeAsk);
+  const pasteRef = useRef(paste);
+  // Presence alone decides whether attachInput gets a policy at all; the policy itself is
+  // read through the ref per paste, so a host may change its mind without re-attaching.
+  const hasPaste = paste !== undefined;
   // Set by the autoConfigure effect: proposes the host's box again, even if unchanged.
   const reproposeRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     focusedRef.current = focused;
     resizeAskRef.current = onResizeAsk;
+    pasteRef.current = paste;
   });
 
   // DOM focus follows the host's focus: without it the keyboard never reaches the canvas's
@@ -114,10 +130,11 @@ export function AppricotSurface({
     };
   }, [conn, id, known, registry]);
 
-  // Input capture. Attached once; attachInput asks isFocused() and size() per event, so the
-  // focused prop and the surface's size flow through without re-attaching listeners. The size
-  // is the registry's: pointer positions are scaled from the canvas's CSS box to the logical
-  // surface, so a click lands right whatever CSS size the host gives the canvas.
+  // Input capture. Attached once; attachInput asks isFocused(), size() and the paste policy
+  // per event, so the focused prop, the surface's size and a policy that changes its mind
+  // flow through without re-attaching listeners. The size is the registry's: pointer
+  // positions are scaled from the canvas's CSS box to the logical surface, so a click lands
+  // right whatever CSS size the host gives the canvas.
   useEffect(() => {
     if (conn === null || !known) return;
     const canvas = canvasRef.current;
@@ -126,8 +143,11 @@ export function AppricotSurface({
       conn,
       isFocused: () => focusedRef.current,
       size: () => registry.get(id)?.size,
+      ...(hasPaste
+        ? { paste: (text: string): boolean => pasteRef.current?.(text) === true }
+        : {}),
     });
-  }, [conn, id, known, registry]);
+  }, [conn, id, known, registry, hasPaste]);
 
   // Focus notification: sent when the surface is (or becomes) focused while the connection
   // is open, and re-sent when the connection reaches 'open' again — the SDK drops sends

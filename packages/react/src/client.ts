@@ -15,7 +15,7 @@
  *                          resume's re-announcement reports a changed record through
  *                          metadata and configure-acked (serial 0), never remove plus add
  *   SurfaceRenderer.attach(canvas, surfaceId, { registry, conn }) -> { detach() }
- *   attachInput(element, surfaceId, { conn, isFocused(), size?() }) -> detach()
+ *   attachInput(element, surfaceId, { conn, isFocused(), size?(), paste? }) -> detach()
  *
  * Everything below is a re-export of those pins plus the two outbound messages these
  * bindings construct themselves.
@@ -35,6 +35,7 @@ export type {
   AppricotConnection,
   ConnectionStatus,
   Envelope,
+  PastePolicy,
   RegistryEvents,
   SurfaceRecord,
 } from '@app-ricot/client';

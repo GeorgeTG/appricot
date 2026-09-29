@@ -254,11 +254,12 @@ minimise, close and focus; text paste from the host into the app, and the app's 
 the host's policy allows; the demo page under a strict CSP; the hostile-server fixture; decoder
 fuzz tests on both sides of the wire.
 
-**The released artefacts.** The version in the tree is **0.1.0**, and one `v*` tag publishes it:
-the streamer image to GHCR and the two packages to that version's release
+**The released artefacts.** The version in the tree is **0.2.2**, and one `v*` tag publishes it:
+the streamer image to GHCR, and the two packages to npmjs.org — staged by the tag, live with the
+owner's approval — with the same two tarballs on that version's release
 ([the section above](#consuming-appricot-the-released-artefacts)). Pushing the tag is the owner's
-act and nothing has been tagged yet, so 0.1.0 is the version the next tag carries — it is recorded
-as M2's tail, and it does **not** close M2.
+act; versions 0.1.0 through 0.2.2 are released. This line is recorded as M2's tail, and it does
+**not** close M2.
 
 **Still open.**
 

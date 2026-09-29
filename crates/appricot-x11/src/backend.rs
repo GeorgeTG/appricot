@@ -27,7 +27,7 @@ use crate::capture::{convert_zpixmap, place_in, zeroed};
 use crate::clipboard::{
     CLIPBOARD_FETCH_LONGS, Clipboard, ClipboardFetch, latin1_decode, latin1_encode,
 };
-use crate::cursor::cursor_image;
+use crate::cursor::{cursor_image, is_grab_refusal};
 use crate::error::BackendError;
 use crate::input::{HeldInput, KeyId, KeyPress, NoShiftKey, Stroke};
 use crate::keymap::{
@@ -762,14 +762,17 @@ impl X11Backend {
                             ),
                         });
                     }
-                    // The grab races the cursor being hidden or the pointer leaving the
-                    // screen, where the server answers a Cursor error — the one error
-                    // this request has. That names a moment, not a fault: this update is
+                    // The grab races moments the display is still fine through, and the
+                    // server answers a refusal, not a fault: a Cursor error (the one the
+                    // request is specified to carry — the cursor hidden, the pointer off
+                    // the screens) or an Access refusal (observed from an X server when a
+                    // cursor another client has just set becomes the displayed one;
+                    // reproduced with xsetroot, 2026-09-29). Either way this update is
                     // skipped, the next change re-reports, and the session lives on.
-                    // Treated as an error it once ended a live session as a "dead
+                    // Treated as errors they once ended live sessions as a "dead
                     // display", with a log line that pointed at an X server that was
                     // alive.
-                    Err(ReplyError::X11Error(e)) if e.error_kind == ErrorKind::Cursor => {}
+                    Err(ReplyError::X11Error(e)) if is_grab_refusal(e.error_kind) => {}
                     Err(e) => return Err(e.into()),
                 }
                 Ok(())

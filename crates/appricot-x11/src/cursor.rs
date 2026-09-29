@@ -2,11 +2,22 @@
 
 use appricot_core::CursorImage;
 use appricot_core::{Point, Size};
+use x11rb::protocol::ErrorKind;
 
 /// The largest cursor image handed upstream, in each dimension. The wire caps `CursorImage`
 /// at 128x128; larger images (none are expected: servers cap cursors far below this) are
 /// cropped, not scaled.
 pub(crate) const MAX_CURSOR_SIDE: u32 = 128;
+
+/// The errors a cursor-image grab may answer while the display itself is fine, so the
+/// one update is skipped and the session lives on: the Cursor error the request is
+/// specified to carry (the cursor hidden, the pointer off the screens), and an Access
+/// refusal — observed from an X server when a cursor another client has just set becomes
+/// the displayed one (reproduced with xsetroot, 2026-09-29). Anything else still fails
+/// the backend.
+pub(crate) fn is_grab_refusal(kind: ErrorKind) -> bool {
+    matches!(kind, ErrorKind::Cursor | ErrorKind::Access)
+}
 
 /// Turns a XFixes `GetCursorImage` reply into the model's cursor image.
 ///
@@ -43,7 +54,18 @@ pub(crate) fn cursor_image(
 
 #[cfg(test)]
 mod tests {
-    use super::cursor_image;
+    use super::{cursor_image, is_grab_refusal};
+    use x11rb::protocol::ErrorKind;
+
+    #[test]
+    fn the_grabs_documented_refusals_skip_the_update_and_everything_else_fails() {
+        assert!(is_grab_refusal(ErrorKind::Cursor));
+        assert!(is_grab_refusal(ErrorKind::Access));
+        // Not refusals: a window gone mid-grab is a different path's business, and an
+        // unknown error must still fail the backend rather than hide behind the cursor.
+        assert!(!is_grab_refusal(ErrorKind::Window));
+        assert!(!is_grab_refusal(ErrorKind::Implementation));
+    }
 
     #[test]
     fn argb_words_become_argb_bytes() {

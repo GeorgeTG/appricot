@@ -1,9 +1,14 @@
 {
   "name": "@app-ricot/client",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "license": "MIT OR Apache-2.0",
   "author": "George Gougoudis <george_gougoudis@hotmail.com>",
   "description": "APPricot's embeddable browser client: connection, codec mirror, window registry, tile decode and input. Framework-agnostic; draws into canvases the host provides.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GeorgeTG/appricot",
+    "directory": "packages/client"
+  },
   "type": "module",
   "sideEffects": false,
   "exports": {

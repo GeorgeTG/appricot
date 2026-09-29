@@ -1,9 +1,14 @@
 {
   "name": "@app-ricot/react",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "license": "MIT OR Apache-2.0",
   "author": "George Gougoudis <george_gougoudis@hotmail.com>",
   "description": "React bindings for @app-ricot/client: a provider, hooks and a window canvas. The host renders its own chrome.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GeorgeTG/appricot",
+    "directory": "packages/react"
+  },
   "type": "module",
   "sideEffects": false,
   "exports": {

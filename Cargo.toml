@@ -30,7 +30,7 @@ members = [
 # promise: a consumer may take it, and a minor bump may still break it. Not 0.0.x, which says an
 # artefact is not meant to be consumed at all. A bump here moves Cargo.lock with it
 # (`cargo update --workspace`, which re-resolves nothing external).
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 # The declared MSRV floor. These crates are meant to build INSIDE a host application's own
 # workspace, so the floor is a promise to that host: adopting APPricot must not force anyone to

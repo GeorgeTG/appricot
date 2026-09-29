@@ -19,21 +19,21 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "appricot-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "appricot-proto",
 ]
 
 [[package]]
 name = "appricot-encode"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "appricot-core",
 ]
 
 [[package]]
 name = "appricot-proto"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "prost",
  "prost-build",
@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "appricot-spike"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "appricot-core",
  "appricot-encode",
@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "appricot-streamer"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "appricot-core",
  "appricot-encode",
@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "appricot-x11"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "appricot-core",
  "x11rb",

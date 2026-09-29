@@ -7,12 +7,14 @@
 # `@app-ricot/react` — and does not vendor the source. Nothing was published before 0.1.0; this
 # workflow is where a version starts meaning something.
 #
-# Two artefacts, two credentials. Every GitHub-facing step authenticates with the runner's own
-# `GITHUB_TOKEN` (`packages: write` for the image, `contents: write` for the release). The npm
-# publish is the one step that needs more: the repository secret `NPM_TOKEN`, an npm automation
-# token owned by the user with publish rights on the `app-ricot` organization and nothing else.
-# The registry decision is the user's (2026-09-28, with making the repository public) and is
-# recorded as ADR-0001 Amendment 1.
+# Two artefacts, no stored credential. Every GitHub-facing step authenticates with the runner's
+# own `GITHUB_TOKEN` (`packages: write` for the image, `contents: write` for the release), and
+# the npm publish authenticates with the run's own OIDC identity: trusted publishing. The two
+# packages' npm settings name this repository and this workflow file as their trusted
+# publisher, the job carries `id-token: write`, and no npm token exists to store or leak —
+# npm's 2026 token policy issues no classic token any more and binds granular write tokens to
+# a second factor the runner cannot give. The registry decision is the user's (2026-09-28,
+# with making the repository public) and is recorded as ADR-0001 Amendment 1.
 #
 # - **The streamer image** → GHCR, `ghcr.io/<owner>/appricot/streamer:<version>`, built from
 #   docker/streamer/Dockerfile. amd64 only (that file says why). It is verified before it is
@@ -32,8 +34,9 @@
 #   green, and the assertions below catch the one mistake a tag can carry that CI cannot: a tag
 #   that disagrees with the tree. Add `docker compose run --rm dev just check` to the release job
 #   if a release should prove the whole gate itself.
-# - It does not create a repository, a secret, a schedule or a cron. `NPM_TOKEN` is the owner's to
-#   create and place; nothing here runs on a timer.
+# - It does not create a repository, a secret, a schedule or a cron; nothing here runs on a
+#   timer. The one thing outside this repository the publish needs — the trusted-publisher
+#   link on each package's npm settings — is the owner's to place.
 
 name: release
 
@@ -168,6 +171,9 @@ jobs:
     needs: [image]
     permissions:
       contents: write
+      # The npm publish proves this run's identity to the registry with it (trusted
+      # publishing); no token is stored anywhere.
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -200,16 +206,15 @@ jobs:
         run: docker compose run --rm dev just pack
 
       - name: Publish the two packages to npmjs.org
-        # The repository's one publishing secret, and the one step that uses it. `--access public`
-        # is explicit because a scoped package may otherwise default to restricted. A re-run of a
-        # failed job publishes a version that is already on the registry; that one outcome is
-        # tolerated exactly like the release fallback below — `npm view` proves the version is
-        # there, and any other failure fails the job.
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # No token: trusted publishing. Each package's npm settings name this repository and
+        # this workflow as its trusted publisher, and a current npm proves the run's OIDC
+        # identity to the registry — npm's 2026 token policy left no stored credential that
+        # could publish. `--access public` is explicit because a scoped package may otherwise
+        # default to restricted. A re-run of a failed job publishes a version that is already
+        # on the registry; that one outcome is tolerated exactly like the release fallback
+        # below — `npm view` proves the version is there, and any other failure fails the job.
         run: |
           set -euo pipefail
-          printf '//registry.npmjs.org/:_authToken=%s\n' "${NPM_TOKEN}" > "${HOME}/.npmrc"
           for package in client react; do
             tarball="artifacts/release/app-ricot-${package}-${VERSION}.tgz"
             test -f "${tarball}" || { echo "missing ${tarball}" >&2; exit 1; }

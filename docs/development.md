@@ -329,9 +329,9 @@ application runs in a scratch directory of its own, so nothing it writes lands i
 A release is a tag, and the tag is the owner's to push:
 `git tag v0.1.0 && git push origin v0.1.0`.
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) then does the whole of it:
-the image and the release with the runner's own `GITHUB_TOKEN`, the npm publish with the
-repository secret `NPM_TOKEN` (below). An agent never tags, pushes or publishes: a tag fires this
-workflow, so it is the owner's act and nobody else's.
+the image and the release with the runner's own `GITHUB_TOKEN`, and the npm publish with the
+run's own identity — trusted publishing, no token at all (below). An agent never tags, pushes
+or publishes: a tag fires this workflow, so it is the owner's act and nobody else's.
 
 Two artefacts, and they are the two [ADR-0001](adr/0001-separate-repository.md) names for a host:
 
@@ -375,11 +375,19 @@ checked 2026-09-27). It also asks every installer for a token, even for public p
 **(unverified)**: that is its behaviour as read at planning time, and it cannot be checked without
 publishing, which is the owner's act.
 
-The cost of npmjs.org is the one secret this repository carries: `NPM_TOKEN`, an npm automation
-token owned by the user with publish rights on the `app-ricot` organization and nothing else,
-created and placed by the owner. Before 0.1.0 this section said the repository would not learn
-such a secret; the user's registry decision is what changed that sentence. The tarballs stay
-attached to each release as the fallback that needs no registry and no token.
+No stored credential is involved, in this repository or anywhere else. npm's 2026 token policy
+left no token a workflow could publish with — new classic tokens are no longer issued, and a
+granular token with write access is bound to a second factor the runner cannot give; the
+registry's own refusal of the first tokened attempt said exactly that ([staged
+publishing](https://docs.npmjs.com/staged-publishing) is the registry's alternative flow,
+checked 2026-09-29; the timeline behind it is the registry's announcement of 2025-11
+**(unverified)**). The packages therefore publish by **trusted publishing**: each package's
+npm settings name this repository and the release workflow as its trusted publisher, and the
+job's OIDC identity (`id-token: write`) is the credential. The first version of each package
+was published by the owner by hand, with two-factor authentication — the publisher link is
+placed on the package's own settings — and every later version publishes from the workflow
+alone. The tarballs stay attached to each release as the fallback that needs no registry and
+no identity.
 
 crates.io stays untaken for the Rust crates, exactly as before
 ([Cargo.toml](../Cargo.toml), `publish = false`).

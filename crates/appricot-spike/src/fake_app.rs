@@ -222,6 +222,19 @@ pub fn run(
                     }
                     on_key(report);
                 }
+                Event::ButtonPress(e) | Event::ButtonRelease(e) => {
+                    if cfg.print_keys {
+                        let pressed = matches!(event, Event::ButtonPress(_));
+                        let _ = writeln!(
+                            std::io::stdout().lock(),
+                            "fake-app: button {} detail={} at=({},{})",
+                            if pressed { "press" } else { "release" },
+                            e.detail,
+                            e.event_x,
+                            e.event_y
+                        );
+                    }
+                }
                 Event::MappingNotify(_) => keymap = Keymap::fetch(&app.conn)?,
                 Event::ConfigureNotify(e) if e.window == app.windows.toplevel => {
                     app.size = (e.width, e.height);
@@ -271,6 +284,7 @@ impl App {
         let events = EventMask::KEY_PRESS
             | EventMask::KEY_RELEASE
             | EventMask::BUTTON_PRESS
+            | EventMask::BUTTON_RELEASE
             | EventMask::EXPOSURE
             | EventMask::STRUCTURE_NOTIFY;
         self.conn.create_window(

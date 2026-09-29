@@ -247,6 +247,7 @@ where
             parked: None,
             fatal: standby.fatal,
             delivery_warned: false,
+            unannounced_warned: false,
         },
         Start::Resume(parked) => Pump {
             session: parked.standby.session,
@@ -261,6 +262,7 @@ where
             parked: Some((parked.resume_serial, parked.deadline)),
             fatal: parked.standby.fatal,
             delivery_warned: false,
+            unannounced_warned: false,
         },
     };
 
@@ -319,6 +321,9 @@ struct Pump<B> {
     fatal: Option<BackendError>,
     /// Whether a failed input delivery was already reported at warn level this session.
     delivery_warned: bool,
+    /// Whether input for an unannounced surface was already reported at warn level this
+    /// session.
+    unannounced_warned: bool,
 }
 
 impl<B> Pump<B> {
@@ -935,6 +940,26 @@ where
     Flow::On
 }
 
+/// Reports input addressed to a surface this client was never told about, without flooding
+/// the log: the first one a session at warn, every later one at debug. The drop itself is
+/// right — a click racing a window's death is ordinary — but it is never silent: keys carry
+/// no surface and reach the focused window whatever a client's registry holds, so a client
+/// addressing every pointer wrong would type but never click, with nothing in the log to
+/// show for it until this reports the surface it ignored.
+fn unannounced_input<B>(pump: &mut Pump<B>, what: &'static str, surface: u32) {
+    let first = !pump.unannounced_warned;
+    pump.unannounced_warned = true;
+    if first {
+        tracing::warn!(
+            what,
+            surface,
+            "input for an unannounced surface ignored; later ones log at debug"
+        );
+    } else {
+        tracing::debug!(what, surface, "input for an unannounced surface ignored");
+    }
+}
+
 /// Logs a failed input delivery without flooding the log: the first failure of a session at
 /// warn, every later one at debug (a backend whose thread died fails every pointer move).
 /// `error` is left out where its text could carry what the user typed.
@@ -978,9 +1003,9 @@ where
         }
         Body::PointerMove(m) => {
             let id = SurfaceId::new(m.surface_id);
-            if announced(pump, id)
-                && let Err(e) = pump.backend.pointer_motion(id, Point::new(m.x, m.y)).await
-            {
+            if !announced(pump, id) {
+                unannounced_input(pump, "pointer motion", m.surface_id);
+            } else if let Err(e) = pump.backend.pointer_motion(id, Point::new(m.x, m.y)).await {
                 delivery_failed(pump, "pointer motion", Some(&e));
             }
             Flow::On
@@ -991,20 +1016,21 @@ where
                 return Flow::On; // not an X button: ignore, never fatal
             };
             let state = press_state(m.pressed);
-            if announced(pump, id)
-                && let Err(e) = pump.backend.pointer_button(id, button, state).await
-            {
+            if !announced(pump, id) {
+                unannounced_input(pump, "pointer button", m.surface_id);
+            } else if let Err(e) = pump.backend.pointer_button(id, button, state).await {
                 delivery_failed(pump, "pointer button", Some(&e));
             }
             Flow::On
         }
         Body::PointerAxis(m) => {
             let id = SurfaceId::new(m.surface_id);
-            if announced(pump, id)
-                && let Err(e) = pump
-                    .backend
-                    .pointer_axis(id, Point::new(m.steps_x, m.steps_y))
-                    .await
+            if !announced(pump, id) {
+                unannounced_input(pump, "pointer axis", m.surface_id);
+            } else if let Err(e) = pump
+                .backend
+                .pointer_axis(id, Point::new(m.steps_x, m.steps_y))
+                .await
             {
                 delivery_failed(pump, "pointer axis", Some(&e));
             }
@@ -1013,9 +1039,9 @@ where
         Body::Key(m) => deliver_key(pump, m).await,
         Body::FocusNotify(m) => {
             let id = SurfaceId::new(m.surface_id);
-            if announced(pump, id)
-                && let Err(e) = pump.backend.focus(id).await
-            {
+            if !announced(pump, id) {
+                unannounced_input(pump, "focus", m.surface_id);
+            } else if let Err(e) = pump.backend.focus(id).await {
                 delivery_failed(pump, "focus", Some(&e));
             }
             Flow::On

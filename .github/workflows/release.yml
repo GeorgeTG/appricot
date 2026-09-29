@@ -9,24 +9,25 @@
 #
 # Two artefacts, no stored credential. Every GitHub-facing step authenticates with the runner's
 # own `GITHUB_TOKEN` (`packages: write` for the image, `contents: write` for the release), and
-# the npm publish authenticates with the run's own OIDC identity: trusted publishing. The two
+# the npm submit authenticates with the run's own OIDC identity: trusted publishing. The two
 # packages' npm settings name this repository and this workflow file as their trusted
 # publisher, the job carries `id-token: write`, and no npm token exists to store or leak —
 # npm's 2026 token policy issues no classic token any more and binds granular write tokens to
-# a second factor the runner cannot give. The registry decision is the user's (2026-09-28,
-# with making the repository public) and is recorded as ADR-0001 Amendment 1.
+# a second factor the runner cannot give. The submit itself is a STAGED publish: the versions
+# go live only with the owner's approval on npmjs (two-factor), so the last step of a release
+# stays a human one. The registry decision is the user's (2026-09-28, with making the
+# repository public) and is recorded as ADR-0001 Amendment 1.
 #
 # - **The streamer image** → GHCR, `ghcr.io/<owner>/appricot/streamer:<version>`, built from
 #   docker/streamer/Dockerfile. amd64 only (that file says why). It is verified before it is
 #   pushed: the tag must equal the version in the manifests, and the built binary's own version
 #   line must equal the tag.
 # - **The two packages** → built inside the dev image by `just pack` (the same image and the same
-#   recipe a developer runs), published to npmjs.org as `@app-ricot/client` and
-#   `@app-ricot/react` with `--access public`, and attached to the GitHub Release for the tag as
-#   the registry-free fallback. GitHub's npm registry (`npm.pkg.github.com`) is deliberately not
-#   the transport: it stores a package under the account its scope names, and it asks every
-#   installer for a token even for public packages **(unverified)** — docs/development.md §13 has
-#   the whole reasoning.
+#   recipe a developer runs), staged on npmjs.org for the owner's approval (`--access public`),
+#   and attached to the GitHub Release for the tag as the registry-free fallback. GitHub's npm
+#   registry (`npm.pkg.github.com`) is deliberately not the transport: it stores a package under
+#   the account its scope names, and it asks every installer for a token even for public
+#   packages **(unverified)** — docs/development.md §13 has the whole reasoning.
 #
 # What this workflow does NOT do:
 #
@@ -35,8 +36,9 @@
 #   that disagrees with the tree. Add `docker compose run --rm dev just check` to the release job
 #   if a release should prove the whole gate itself.
 # - It does not create a repository, a secret, a schedule or a cron; nothing here runs on a
-#   timer. The one thing outside this repository the publish needs — the trusted-publisher
-#   link on each package's npm settings — is the owner's to place.
+#   timer. The one thing outside this repository the submit needs — the trusted-publisher
+#   link on each package's npm settings — is the owner's to place, and the approval that puts
+#   a staged version live is the owner's too, with two-factor authentication.
 
 name: release
 
@@ -213,25 +215,29 @@ jobs:
         with:
           node-version: 24
 
-      - name: Publish the two packages to npmjs.org
-        # No token: trusted publishing. Each package's npm settings name this repository and
-        # this workflow as its trusted publisher, and a current npm proves the run's OIDC
-        # identity to the registry — npm's 2026 token policy left no stored credential that
-        # could publish. `--access public` is explicit because a scoped package may otherwise
-        # default to restricted. A re-run of a failed job publishes a version that is already
-        # on the registry; that one outcome is tolerated exactly like the release fallback
-        # below — `npm view` proves the version is there, and any other failure fails the job.
+      - name: Stage the two packages on npmjs.org
+        # Staged publishing (docs.npmjs.com/staged-publishing): the run's OIDC identity
+        # submits each version for review — no token stored anywhere, and staging itself
+        # needs no second factor — and the owner approves both on npmjs (Staged Packages, or
+        # `npm stage approve`) with theirs before anything goes live: the last step of a
+        # release is a human one. A re-run of a failed job meets the version already staged,
+        # or approved and live; both are tolerated exactly like the release fallback below.
         run: |
           set -euo pipefail
           for package in client react; do
             tarball="artifacts/release/app-ricot-${package}-${VERSION}.tgz"
             test -f "${tarball}" || { echo "missing ${tarball}" >&2; exit 1; }
-            if ! npm publish --access public "${tarball}"; then
-              npm view "@app-ricot/${package}@${VERSION}" > /dev/null 2>&1 || {
-                echo "publishing @app-ricot/${package}@${VERSION} failed" >&2
-                exit 1
-              }
-              echo "@app-ricot/${package}@${VERSION} is already on the registry; keeping it"
+            if ! npm stage publish --access public "${tarball}"; then
+              if npm view "@app-ricot/${package}@${VERSION}" > /dev/null 2>&1; then
+                echo "@app-ricot/${package}@${VERSION} is already live; keeping it"
+                continue
+              fi
+              if npm stage list "@app-ricot/${package}" 2>/dev/null | grep -q "${VERSION}"; then
+                echo "@app-ricot/${package}@${VERSION} is already staged; keeping it"
+                continue
+              fi
+              echo "staging @app-ricot/${package}@${VERSION} failed" >&2
+              exit 1
             fi
           done
 
@@ -268,7 +274,8 @@ jobs:
             echo
             echo "## The npm packages"
             echo
-            echo "On npmjs.org, under the \`app-ricot\` organization's scope:"
+            echo "On npmjs.org, under the \`app-ricot\` organization's scope — staged by the"
+            echo "release run, and live with the owner's approval (Staged Packages):"
             echo
             echo '```sh'
             echo "pnpm add @app-ricot/client@${VERSION} @app-ricot/react@${VERSION}"

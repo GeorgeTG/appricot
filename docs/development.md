@@ -378,16 +378,17 @@ publishing, which is the owner's act.
 No stored credential is involved, in this repository or anywhere else. npm's 2026 token policy
 left no token a workflow could publish with — new classic tokens are no longer issued, and a
 granular token with write access is bound to a second factor the runner cannot give; the
-registry's own refusal of the first tokened attempt said exactly that ([staged
-publishing](https://docs.npmjs.com/staged-publishing) is the registry's alternative flow,
-checked 2026-09-29; the timeline behind it is the registry's announcement of 2025-11
-**(unverified)**). The packages therefore publish by **trusted publishing**: each package's
-npm settings name this repository and the release workflow as its trusted publisher, and the
-job's OIDC identity (`id-token: write`) is the credential. The first version of each package
-was published by the owner by hand, with two-factor authentication — the publisher link is
-placed on the package's own settings — and every later version publishes from the workflow
-alone. The tarballs stay attached to each release as the fallback that needs no registry and
-no identity.
+registry's own refusal of the first tokened attempt said exactly that (the timeline behind it
+is the registry's announcement of 2025-11 **(unverified)**). The workflow therefore submits
+by **trusted publishing**: each package's npm settings name this repository and the release
+workflow as its trusted publisher, the job's OIDC identity (`id-token: write`) is the
+credential, and no npm token is stored anywhere. The submit is **staged** ([staged
+publishing](https://docs.npmjs.com/staged-publishing), checked 2026-09-29; npm 11.15+,
+which the release job's Node 24 step brings): the version sits in review until the owner
+approves it on npmjs with two-factor authentication — the last step of a release stays a
+human one, like the tag itself. The first version of each package (0.1.0) was the owner's
+hand publish; the tarballs stay attached to each release as the fallback that needs no
+registry, no identity and no approval.
 
 crates.io stays untaken for the Rust crates, exactly as before
 ([Cargo.toml](../Cargo.toml), `publish = false`).

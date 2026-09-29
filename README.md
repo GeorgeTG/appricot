@@ -64,7 +64,8 @@ client built on Qt6/xcb.
 A host application does not vendor this source ([ADR-0001](docs/adr/0001-separate-repository.md)).
 It consumes two released artefacts, both built and published by one `v*` tag
 ([`.github/workflows/release.yml`](.github/workflows/release.yml), which uses the runner's own
-token — this repository holds no publishing secret). **0.1.0** is the first version;
+token — this repository holds no publishing secret; the npm versions are staged by the tag and
+go live with the owner's approval). **0.2.2** is the current version;
 [where it stands](#where-it-stands) says what that number does and does not claim.
 
 **The streamer image**, from GHCR, linux/amd64. `<owner>` is the GitHub account that owns this
@@ -72,20 +73,20 @@ repository, lower-cased; the workflow derives it from `github.repository_owner`,
 cannot drift from the push:
 
 ```sh
-docker pull ghcr.io/<owner>/appricot/streamer:0.1.0
-docker run --rm ghcr.io/<owner>/appricot/streamer:0.1.0   # the version line, exit 0
+docker pull ghcr.io/<owner>/appricot/streamer:0.2.2
+docker run --rm ghcr.io/<owner>/appricot/streamer:0.2.2   # the version line, exit 0
 ```
 
 A session image takes it as a layer, or takes the binary out of it, and brings its own display
 server, application and per-session token:
 
 ```dockerfile
-FROM ghcr.io/<owner>/appricot/streamer:0.1.0
+FROM ghcr.io/<owner>/appricot/streamer:0.2.2
 CMD ["serve"]        # this image sets no CMD, so a bare run is a version probe
 ```
 
 ```dockerfile
-COPY --from=ghcr.io/<owner>/appricot/streamer:0.1.0 \
+COPY --from=ghcr.io/<owner>/appricot/streamer:0.2.2 \
      /usr/local/bin/appricot-streamer /usr/local/bin/
 ```
 
@@ -94,7 +95,7 @@ published to npmjs.org at the tag, under the `app-ricot` organization's scope
 ([ADR-0001 Amendment 1](docs/adr/0001-separate-repository.md)), so a host installs a version:
 
 ```sh
-pnpm add @app-ricot/client@0.1.0 @app-ricot/react@0.1.0
+pnpm add @app-ricot/client@0.2.2 @app-ricot/react@0.2.2
 ```
 
 The registry resolves the pair — `@app-ricot/react` names `@app-ricot/client` at the same
@@ -102,8 +103,8 @@ version — so one add installs both. The same two tarballs are attached to that
 as a registry-free fallback:
 
 ```sh
-pnpm add "https://github.com/<owner>/appricot/releases/download/v0.1.0/app-ricot-client-0.1.0.tgz"
-pnpm add "https://github.com/<owner>/appricot/releases/download/v0.1.0/app-ricot-react-0.1.0.tgz"
+pnpm add "https://github.com/<owner>/appricot/releases/download/v0.2.2/app-ricot-client-0.2.2.tgz"
+pnpm add "https://github.com/<owner>/appricot/releases/download/v0.2.2/app-ricot-react-0.2.2.tgz"
 ```
 
 A tarball install resolves no registry, so install both tarballs at the same version. Why npmjs.org

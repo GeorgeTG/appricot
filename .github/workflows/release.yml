@@ -205,6 +205,14 @@ jobs:
         # which the bind mount puts back on the runner.
         run: docker compose run --rm dev just pack
 
+      - name: Node 24, for an npm that can prove the run's identity
+        # Trusted publishing needs npm 11.5 or newer; a bare runner's default Node is older
+        # and its npm reports ENEEDAUTH without ever attempting the OIDC exchange. No
+        # registry-url here: this step must not write any credential into any .npmrc.
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
       - name: Publish the two packages to npmjs.org
         # No token: trusted publishing. Each package's npm settings name this repository and
         # this workflow as its trusted publisher, and a current npm proves the run's OIDC

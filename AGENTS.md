@@ -247,9 +247,12 @@ Plain, short sentences. English everywhere — code, comments, commit messages, 
 - When asked to commit: one logical change per commit, present tense, English, and commit by
   pathspec rather than `git add -A`.
 - **A release is a tag, and the tag is the user's to push.** `git tag v<version> && git push
-  origin v<version>` fires `.github/workflows/release.yml`, which publishes the streamer image and
-  the two packages. An agent never tags, never pushes and never publishes: the tag is that
-  workflow's trigger, so only the user pulls it ([development.md §13](docs/development.md#13-releases)).
+  origin v<version>` fires `.github/workflows/release.yml`, which publishes the streamer image
+  and stages the two packages on npmjs.org; they go live only with the user's approval there
+  (Staged Packages, two-factor). An agent never tags, never pushes and never publishes, and it
+  cannot stand in for the approval either: the tag is that workflow's trigger and the approval
+  is the owner's, so both steps are the user's. The whole procedure, step by step, is
+  [development.md §13](docs/development.md#13-releases).
 
 Documents live under [docs/](docs/); decisions are ADRs under [docs/adr/](docs/adr/README.md), and
 an Accepted ADR outranks every other document.

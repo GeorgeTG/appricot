@@ -329,9 +329,10 @@ application runs in a scratch directory of its own, so nothing it writes lands i
 A release is a tag, and the tag is the owner's to push:
 `git tag v0.1.0 && git push origin v0.1.0`.
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) then does the whole of it:
-the image and the release with the runner's own `GITHUB_TOKEN`, and the npm publish with the
-run's own identity — trusted publishing, no token at all (below). An agent never tags, pushes
-or publishes: a tag fires this workflow, so it is the owner's act and nobody else's.
+the image and the release with the runner's own `GITHUB_TOKEN`, and the npm submit with the
+run's own identity — trusted publishing, staged for the owner's approval, and no token anywhere
+(below). An agent never tags, pushes or publishes: a tag fires this workflow, so it is the
+owner's act and nobody else's. [The procedure](#the-release-procedure) is written out below.
 
 Two artefacts, and they are the two [ADR-0001](adr/0001-separate-repository.md) names for a host:
 
@@ -346,6 +347,56 @@ Two artefacts, and they are the two [ADR-0001](adr/0001-separate-repository.md) 
   dev image, published to npmjs.org at the tag, and attached to that version's GitHub Release as
   tarballs — the registry-free fallback. A host installs them from the registry, or from that
   version's URL ([README](../README.md#consuming-appricot-the-released-artefacts)).
+
+### The release procedure
+
+As it has run, unchanged, from 0.2.2 through 0.2.3. What the workflow does, in order, and what
+each step proves.
+
+**Before the tag.** The four manifests agree on one version ([below](#the-version-rule)),
+`just check` is green on the commit, and so is that commit's CI on `main` — the workflow does not
+re-run the gate, a decision recorded in
+[release.yml](../.github/workflows/release.yml). The tag names a commit already on `main`.
+
+**The tag** — the owner's act, never an agent's:
+
+```sh
+git tag v<version> && git push origin v<version>
+```
+
+**The workflow.** Two jobs; the release job waits for the image job.
+
+1. *Agreement.* The tag minus `v`, `[workspace.package]`'s version, and the three
+   `packages/*/package.json` versions are all the same string, or nothing builds.
+2. *The image.* Built from [docker/streamer/Dockerfile](../docker/streamer/Dockerfile), and
+   proven before any push: the binary's own version line equals the tag, and `ldd` inside the
+   image resolves nothing missing. It is then pushed twice — as `:<version>`, and as `:latest`.
+   The registry tag carries no `v`: the git tag and the npm versions are `v0.2.3`-shaped, the
+   image tag is `0.2.3`. A version containing a hyphen (a prerelease) moves `latest` nowhere.
+3. *The packages.* Packed by `just pack` inside the dev image — built on the runner by
+   `docker compose build dev`, the same recipe a developer runs — then staged on npmjs.org from
+   the tarballs with `npm stage publish --access public`, under Node 24. No credential exists
+   anywhere: the run's OIDC identity is the whole of it, and staging itself needs no second
+   factor.
+4. *The GitHub Release.* Created for the tag, with both tarballs and their SHA-256, and notes
+   naming the image reference and digest. A re-run that finds the release already there
+   replaces the notes and clobbers the assets rather than failing — as the stage step also
+   tolerates meeting its version already staged, or already approved and live.
+
+**The owner's approval — the last step, and a human one.** Until it comes, the npm versions are
+staged, not live: their contents are not publicly available, and `npm view
+@app-ricot/client@<version>` answered `E404` while a version sat staged (observed on the 0.2.2
+release). Approve each package once, on npmjs.org under the organization's Staged Packages tab,
+or with `npm stage approve <stage-id>`; npm asks for the second factor either way ([staged
+publishing](https://docs.npmjs.com/staged-publishing), checked 2026-09-30). After it, the
+versions resolve and install.
+
+**When a step fails.** Re-run the failed job: every step is written to tolerate meeting its own
+output from an earlier attempt. The failures seen so far were all on the 0.2.0/0.2.1 runs — the
+runner's default Node was too old for the OIDC exchange (`ENEEDAUTH`; the job now pins Node 24);
+the manifests lacked a `repository.url` naming this repository, which the registry's provenance
+check refused (`E422`; the manifests carry it); and one transient `E503` from the registry on
+the stage POST, where the re-run alone was the remedy.
 
 ### The version rule
 
@@ -383,8 +434,9 @@ is the registry's announcement of 2025-11 **(unverified)**). The workflow theref
 by **trusted publishing**: each package's npm settings name this repository and the release
 workflow as its trusted publisher, the job's OIDC identity (`id-token: write`) is the
 credential, and no npm token is stored anywhere. The submit is **staged** ([staged
-publishing](https://docs.npmjs.com/staged-publishing), checked 2026-09-29; npm 11.15+,
-which the release job's Node 24 step brings): the version sits in review until the owner
+publishing](https://docs.npmjs.com/staged-publishing), checked 2026-09-30; it needs npm
+11.15.0+ and Node 22.14.0+, and the release job's Node 24 step brings both): the version sits
+in review until the owner
 approves it on npmjs with two-factor authentication — the last step of a release stays a
 human one, like the tag itself. The first version of each package (0.1.0) was the owner's
 hand publish; the tarballs stay attached to each release as the fallback that needs no

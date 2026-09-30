@@ -98,7 +98,7 @@ futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # tokio-tungstenite: a WebSocket CLIENT for the streamer's integration tests.
-tokio-tungstenite = "0.27"
+tokio-tungstenite = "0.29"
 
 # ---------------------------------------------------------------------------
 # Lints. `just clippy` runs `cargo clippy --workspace --all-targets -- -D warnings`, so every

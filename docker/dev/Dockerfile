@@ -33,7 +33,7 @@
 # `FROM --platform=` would do it here too, but BuildKit warns on it in every build:
 # FromPlatformFlagConstDisallowed, measured 2026-09-23.)
 
-FROM rust:1.94.1-slim-bookworm@sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2
+FROM rust:1.98.1-slim-bookworm@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730
 
 # The uid/gid the container runs as. 1000 matches Docker Desktop's bind-mount view on Windows.
 # CI passes its runner's uid (compose.yml: APPRICOT_UID/APPRICOT_GID) so the checkout stays

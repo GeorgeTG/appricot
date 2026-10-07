@@ -31,8 +31,8 @@
   },
   "devDependencies": {
     "@types/node": "22.20.4",
-    "eslint": "10.11.0",
-    "jsdom": "30.1.0",
+    "eslint": "10.12.0",
+    "jsdom": "30.1.2",
     "typescript": "5.9.3",
     "vitest": "4.1.11"
   }
